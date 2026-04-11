@@ -20,9 +20,15 @@ The contract is:
 
 SCHEMA_VERSION = 1
 
-# Required fields in canonical order. This is a tuple (not a set) because
-# the on-disk YAML must serialize in this order — it's part of the contract.
-REQUIRED_FIELDS = (
+# Canonical serialization order for every field — required AND optional, in the
+# exact order they must appear on disk. This is the single source of truth for
+# field ordering. REQUIRED_FIELDS and OPTIONAL_FIELDS are derived from this
+# so all three stay consistent.
+#
+# Obsidian convention: cssclasses goes last (it's a rendering directive, not
+# data). Optional data fields like `attachments` slot in before it, alongside
+# the other data fields they relate to (sources_read, read_bytes).
+FIELD_ORDER = (
     "schema_version",
     "plugin",
     "project",
@@ -35,10 +41,15 @@ REQUIRED_FIELDS = (
     "sources_read",
     "read_bytes",
     "content_confidence",
-    "cssclasses",
+    "attachments",       # optional
+    "cssclasses",        # last — Obsidian rendering directive
 )
 
-OPTIONAL_FIELDS = ("attachments",)
+# Which fields in FIELD_ORDER are optional. Everything else is required.
+_OPTIONAL_SET = frozenset({"attachments"})
+
+REQUIRED_FIELDS = tuple(f for f in FIELD_ORDER if f not in _OPTIONAL_SET)
+OPTIONAL_FIELDS = tuple(f for f in FIELD_ORDER if f in _OPTIONAL_SET)
 
 # Python type that each field's value must be an instance of.
 # YAML-to-Python: int stays int, str stays str, list stays list.
