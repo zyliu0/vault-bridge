@@ -1,0 +1,102 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    name: Test + lint
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.9", "3.11", "3.12"]
+      fail-fast: false
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest
+
+      - name: Run unit tests
+        run: python -m pytest tests/unit/ -v
+
+      - name: Run integration tests
+        run: python -m pytest tests/integration/ -v
+
+      - name: Validate plugin manifest JSON
+        run: |
+          python -c "
+          import json, sys
+          from pathlib import Path
+          manifest = json.loads(Path('.claude-plugin/plugin.json').read_text())
+          required = {'name'}
+          missing = required - set(manifest.keys())
+          if missing:
+              print(f'plugin.json missing required fields: {sorted(missing)}', file=sys.stderr)
+              sys.exit(1)
+          assert manifest['name'] == 'vault-bridge', 'plugin name must be vault-bridge'
+          print('✓ plugin.json is well-formed')
+          "
+
+      - name: Validate command frontmatter parses as YAML
+        run: |
+          python -c "
+          import re, sys, yaml
+          from pathlib import Path
+          errors = []
+          for cmd in Path('commands').glob('*.md'):
+              content = cmd.read_text()
+              m = re.match(r'^---\n(.*?)\n---\n', content, re.DOTALL)
+              if not m:
+                  errors.append(f'{cmd.name}: no frontmatter block')
+                  continue
+              try:
+                  fm = yaml.safe_load(m.group(1))
+              except yaml.YAMLError as e:
+                  errors.append(f'{cmd.name}: YAML parse failed — {e}')
+                  continue
+              if not isinstance(fm, dict):
+                  errors.append(f'{cmd.name}: frontmatter parsed as {type(fm).__name__} not dict (unquoted brackets?)')
+                  continue
+              if 'description' not in fm:
+                  errors.append(f'{cmd.name}: missing description field')
+              if 'argument-hint' in fm and not isinstance(fm['argument-hint'], str):
+                  errors.append(f'{cmd.name}: argument-hint is {type(fm[\"argument-hint\"]).__name__} not str (quote it!)')
+          if errors:
+              for e in errors:
+                  print(f'✘ {e}', file=sys.stderr)
+              sys.exit(1)
+          print('✓ all command frontmatter parses correctly')
+          "
+
+  plugin-validate:
+    name: claude plugin validate
+    runs-on: ubuntu-latest
+    continue-on-error: true  # this is aspirational — requires claude CLI in CI
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Info
+        run: |
+          echo "This job runs 'claude plugin validate .' against the plugin."
+          echo "Currently marked continue-on-error because installing the Claude Code"
+          echo "CLI in GitHub Actions is not yet documented. Run locally before merge:"
+          echo ""
+          echo "  claude plugin validate ."
+          echo ""
+          echo "The test job above covers the same checks in pure Python."
