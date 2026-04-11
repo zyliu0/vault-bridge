@@ -1,7 +1,7 @@
 ---
 description: Autonomous delta scan — detect new/modified files and produce vault notes
 allowed-tools: Read, Write, Edit, Bash, Glob, Grep
-argument-hint: [--dry-run] [--since YYYY-MM-DD]
+argument-hint: "[--dry-run] [--since YYYY-MM-DD]"
 ---
 
 You are running an autonomous delta scan for vault-bridge. Unlike retro-scan

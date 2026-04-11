@@ -1,7 +1,7 @@
 ---
 description: Audit the vault for issues introduced by scanning
 allowed-tools: Read, Glob, Grep, Bash
-argument-hint: [project-path] [--all]
+argument-hint: "[project-path] [--all]"
 ---
 
 You are running a vault health audit. This is a READ-ONLY command — it

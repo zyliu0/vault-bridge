@@ -221,3 +221,46 @@ def test_plugin_json_exists_and_has_name():
         pytest.skip(".claude-plugin/plugin.json not yet created")
     manifest = json.loads(manifest_path.read_text())
     assert manifest.get("name") == "vault-bridge"
+
+
+def test_every_command_frontmatter_parses_as_yaml():
+    """Regression test for the unquoted argument-hint bug.
+
+    `claude plugin validate` caught this initially: argument-hint fields that
+    contain unquoted square brackets get YAML-parsed as flow sequences, which
+    silently drops the entire frontmatter block at plugin load time. The fix
+    is to quote the argument-hint value. This test prevents regression.
+    """
+    import re
+    import yaml
+    commands_dir = REPO_ROOT / "commands"
+    if not commands_dir.exists():
+        import pytest
+        pytest.skip("commands/ dir not yet created")
+
+    for cmd_path in commands_dir.glob("*.md"):
+        content = cmd_path.read_text()
+        m = re.match(r"^---\n(.*?)\n---\n", content, re.DOTALL)
+        assert m, f"{cmd_path.name} has no frontmatter block"
+        try:
+            fm = yaml.safe_load(m.group(1))
+        except yaml.YAMLError as e:
+            raise AssertionError(
+                f"{cmd_path.name} frontmatter YAML fails to parse: {e}. "
+                f"Quote any field value that contains square brackets."
+            )
+        assert isinstance(fm, dict), (
+            f"{cmd_path.name} frontmatter parsed as {type(fm).__name__}, "
+            f"not a dict. Likely an argument-hint with unquoted brackets."
+        )
+        # Every command must have a description
+        assert "description" in fm, (
+            f"{cmd_path.name} frontmatter missing 'description' field"
+        )
+        # argument-hint, if present, must be a string (not a list — that's
+        # the canary for the unquoted-brackets bug)
+        if "argument-hint" in fm:
+            assert isinstance(fm["argument-hint"], str), (
+                f"{cmd_path.name} argument-hint is {type(fm['argument-hint']).__name__}, "
+                f"not str. Quote it with double quotes."
+            )

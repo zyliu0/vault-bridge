@@ -1,7 +1,7 @@
 ---
 description: Full retroactive scan of an archive folder into vault notes
 allowed-tools: Read, Write, Edit, Bash, Glob, Grep
-argument-hint: [folder-path] [--dry-run] [--date-from YYYY-MM-DD] [--date-to YYYY-MM-DD]
+argument-hint: "[folder-path] [--dry-run] [--date-from YYYY-MM-DD] [--date-to YYYY-MM-DD]"
 ---
 
 You are running a retroactive archive scan for vault-bridge. Your job is to
