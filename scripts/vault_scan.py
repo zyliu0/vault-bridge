@@ -31,19 +31,7 @@ from typing import List, Optional, Tuple
 # State directory
 # ---------------------------------------------------------------------------
 
-def _state_dir() -> Path:
-    """Return the vault-bridge state directory. Creates it if missing.
-
-    Honors VAULT_BRIDGE_STATE_DIR for test isolation, otherwise defaults to
-    ~/.vault-bridge.
-    """
-    override = os.environ.get("VAULT_BRIDGE_STATE_DIR")
-    if override:
-        path = Path(override)
-    else:
-        path = Path.home() / ".vault-bridge"
-    path.mkdir(parents=True, exist_ok=True)
-    return path
+from state import state_dir as _state_dir  # noqa: E402 — shared impl
 
 
 def _lock_path() -> Path:
@@ -92,28 +80,56 @@ def _is_pid_alive(pid: int) -> bool:
 def acquire_lock() -> Path:
     """Acquire the scan lock. Returns the lockfile path.
 
+    Uses atomic exclusive-create (O_CREAT|O_EXCL via open mode 'x') to avoid
+    the TOCTOU race between checking and writing the lock. If the lock
+    already exists, reads the PID inside to decide if it's stale.
+
     Raises LockHeldError if another live process already holds the lock.
-    If the existing lockfile contains a dead PID or garbage, treats it as
-    stale and takes over.
+    If the existing lockfile contains a dead PID or garbage, removes it
+    and retries the exclusive create.
     """
     lock = _lock_path()
-    if lock.exists():
-        try:
-            content = lock.read_text().strip()
-            existing_pid = int(content)
-        except (ValueError, OSError):
-            # Corrupt or unreadable lockfile — treat as stale
-            existing_pid = None
+    lock.parent.mkdir(parents=True, exist_ok=True)
 
-        if existing_pid is not None and _is_pid_alive(existing_pid):
-            raise LockHeldError(
-                f"vault-bridge scan already running (PID {existing_pid}). "
-                f"Wait for it to finish or remove {lock} if you're sure it's dead."
-            )
-        # Stale lock — we'll overwrite below.
+    try:
+        # Atomic exclusive create — fails if the file already exists
+        fd = os.open(str(lock), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+        os.write(fd, f"{os.getpid()}\n".encode())
+        os.close(fd)
+        return lock
+    except FileExistsError:
+        pass
 
-    lock.write_text(f"{os.getpid()}\n")
-    return lock
+    # Lock file exists — check if the holder is alive
+    try:
+        content = lock.read_text().strip()
+        existing_pid = int(content)
+    except (ValueError, OSError):
+        existing_pid = None
+
+    if existing_pid is not None and _is_pid_alive(existing_pid):
+        raise LockHeldError(
+            f"vault-bridge scan already running (PID {existing_pid}). "
+            f"Wait for it to finish or remove {lock} if you're sure it's dead."
+        )
+
+    # Stale or corrupt lock — remove and retry with exclusive create
+    try:
+        lock.unlink()
+    except FileNotFoundError:
+        pass
+
+    try:
+        fd = os.open(str(lock), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+        os.write(fd, f"{os.getpid()}\n".encode())
+        os.close(fd)
+        return lock
+    except FileExistsError:
+        # Another process took the lock between our unlink and our create
+        raise LockHeldError(
+            "vault-bridge scan lock was taken by another process during "
+            "stale-lock recovery. Retry in a moment."
+        )
 
 
 def release_lock() -> None:
@@ -145,15 +161,29 @@ def load_index() -> Tuple[dict, dict]:
     if not index_file.exists():
         return index_by_path, index_by_fp
 
-    for line in index_file.read_text().splitlines():
+    skipped = 0
+    for line_num, line in enumerate(index_file.read_text().splitlines(), 1):
         if not line.strip():
             continue
         parts = line.split("\t")
         if len(parts) != 3:
-            continue  # skip malformed lines silently (or surface a warning)
+            skipped += 1
+            import sys
+            sys.stderr.write(
+                f"vault-bridge: index.tsv line {line_num}: expected 3 tab-separated "
+                f"fields, got {len(parts)} — skipping\n"
+            )
+            continue
         source_path, fingerprint, note_path = parts
         index_by_path[source_path] = (fingerprint, note_path)
         index_by_fp[fingerprint] = (source_path, note_path)
+
+    if skipped > 0:
+        import sys
+        sys.stderr.write(
+            f"vault-bridge: {skipped} malformed line(s) in index.tsv — "
+            f"these events may be re-processed as new on the next scan\n"
+        )
 
     return index_by_path, index_by_fp
 

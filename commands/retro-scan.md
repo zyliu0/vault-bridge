@@ -263,13 +263,13 @@ This is the backstop that makes Path 1 safe. The validator is not optional.
 
 ### 6k. Append to the scan index
 
-Run:
+Run (pass values as env vars to avoid shell injection from paths with quotes):
 ```
-python3 -c "
-import sys
+VB_SRC="$SOURCE_PATH" VB_FP="$FINGERPRINT" VB_NOTE="$NOTE_PATH" python3 -c "
+import os, sys
 sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
 import vault_scan
-vault_scan.append_index('$SOURCE_PATH', '$FINGERPRINT', '$NOTE_PATH')
+vault_scan.append_index(os.environ['VB_SRC'], os.environ['VB_FP'], os.environ['VB_NOTE'])
 "
 ```
 

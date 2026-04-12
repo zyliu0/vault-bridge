@@ -23,11 +23,7 @@ VALID_PRESETS = {"architecture", "photographer", "writer", "custom"}
 VALID_FS_TYPES = {"nas-mcp", "local-path", "external-mount"}
 
 
-def _state_dir() -> Path:
-    override = os.environ.get("VAULT_BRIDGE_STATE_DIR")
-    if override:
-        return Path(override)
-    return Path.home() / ".vault-bridge"
+from state import state_dir as _state_dir  # noqa: E402 — shared impl
 
 
 def _config_path() -> Path:

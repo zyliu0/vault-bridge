@@ -82,10 +82,12 @@ def compress_image(
         raise CompressError(f"Could not open {src_path} as an image: {e}")
 
     # Apply EXIF orientation transform BEFORE we strip metadata.
+    # Narrow exception handling: AttributeError (no EXIF), ValueError/struct.error
+    # (corrupt EXIF data) are the expected failure modes from Pillow internals.
+    import struct
     try:
         img = ImageOps.exif_transpose(img)
-    except Exception:
-        # Some images have no EXIF or corrupt EXIF — that's fine, skip
+    except (AttributeError, ValueError, struct.error):
         pass
 
     # Convert color space to RGB (handles RGBA, CMYK, P, LA, 1, etc.)

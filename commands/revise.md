@@ -215,16 +215,15 @@ For each successfully upgraded note, append to the scan index so future
 retro-scans see it as "already scanned":
 
 ```
-python3 -c "
-import sys
+VB_SRC="$SOURCE_PATH" VB_NOTE="$NOTE_PATH" python3 -c "
+import os, sys
 sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
 import vault_scan, fingerprint
 from pathlib import Path
 
-source = 'SOURCE_PATH'
-note = 'NOTE_PATH'
+source = os.environ['VB_SRC']
+note = os.environ['VB_NOTE']
 
-# Compute fingerprint if source exists
 fp = ''
 if source and Path(source).exists():
     if Path(source).is_dir():
@@ -232,7 +231,7 @@ if source and Path(source).exists():
     else:
         fp = fingerprint.fingerprint_file(Path(source))
 elif source:
-    fp = 'unknown'  # source path set but file not accessible locally
+    fp = 'unknown'
 
 vault_scan.append_index(source, fp, note)
 "

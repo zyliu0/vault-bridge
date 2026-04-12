@@ -118,7 +118,9 @@ def upgrade_frontmatter(
     existing_event_date = existing_fm.get("event_date")
     existing_event_date_source = existing_fm.get("event_date_source")
 
-    if existing_event_date and isinstance(existing_event_date, str) and len(existing_event_date) == 10:
+    if (existing_event_date
+            and isinstance(existing_event_date, str)
+            and re.match(r"^\d{4}-\d{2}-\d{2}$", existing_event_date)):
         # Preserve a valid-looking existing event_date
         fm["event_date"] = existing_event_date
         if existing_event_date_source in ENUMS["event_date_source"]:

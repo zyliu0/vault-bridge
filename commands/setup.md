@@ -57,18 +57,18 @@ Map: A→architecture, B→photographer, C→writer, D→custom.
 
 ## Step 4 — save the config
 
-Run:
+Run (pass values as env vars to avoid shell injection from paths with quotes):
 
 ```
-python3 -c "
-import sys
+VB_ARCHIVE_ROOT="$ARCHIVE_ROOT" VB_PRESET="$PRESET" VB_FS_TYPE="$FS_TYPE" VB_VAULT_ROOT="$VAULT_ROOT" python3 -c "
+import os, sys
 sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
 import setup_config
 setup_config.save_config(
-    archive_root='$ARCHIVE_ROOT',
-    preset='$PRESET',
-    file_system_type='$FS_TYPE',
-    vault_root='$VAULT_ROOT',
+    archive_root=os.environ['VB_ARCHIVE_ROOT'],
+    preset=os.environ['VB_PRESET'],
+    file_system_type=os.environ['VB_FS_TYPE'],
+    vault_root=os.environ['VB_VAULT_ROOT'],
 )
 print('Config saved.')
 "
