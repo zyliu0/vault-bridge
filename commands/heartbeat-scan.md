@@ -6,7 +6,7 @@ argument-hint: "[--dry-run] [--since YYYY-MM-DD]"
 
 You are running an autonomous delta scan for vault-bridge. Unlike retro-scan
 (which processes a whole folder), this scan only processes what has CHANGED
-since the last heartbeat. Triggered by cron or `gstack /schedule`, runs
+since the last heartbeat. Triggered by cron, runs
 silently, writes new vault notes for any new or modified files.
 
 ## Step 1 — load config
@@ -142,13 +142,31 @@ For each delta file, follow the same per-event pipeline as retro-scan:
 The file_type enum applies as in retro-scan: folder, pdf, docx, pptx, xlsx,
 jpg, png, psd, ai, dxf, dwg, rvt, 3dm, mov, mp4, image-folder.
 
+## Highlights, callouts, and canvas — same rules as retro-scan
+
+**Highlights** (`==text==`) — mark key facts (dates, amounts, decisions,
+named people) that you literally read in the source. Template A only.
+
+**Callouts** — use sparingly (0-3 per note):
+- `> [!abstract] Summary` — top of complex notes for a 1-2 sentence summary
+- `> [!quote]` — direct quotes literally found in the document
+- `> [!important]` — critical decisions, deadlines, blockers
+- `> [!warning]` — caveats, risks, or issues from the source
+- `> [!note]` — supplementary background context
+
+**Canvas** — generate a `.canvas` file alongside the note when the event
+involves 3+ parties, multiple steps, or interrelated deliverables. Same
+filename stem as the note. Link from the note body with
+`[[{event_date} {short-topic}.canvas|Event diagram]]`. Max 15 nodes.
+Template B events NEVER get callouts, highlights, or canvases.
+
 ## The fabrication firewall stop-word list
 
 Same as retro-scan — these phrases MUST NOT appear unless literally present
 in content you actually read:
 - "pulled the back wall in"
 - "the team"
-- "Wu said"
+- "[person] said"
 - "the review came back"
 - "half a storey"
 - "40cm"

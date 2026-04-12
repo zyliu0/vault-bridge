@@ -29,21 +29,21 @@ def state_dir(tmp_path, monkeypatch):
 
 def test_save_and_load_roundtrip(state_dir):
     setup_config.save_config(
-        archive_root="/_f-a-n/",
+        archive_root="/archive/",
         preset="architecture",
         file_system_type="nas-mcp",
-        vault_root="/Users/mac/Obsidian",
+        vault_root="/Users/me/Obsidian",
     )
 
     config = setup_config.load_config()
-    assert config["archive_root"] == "/_f-a-n/"
+    assert config["archive_root"] == "/archive/"
     assert config["preset"] == "architecture"
     assert config["file_system_type"] == "nas-mcp"
-    assert config["vault_root"] == "/Users/mac/Obsidian"
+    assert config["vault_root"] == "/Users/me/Obsidian"
 
 
 def test_save_creates_config_json_file(state_dir):
-    path = setup_config.save_config("/_f-a-n/", "architecture", "nas-mcp", "/vault")
+    path = setup_config.save_config("/archive/", "architecture", "nas-mcp", "/vault")
     assert path.exists()
     assert path.name == "config.json"
     data = json.loads(path.read_text())
@@ -58,7 +58,7 @@ def test_load_raises_when_no_config(state_dir):
 
 def test_load_raises_on_missing_fields(state_dir):
     path = state_dir / "config.json"
-    path.write_text(json.dumps({"archive_root": "/_f-a-n/"}) + "\n")
+    path.write_text(json.dumps({"archive_root": "/archive/"}) + "\n")
     with pytest.raises(setup_config.SetupNeeded) as exc_info:
         setup_config.load_config()
     assert "missing" in str(exc_info.value).lower()

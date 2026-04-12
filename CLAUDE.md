@@ -24,7 +24,7 @@ no prose.
 The stop-word list that enforces this:
 - "pulled the back wall in"
 - "the team" (as a collective actor)
-- "Wu said" / "X said" (quotes you didn't literally see quoted)
+- "[person] said" / "X said" (quotes you didn't literally see quoted)
 - "the review came back"
 - "half a storey"
 - "40cm" (or any specific measurement not in the source)
@@ -41,16 +41,16 @@ patterns for their own folder conventions.
 
 ### Preset 1: Architecture / design practice
 
-The preset this plugin was validated against — Chinese/English architecture
-project folders on a NAS, with phase-based organization (SD/DD/CD/CA),
-date-stamped revision folders, meeting memos, rendering archives.
+The preset for architecture/design practices — project folders on a NAS
+with phase-based organization (SD/DD/CD/CA), date-stamped revision folders,
+meeting memos, rendering archives. Supports bilingual folder names.
 
 ```yaml
 version: 1
 
 file_system:
   type: nas-mcp
-  root_path: /_f-a-n/
+  root_path: /archive/
   access_pattern: |
     Use mcp__nas__read_file(path) and mcp__nas__list_files(path) for all
     file reads. Use mcp__nas__get_file_info(path) for DWG/RVT/3DM metadata.
@@ -216,6 +216,27 @@ Where:
 When the event_date is flipped to mtime via the >7-day conflict rule, the
 note filename still uses the mtime date (NOT the original filename prefix).
 The `event_date_source` frontmatter field records which source was used.
+
+## Highlights, callouts, and canvas diagrams
+
+Template A notes use Obsidian-native formatting to surface important info:
+
+**Highlights** (`==text==`) — for key facts literally read from the source:
+dates, amounts, dimensions, named decision-makers, status changes.
+
+**Callouts** — used sparingly (0-3 per note, most notes need 0):
+- `> [!abstract] Summary` — 1-2 sentence executive summary atop complex notes
+- `> [!quote]` — direct quotes literally found in documents
+- `> [!important]` — critical decisions, deadlines, blockers
+- `> [!warning]` — caveats, risks, issues from the source
+- `> [!note]` — supplementary background context
+
+**Canvas diagrams** — generated alongside a note (`.canvas` file, same stem)
+when an event involves 3+ parties, multi-step processes, or interrelated
+deliverables. Uses Obsidian JSON Canvas format. Max 15 nodes. Linked from
+the note body: `[[YYYY-MM-DD topic.canvas|Event diagram]]`.
+
+Template B (metadata-only) events NEVER get highlights, callouts, or canvases.
 
 ## Image handling
 

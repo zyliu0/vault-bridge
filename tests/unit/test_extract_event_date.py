@@ -28,11 +28,11 @@ def test_parse_yymmdd_prefix_returns_iso_date():
 
 
 def test_parse_yymmdd_six_digits_at_start():
-    assert eed.parse_date_prefix("241007 方案模型+.3dm") == "2024-10-07"
+    assert eed.parse_date_prefix("241007 design-model.3dm") == "2024-10-07"
 
 
 def test_parse_yyyy_mm_dd_prefix():
-    assert eed.parse_date_prefix("2024-09-09 shanghai memo.pdf") == "2024-09-09"
+    assert eed.parse_date_prefix("2024-09-09 client memo.pdf") == "2024-09-09"
 
 
 def test_parse_no_prefix_returns_none():
@@ -87,7 +87,7 @@ def test_priority_2_parent_folder_when_no_filename_prefix():
     """Filename has no prefix, parent folder does."""
     result = eed.extract_event_date(
         filename="concept.pdf",
-        parent_folder_name="240909 shanghai",
+        parent_folder_name="240909 client-review",
         mtime_unix=_mtime(2024, 9, 10),
     )
     assert result == ("2024-09-09", "parent-folder-prefix")

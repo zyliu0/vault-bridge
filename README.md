@@ -22,13 +22,14 @@ vault is the only thing that changes.
 
 ```
 your-vault/
-└── 2408 JDZ 景德镇/              ← project folder, created by vault-bridge
+└── 2408 Sample Project/          ← project folder, created by vault-bridge
     ├── _index.md                 ← auto-generated project overview
     ├── _scan-log.md              ← audit trail of what was scanned
     ├── Admin/                    ← contracts, briefs, correspondence
     │   └── 2024-08-09 concept presentation memo.md
     ├── Meetings/                 ← meeting memos detected from filenames
-    │   └── 2024-09-09 shanghai review.md
+    │   ├── 2024-09-09 client review.md
+    │   └── 2024-09-09 client review.canvas  ← diagram for complex events
     ├── SD/                       ← schematic design phase notes
     │   ├── 2024-07-15 site study.md
     │   └── 2024-08-27 booklet update.md
@@ -37,29 +38,41 @@ your-vault/
     ├── Renderings/
     │   └── 2024-12-27 rendering compilation.md
     └── _Attachments/             ← compressed image thumbnails
-        └── 2024-09-09--shanghai-memo--a3f2b9c1.jpg
+        └── 2024-09-09--client-review--a3f2b9c1.jpg
 ```
 
 Each `.md` file is a diary paragraph about what's IN that source file or
 folder, not about what the filename suggests. Content comes from actually
-reading the file, not inference. If the file can't be read (DWG, RVT,
-corrupted), you get a metadata-only note that honestly says so.
+reading the file, not inference. Key facts are `==highlighted==` and
+important findings surface in callouts (`> [!important]`). When an event
+is complex — multiple parties, steps, or interrelated deliverables — a
+`.canvas` diagram is generated alongside the note for spatial navigation.
+If the file can't be read (DWG, RVT, corrupted), you get a metadata-only
+note that honestly says so.
 
-## The three commands
+## Commands
+
+- **`/vault-bridge:setup`** — interactive first-time configuration. Asks for
+  your archive path and preset, saves config to `~/.vault-bridge/config.json`,
+  installs an Obsidian note template.
+
+- **`/vault-bridge:validate-config`** — check your setup before the first scan.
 
 - **`/vault-bridge:retro-scan <folder-path>`** — full retroactive scan of
   one archive folder. Use once per project folder. Idempotent: re-running
   skips already-scanned events and detects folder renames.
 
 - **`/vault-bridge:heartbeat-scan`** — autonomous delta scan. Triggered by
-  cron or `gstack /schedule`. Finds files that appeared or changed since
-  the last run and writes vault notes for the delta. Runs silently.
+  cron. Finds files that appeared or changed since the last run and writes
+  vault notes for the delta. Runs silently.
 
 - **`/vault-bridge:vault-health <project-path>`** — read-only audit. Finds
   orphaned notes, broken source paths, schema drift, and duplicates. Reports
   them in `_vault-health-YYYY-MM-DD.md`. Never modifies notes.
 
-Plus `/vault-bridge:validate-config` to check your setup before the first scan.
+- **`/vault-bridge:revise <project-path>`** — upgrade existing vault notes
+  to the vault-bridge schema. Audits frontmatter, fixes fields, optionally
+  re-reads sources and moves misrouted notes.
 
 ## Prerequisites
 
@@ -113,8 +126,8 @@ route notes into subfolders. See the three preset profiles in the plugin's
 own `CLAUDE.md` (at the plugin root when installed) and copy the one that
 fits your workflow:
 
-- **Architecture practice** — Chinese/English project folders with SD/DD/CD
-  phase organization
+- **Architecture practice** — project folders with SD/DD/CD phase
+  organization, bilingual folder names
 - **Photographer archive** — year-based with `_Selects/`, `_Contact/`,
   edit/raw subfolders
 - **Writer's notebook** — `Drafts/`, `Published/`, `Research/`, `Meetings/`
@@ -166,12 +179,6 @@ manual intervention, set up a cron job:
 0 */4 * * * cd /path/to/vault && claude -p "Run /vault-bridge:heartbeat-scan" >> ~/.vault-bridge/heartbeat.log 2>&1
 ```
 
-Or use `gstack /schedule` if you have it installed:
-
-```
-/schedule "Run /vault-bridge:heartbeat-scan" --every 4h
-```
-
 ## LibreDWG setup for DWG reads on macOS
 
 vault-bridge's DWG support requires LibreDWG (the `dwg2dxf` binary), which
@@ -220,7 +227,7 @@ your archive                         vault-bridge                    your vault
 (NAS / drive / mount)                (Claude Code plugin)            (Obsidian)
 ────────────────                     ────────────                    ──────────
 
-/_f-a-n/project/       ──walks──▶   /retro-scan command   ──writes──▶  project/
+/archive/project/       ──walks──▶   /retro-scan command   ──writes──▶  project/
   240709 photos/                    │                                    SD/
   241015 drawings/                  │  1. parse config                   CD/
   241007 model.3dm                  │  2. acquire lock                   Meetings/
@@ -247,23 +254,31 @@ your archive                         vault-bridge                    your vault
 vault-bridge/
 ├── .claude-plugin/
 │   └── plugin.json              # manifest (name, version, author, license)
-├── commands/                    # four slash commands
-│   ├── validate-config.md
-│   ├── retro-scan.md
-│   ├── heartbeat-scan.md
-│   └── vault-health.md
+├── commands/                    # six slash commands
+│   ├── setup.md                 # interactive first-time configuration
+│   ├── validate-config.md       # check config before first scan
+│   ├── retro-scan.md            # full retroactive archive scan
+│   ├── heartbeat-scan.md        # autonomous delta scan
+│   ├── vault-health.md          # read-only vault audit
+│   └── revise.md                # upgrade old notes to vault-bridge schema
 ├── scripts/                     # helper Python (all test-covered)
 │   ├── schema.py                # single source of truth for frontmatter contract
 │   ├── parse_config.py          # vault CLAUDE.md config parser + validator
+│   ├── setup_config.py          # lightweight config store (~/.vault-bridge/)
+│   ├── state.py                 # shared state directory resolution
 │   ├── validate_frontmatter.py  # write-time schema enforcer (the backstop)
+│   ├── upgrade_frontmatter.py   # old-workflow → vault-bridge schema migration
 │   ├── extract_event_date.py    # filename/mtime date parsing with conflict rule
 │   ├── compress_images.py       # Pillow pipeline with de-dup naming
 │   ├── fingerprint.py           # folder + file fingerprints for rename detection
 │   └── vault_scan.py            # lockfile + index + heartbeat manifests
+├── templates/
+│   └── vault-bridge-note.md     # Obsidian Templater template for manual notes
 ├── tests/
-│   ├── unit/                    # 140+ unit tests (pytest)
+│   ├── unit/                    # 200+ unit tests (pytest)
 │   └── integration/             # end-to-end scan on a fixture project
 ├── CLAUDE.md                    # plugin-scoped instructions + 3 preset profiles
+├── LICENSE                      # MIT
 ├── README.md                    # you are here
 └── requirements.txt             # Pillow, PyYAML, PyPDF2, python-docx, python-pptx
 ```
@@ -274,9 +289,7 @@ MIT — see `LICENSE`.
 
 ## Contributing
 
-This is an early-stage plugin in active development. The design doc at
-`~/.gstack/projects/obsidian/mac-unknown-design-*.md` (if you have gstack)
-is the ground truth for v1 scope and architectural decisions. Most interesting
+This is an early-stage plugin in active development. Most interesting
 contributions right now are:
 
 - Testing on different archive conventions (not just architecture projects)

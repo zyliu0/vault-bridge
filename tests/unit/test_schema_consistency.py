@@ -98,7 +98,7 @@ def test_retro_scan_mentions_stop_word_list():
     if not content:
         import pytest
         pytest.skip("commands/retro-scan.md not yet created")
-    stop_words = ["pulled the back wall in", "Wu said", "review came back"]
+    stop_words = ["pulled the back wall in", "[person] said", "review came back"]
     for sw in stop_words:
         assert sw in content, (
             f"retro-scan.md does not include stop-word '{sw}' — "

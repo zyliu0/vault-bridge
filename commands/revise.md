@@ -9,7 +9,7 @@ vault-bridge frontmatter schema. These notes were written before vault-bridge
 existed and may have missing fields, wrong enum values, no source tracking,
 and potentially fabricated content.
 
-The argument `$1` is a vault project folder path (e.g. `2408 JDZ 景德镇/`).
+The argument `$1` is a vault project folder path (e.g. `2408 Sample Project/`).
 
 Flags:
 - `--dry-run` — Phase 1 only: show the audit report, change nothing
@@ -140,7 +140,7 @@ Per-note details:
   SD/2024-09-09 memo.md
     + schema_version: 1 (was: missing)
     + plugin: vault-bridge (was: missing)
-    + source_path: /_f-a-n/... (inferred from NAS line)
+    + source_path: /archive/... (inferred from NAS line)
     ~ event_date_source: filename-prefix (was: missing)
     ! content unverified
     ⚠ routing mismatch: currently SD/, preset says Meetings/

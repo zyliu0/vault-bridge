@@ -213,7 +213,7 @@ def test_7_corrupt_source_raises_clear_error(tmp_path):
 # ---------------------------------------------------------------------------
 
 def test_8_cjk_stem_normalized(tmp_path):
-    src = make_jpeg(tmp_path, name="240909 西湖乡 memo.jpg")
+    src = make_jpeg(tmp_path, name="240909 district memo.jpg")
     out_dir = tmp_path / "_Attachments"
     result = ci.compress_image(src, out_dir, event_date="2024-09-09")
     # Filename should be ASCII-safe (no CJK) and hyphenated

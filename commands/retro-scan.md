@@ -191,13 +191,95 @@ NAS: `{source_path}`
 No prose. No framing. No "probably". No comparisons across files. No "the team".
 No "the review". Just the literal metadata.
 
-### 6f. The fabrication firewall — stop-word list
+### 6f. Highlights and callouts (Template A only)
+
+When writing Template A note bodies, use Obsidian formatting to surface
+important information so the note is scannable in reading view.
+
+**Highlights** — use `==highlighted text==` for key facts the reader should
+not miss at a glance:
+- Specific dates, deadlines, or milestones: `==due 2024-10-15==`
+- Monetary amounts or dimensions: `==¥1.2M budget==`, `==120m² floor area==`
+- Named people or organizations when they appear as decision-makers
+- Critical decisions or status changes: `==approved==`, `==rejected==`
+
+Only highlight facts you literally read in the source. Never highlight
+inferred or summarized content.
+
+**Callouts** — use these callout types based on the content situation:
+
+- `> [!abstract] Summary` — at the top of complex notes (>150 words) to
+  give a 1-2 sentence executive summary before the full diary paragraph
+- `> [!quote]` — for direct quotes you literally saw in the document.
+  Include the speaker/source if known
+- `> [!important]` — for critical decisions, deadlines, or blockers found
+  in the content
+- `> [!warning]` — for caveats, risks, or issues flagged in the source
+- `> [!note]` — for supplementary context that adds background but is not
+  the main point
+
+Rules:
+- A note may have 0-3 callouts. Most notes need zero. Do not force them.
+- Callouts are ONLY for content you actually read. Never use a callout to
+  speculate about what might be in an unread file.
+- Template B notes NEVER get callouts or highlights.
+
+### 6f-2. Canvas generation for complex events
+
+When an event involves **multiple steps, parties, or relationships** that
+are better understood spatially than linearly, generate a `.canvas` file
+alongside the note. Examples of when to generate a canvas:
+
+- A meeting memo with 3+ parties and action items flowing between them
+- A multi-phase process document (approval chain, review stages)
+- A folder containing interrelated deliverables (drawings → review → revision)
+- Any event where you read 3+ source files that reference each other
+
+**Canvas file naming:** `{event_date} {short-topic}.canvas` — same stem as
+the note, different extension. Place it in the same vault subfolder.
+
+**Canvas structure:**
+- Use MindMap layout for hierarchical content (phases, org charts)
+- Use Freeform layout for network relationships (multi-party, cross-references)
+- Root/center node: the event title or main document name
+- Child nodes: key parties, deliverables, decisions, or phases
+- Edges: labeled with the relationship ("reviewed by", "supersedes", "input to")
+- Color coding: `"1"` red for blockers/issues, `"4"` green for approvals,
+  `"5"` cyan for information, `"6"` purple for decisions
+
+**Embed the canvas link** in the note body after the diary paragraph:
+
+```markdown
+See also: [[{event_date} {short-topic}.canvas|Event diagram]]
+```
+
+**Canvas JSON format** — must be valid Obsidian JSON Canvas:
+```json
+{
+  "nodes": [
+    {"id": "abc123", "type": "text", "text": "Node content", "x": 0, "y": 0, "width": 260, "height": 120, "color": "5"}
+  ],
+  "edges": [
+    {"id": "edge01", "fromNode": "abc123", "toNode": "def456", "label": "reviewed by"}
+  ]
+}
+```
+
+Rules:
+- Only generate a canvas when the complexity genuinely warrants it. Most
+  single-file events do NOT need a canvas.
+- Every node's text must come from content you actually read.
+- Keep canvases to 15 nodes or fewer. If it needs more, the event should
+  probably be split into multiple notes.
+- Template B (metadata-only) events NEVER get a canvas.
+
+### 6g. The fabrication firewall — stop-word list
 
 Before writing ANY sentence in a Template A body, check it against this stop-word list:
 
 - "pulled the back wall in"
 - "the team" (as a collective actor)
-- "Wu said" / "X said" about anything you didn't literally see quoted
+- "[person] said" / "X said" about anything you didn't literally see quoted
 - "the review came back" / "review showed"
 - "half a storey"
 - "40cm" (or any specific measurement you didn't read)
@@ -206,13 +288,13 @@ If the sentence you're about to write contains any of these patterns AND
 your sources_read is empty OR you didn't literally see that detail in the
 extracted text, STOP. Do not write that sentence. Write only what you saw.
 
-### 6g. Compute the note filename
+### 6h. Compute the note filename
 
 Pattern (from config.style.note_filename_pattern, default `YYYY-MM-DD topic.md`):
 `{event_date} {short-topic}.md`. The topic comes from the source name with
 YYMMDD prefix stripped, CJK/accents normalized, spaces preserved.
 
-### 6h. Build the frontmatter
+### 6i. Build the frontmatter
 
 All 13 required fields (+ `attachments` if images embedded), in canonical order:
 
@@ -240,18 +322,21 @@ cssclasses: [img-grid]
 
 If no images embedded, omit the `attachments` field entirely and use `cssclasses: []`.
 
-### 6i. Write the note
+### 6j. Write the note
 
 Use the Write tool to save the note to `{vault-root}/{project}/{subfolder}/{filename}.md`.
 
-### 6j. VALIDATE — the hard stop
+If a canvas was generated (see 6f-2), also write it to
+`{vault-root}/{project}/{subfolder}/{event_date} {short-topic}.canvas`.
+
+### 6k. VALIDATE — the hard stop
 
 Immediately after Write, run:
 ```
 python3 ${CLAUDE_PLUGIN_ROOT}/scripts/validate_frontmatter.py "<note-path>"
 ```
 
-**If exit code is 0:** continue to step 6k.
+**If exit code is 0:** continue to step 6l.
 
 **If exit code is non-zero:** PRINT the stderr verbatim. STOP THE SCAN. Do not
 process any more events. Release the lock. Tell the user the note was written
@@ -261,7 +346,7 @@ event range.
 
 This is the backstop that makes Path 1 safe. The validator is not optional.
 
-### 6k. Append to the scan index
+### 6l. Append to the scan index
 
 Run (pass values as env vars to avoid shell injection from paths with quotes):
 ```
@@ -276,13 +361,15 @@ vault_scan.append_index(os.environ['VB_SRC'], os.environ['VB_FP'], os.environ['V
 (Or equivalent — the point is to update the on-disk index so the next
 event benefits from this one.)
 
-### 6l. Every 10 events — self-check
+### 6m. Every 10 events — self-check
 
 After every 10 events, stop and re-read your last 3 notes. Confirm:
 - Each has non-empty `sources_read` OR uses Template B verbatim
 - Template A notes contain only specifics you can point at in extracted content
 - No note contains invented architectural moves, people, quotes, or decisions
 - Diary voice hasn't collapsed into "YYMMDD topic — " openings
+- Highlights (`==text==`) only mark facts literally present in sources_read
+- Callouts are not overused (most notes should have 0-1)
 
 If any check fails, STOP. Rewrite the offending note before continuing.
 Log the self-check result in the scan summary.

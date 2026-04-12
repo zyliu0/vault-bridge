@@ -42,7 +42,7 @@ version: 1
 
 file_system:
   type: nas-mcp
-  root_path: /_f-a-n/
+  root_path: /archive/
   access_pattern: |
     Use mcp__nas__read_file(path) and mcp__nas__list_files(path).
 
@@ -79,7 +79,7 @@ def test_case_1_valid_config_returns_parsed_json(tmp_path):
     config = json.loads(stdout)
     assert config["version"] == 1
     assert config["file_system"]["type"] == "nas-mcp"
-    assert config["file_system"]["root_path"] == "/_f-a-n/"
+    assert config["file_system"]["root_path"] == "/archive/"
     assert len(config["routing"]["patterns"]) == 2
     assert config["routing"]["fallback"] == "Admin"
 
@@ -147,7 +147,7 @@ def test_case_4_malformed_yaml(tmp_path):
 version: 1
 file_system:
   type: nas-mcp
-  root_path: /_f-a-n/
+  root_path: /archive/
   access_pattern: "blah"
 routing:
   patterns:
@@ -173,7 +173,7 @@ def test_case_5_missing_version(tmp_path):
 ```yaml
 file_system:
   type: nas-mcp
-  root_path: /_f-a-n/
+  root_path: /archive/
   access_pattern: "blah"
 routing:
   patterns: []

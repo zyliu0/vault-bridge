@@ -22,7 +22,7 @@ Ask the user:
 > "Where is your file archive? This is the root folder vault-bridge will scan.
 >
 > Examples:
-> - `/_f-a-n/` (NAS root with project folders inside)
+> - `/volume1/projects/` (NAS root with project folders inside)
 > - `~/Documents/Archive/` (local directory)
 > - `/Volumes/Projects/` (external drive)
 >

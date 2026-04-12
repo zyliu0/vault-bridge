@@ -72,8 +72,8 @@ def test_bare_note_has_plugin_vault_bridge():
 
 
 def test_bare_note_has_project_from_arg():
-    fm = _upgrade(project_name="2408 JDZ 景德镇")
-    assert fm["project"] == "2408 JDZ 景德镇"
+    fm = _upgrade(project_name="2408 Sample Project")
+    assert fm["project"] == "2408 Sample Project"
 
 
 def test_bare_note_has_scan_type_retro():
@@ -184,24 +184,24 @@ def test_missing_cssclasses_defaults_to_empty():
 # ---------------------------------------------------------------------------
 
 def test_source_path_inferred_from_nas_line():
-    body = "Some text\n\nNAS: `/_f-a-n/2408 JDZ/240909 memo.pdf`\n"
+    body = "Some text\n\nNAS: `/archive/2408 Project/240909 memo.pdf`\n"
     fm = _upgrade(note_body=body)
-    assert fm["source_path"] == "/_f-a-n/2408 JDZ/240909 memo.pdf"
+    assert fm["source_path"] == "/archive/2408 Project/240909 memo.pdf"
 
 
 def test_source_path_inferred_from_nas_line_no_backticks():
-    body = "Some text\n\nNAS: /_f-a-n/2408 JDZ/240909 memo.pdf\n"
+    body = "Some text\n\nNAS: /archive/2408 Project/240909 memo.pdf\n"
     fm = _upgrade(note_body=body)
-    assert fm["source_path"] == "/_f-a-n/2408 JDZ/240909 memo.pdf"
+    assert fm["source_path"] == "/archive/2408 Project/240909 memo.pdf"
 
 
 def test_source_path_from_existing_fm_takes_precedence():
-    body = "NAS: `/_f-a-n/wrong/path.pdf`"
+    body = "NAS: `/archive/wrong/path.pdf`"
     fm = _upgrade(
-        existing_fm={"source_path": "/_f-a-n/correct/path.pdf"},
+        existing_fm={"source_path": "/archive/correct/path.pdf"},
         note_body=body,
     )
-    assert fm["source_path"] == "/_f-a-n/correct/path.pdf"
+    assert fm["source_path"] == "/archive/correct/path.pdf"
 
 
 def test_no_source_path_anywhere_gets_empty_string():
@@ -214,12 +214,12 @@ def test_no_source_path_anywhere_gets_empty_string():
 # ---------------------------------------------------------------------------
 
 def test_file_type_inferred_from_source_path_extension():
-    fm = _upgrade(existing_fm={"source_path": "/_f-a-n/project/doc.pdf"})
+    fm = _upgrade(existing_fm={"source_path": "/archive/project/doc.pdf"})
     assert fm["file_type"] == "pdf"
 
 
 def test_file_type_folder_when_no_extension():
-    fm = _upgrade(existing_fm={"source_path": "/_f-a-n/project/240909 revision"})
+    fm = _upgrade(existing_fm={"source_path": "/archive/project/240909 revision"})
     assert fm["file_type"] == "folder"
 
 
@@ -229,7 +229,7 @@ def test_file_type_preserved_from_existing():
 
 
 def test_file_type_unknown_extension_defaults_to_folder():
-    fm = _upgrade(existing_fm={"source_path": "/_f-a-n/project/something.xyz"})
+    fm = _upgrade(existing_fm={"source_path": "/archive/project/something.xyz"})
     assert fm["file_type"] == "folder"
 
 

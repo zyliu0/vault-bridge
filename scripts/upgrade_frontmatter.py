@@ -62,7 +62,7 @@ _EXT_TO_FILE_TYPE = {
 }
 
 # Regex to extract a NAS path from the note body.
-# Matches: NAS: `/_f-a-n/...`  or  NAS: /_f-a-n/...
+# Matches: NAS: `/archive/...`  or  NAS: /archive/...
 _NAS_LINE_RE = re.compile(
     r"^NAS:\s*`?(/[^`\n]+?)`?\s*$",
     re.MULTILINE,
@@ -82,7 +82,7 @@ def upgrade_frontmatter(
         existing_fm: The note's current frontmatter as a dict (may be empty).
         note_filename: The note's filename (e.g. "2024-09-09 memo.md").
         note_body: The full body text of the note (after the --- fence).
-        project_name: The project folder name (e.g. "2408 JDZ 景德镇").
+        project_name: The project folder name (e.g. "2408 Sample Project").
         mtime_unix: The note file's modification time (Unix timestamp).
 
     Returns:
