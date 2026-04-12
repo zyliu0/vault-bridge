@@ -1,10 +1,12 @@
 ---
-description: Configure vault-bridge — archive path, preset, template install
+description: Configure vault-bridge — archive path, vault path, preset
 allowed-tools: Read, Write, Bash, Glob, AskUserQuestion
 ---
 
-Set up vault-bridge for this vault. Asks two questions, auto-detects the rest,
-saves config to `~/.vault-bridge/config.json`, and installs an Obsidian template.
+Set up vault-bridge. Asks three questions, auto-detects the file system type,
+saves config to `~/.vault-bridge/config.json`, and optionally installs an
+Obsidian note template. Works from any directory — you do NOT need to be
+inside your Obsidian vault.
 
 ## Step 1 — detect what's available
 
@@ -12,8 +14,6 @@ Check if `mcp__nas__list_files` is available as a tool in this session.
 
 - If yes → file_system_type is `nas-mcp`
 - If no → file_system_type is `local-path`
-
-The vault root is the current working directory (where CLAUDE.md lives).
 
 ## Step 2 — ask where the archive lives
 
@@ -37,7 +37,21 @@ the path doesn't exist on the NAS and ask again.
 If the file system is `local-path`, verify with Glob or Read that the path
 exists. If it doesn't, tell the user and ask again.
 
-## Step 3 — ask which preset
+## Step 3 — ask where the Obsidian vault is
+
+Ask the user:
+
+> "Where is your Obsidian vault? This is where vault-bridge will write notes.
+>
+> Examples:
+> - `~/Obsidian/` or `~/Documents/MyVault/`
+>
+> Enter the path:"
+
+Capture their answer as `vault_root`. Verify the path exists (it should
+be a directory). If it doesn't exist, ask again.
+
+## Step 4 — ask which preset
 
 Ask the user:
 
@@ -51,11 +65,11 @@ Ask the user:
 >
 > C) Writer's notebook — Drafts, Published, Research, Meetings folders
 >
-> D) Custom — I'll configure my own routing rules in CLAUDE.md later"
+> D) Custom — I'll configure my own routing rules later"
 
 Map: A→architecture, B→photographer, C→writer, D→custom.
 
-## Step 4 — save the config
+## Step 5 — save the config
 
 Run (pass values as env vars to avoid shell injection from paths with quotes):
 
@@ -74,28 +88,32 @@ print('Config saved.')
 "
 ```
 
-## Step 5 — install the Obsidian template
+## Step 6 — install the Obsidian template (optional)
 
-Check if `_Templates/` exists in the vault root. If not, create it.
+Ask the user:
 
-Copy `${CLAUDE_PLUGIN_ROOT}/templates/vault-bridge-note.md` to the vault's
-`_Templates/vault-bridge-note.md`. Use the Write tool.
+> "Would you like to install the vault-bridge note template into your vault's
+> `_Templates/` folder? This lets you manually create notes with the same
+> schema via Insert Template in Obsidian. (y/n)"
 
-Tell the user:
+If yes:
+1. Read the template content from `${CLAUDE_PLUGIN_ROOT}/templates/vault-bridge-note.md`
+2. Install it via the obsidian CLI:
+   ```bash
+   obsidian create vault="$VAULT_NAME" name="vault-bridge-note" path="_Templates" content="$TEMPLATE_CONTENT" silent overwrite
+   ```
+3. Tell the user: "Installed `_Templates/vault-bridge-note.md`."
 
-> "Installed `_Templates/vault-bridge-note.md` to your vault. When you create
-> a note manually in Obsidian, use Insert Template → vault-bridge-note to get
-> the same frontmatter schema that vault-bridge uses. Works with both Obsidian's
-> native Templates and the Templater plugin."
+If no: skip — the template is not required for scanning.
 
 If the user chose preset D (custom), also tell them:
 
-> "Since you chose 'custom', you'll need to add a `## vault-bridge: configuration`
-> block to your vault's CLAUDE.md with your own routing patterns. Run
-> `/vault-bridge:validate-config` to check it. See the plugin README §Setup
-> for the format."
+> "Since you chose 'custom', you'll need to create a CLAUDE.md file with a
+> `## vault-bridge: configuration` block containing your routing patterns.
+> See the plugin README for the YAML format. Run `/vault-bridge:validate-config`
+> to check it."
 
-## Step 6 — verify
+## Step 7 — verify
 
 Run:
 
@@ -118,13 +136,13 @@ print('Vault:', config['vault_root'])
 
 Report:
 
-> "vault-bridge is configured.
+> "vault-bridge is configured. Config saved to `~/.vault-bridge/config.json`.
 >
 > - Archive: {archive_root}
 > - Preset: {preset} ({N} routing patterns, fallback: {fallback})
 > - File system: {file_system_type}
 > - Vault: {vault_root}
-> - Template: _Templates/vault-bridge-note.md installed
 >
-> Next: run `/vault-bridge:retro-scan <project-folder-path>` to scan your first project.
+> You can run vault-bridge commands from any directory.
+> Next: `/vault-bridge:retro-scan <project-folder-path>` to scan your first project.
 > Add `--dry-run` to preview detected events before writing."

@@ -42,16 +42,21 @@ Use `preset.routing_patterns` for Phase 3 routing checks.
 
 ## Step 2 — find all notes in the project folder
 
-Use Glob to find every `.md` file under `$1`:
+Use the obsidian CLI to search for notes in the project folder:
 
+```bash
+obsidian search vault="$VAULT_NAME" query="path:$1" limit=500
 ```
-Glob: $1/**/*.md
+
+Or list via the vault's disk path (from config.vault_root):
+```
+Glob: $VAULT_ROOT/$1/**/*.md
 ```
 
 Exclude `_index.md`, `_scan-log.md`, `_vault-health-*.md` — those are meta
 files, not event notes.
 
-For each note found, read it with the Read tool and parse:
+For each note found, read it via obsidian CLI and parse:
 - The frontmatter block (between `---` fences)
 - The body (everything after the closing `---`)
 
@@ -185,7 +190,7 @@ and only runs when the user explicitly asks for it.
 
 ### 2c. Write the upgraded note
 
-Reconstruct the note:
+Reconstruct the full note content:
 
 ```
 ---
@@ -195,19 +200,24 @@ Reconstruct the note:
 {original body text, unchanged}
 ```
 
-Use the Edit tool to replace ONLY the frontmatter block. The body stays
-byte-for-byte identical (unless --re-read added a warning callout).
+Write it back via the obsidian CLI (never the Edit tool on vault files):
+
+```bash
+obsidian create vault="$VAULT_NAME" name="$NOTE_NAME" path="$SUBFOLDER_PATH" content="$FULL_CONTENT" silent overwrite
+```
+
+The body stays byte-for-byte identical (unless --re-read added a warning callout).
 
 ### 2d. Validate the result
 
 Run:
 ```
-python3 ${CLAUDE_PLUGIN_ROOT}/scripts/validate_frontmatter.py "NOTE_PATH"
+python3 ${CLAUDE_PLUGIN_ROOT}/scripts/validate_frontmatter.py "$VAULT_ROOT/$NOTE_PATH"
 ```
 
 If exit 0 → success, move to next note.
-If exit non-zero → log the error, REVERT the edit (restore the original
-frontmatter), skip this note, continue with the next.
+If exit non-zero → log the error, restore the original note via obsidian
+create with the original content, skip this note, continue with the next.
 
 ### 2e. Register in the scan index
 

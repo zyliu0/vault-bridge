@@ -322,18 +322,49 @@ cssclasses: [img-grid]
 
 If no images embedded, omit the `attachments` field entirely and use `cssclasses: []`.
 
-### 6j. Write the note
+### 6j. Write the note via obsidian CLI
 
-Use the Write tool to save the note to `{vault-root}/{project}/{subfolder}/{filename}.md`.
+Build the full note content (frontmatter + body) as a string. Then write
+it to the vault using the `obsidian` CLI — never the Write tool directly:
 
-If a canvas was generated (see 6f-2), also write it to
-`{vault-root}/{project}/{subfolder}/{event_date} {short-topic}.canvas`.
+```bash
+obsidian create vault="$VAULT_NAME" name="$NOTE_NAME" path="$PROJECT/$SUBFOLDER" content="$FULL_CONTENT" silent overwrite
+```
+
+Where:
+- `$VAULT_NAME` — from config.vault_root (the vault directory name)
+- `$NOTE_NAME` — the note filename without `.md` extension
+- `$PROJECT/$SUBFOLDER` — e.g. `2408 Sample Project/SD`
+- `$FULL_CONTENT` — the complete note including `---` frontmatter fences and body.
+  Use `\n` for newlines in the content string.
+
+If a canvas was generated (see 6f-2), also write it:
+
+```bash
+obsidian create vault="$VAULT_NAME" name="$CANVAS_NAME" path="$PROJECT/$SUBFOLDER" content="$CANVAS_JSON" silent overwrite
+```
+
+Where `$CANVAS_NAME` is `{event_date} {short-topic}` (obsidian CLI adds the extension based on content).
+
+If the obsidian CLI is not available or errors with "Obsidian is not running",
+STOP and tell the user: "Obsidian must be running for vault-bridge to write
+notes. Please open Obsidian and retry."
 
 ### 6k. VALIDATE — the hard stop
 
-Immediately after Write, run:
+After writing, read the note back and validate:
+```bash
+obsidian read vault="$VAULT_NAME" path="$PROJECT/$SUBFOLDER/$NOTE_NAME.md"
 ```
-python3 ${CLAUDE_PLUGIN_ROOT}/scripts/validate_frontmatter.py "<note-path>"
+
+Pipe the content to the validator:
+```
+python3 ${CLAUDE_PLUGIN_ROOT}/scripts/validate_frontmatter.py --stdin
+```
+
+Or validate by reading from the vault's disk path (known from config):
+```
+python3 ${CLAUDE_PLUGIN_ROOT}/scripts/validate_frontmatter.py "$VAULT_ROOT/$PROJECT/$SUBFOLDER/$NOTE_NAME.md"
 ```
 
 **If exit code is 0:** continue to step 6l.
@@ -363,7 +394,8 @@ event benefits from this one.)
 
 ### 6m. Every 10 events — self-check
 
-After every 10 events, stop and re-read your last 3 notes. Confirm:
+After every 10 events, stop and re-read your last 3 notes via
+`obsidian read vault="$VAULT_NAME" path="..."`. Confirm:
 - Each has non-empty `sources_read` OR uses Template B verbatim
 - Template A notes contain only specifics you can point at in extracted content
 - No note contains invented architectural moves, people, quotes, or decisions
@@ -376,8 +408,13 @@ Log the self-check result in the scan summary.
 
 ## Step 7 — write the scan log
 
-After processing all events, write a scan summary to
-`{vault-root}/{project}/_scan-log.md` with:
+After processing all events, write a scan summary to the vault via:
+
+```bash
+obsidian create vault="$VAULT_NAME" name="_scan-log" path="$PROJECT" content="$SCAN_LOG" silent overwrite
+```
+
+Include in the scan log:
 - Scan date and source folder
 - Events processed / skipped / failed counts
 - Total `read_file` calls made and bytes read

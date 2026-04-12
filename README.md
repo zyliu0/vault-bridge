@@ -76,6 +76,9 @@ note that honestly says so.
 
 ## Prerequisites
 
+- **Obsidian** with the [Obsidian CLI](https://help.obsidian.md/cli)
+  installed. vault-bridge writes all notes through the `obsidian` CLI —
+  it never touches vault files directly.
 - **Python 3.9+** with `pip install -r requirements.txt` (Pillow, PyYAML,
   PyPDF2, python-docx, python-pptx)
 - **A file system** Claude Code can read from. One of:
@@ -110,42 +113,31 @@ claude --plugin-dir .               # load into the current session
 
 ## Setup — 5 minutes
 
-### Step 1 — add a config block to your vault's CLAUDE.md
+You can run vault-bridge from **any directory** — you don't need to open
+your Obsidian vault in Claude Code. The plugin stores its config globally
+at `~/.vault-bridge/config.json`, so it works from wherever you are.
 
-Open the `CLAUDE.md` file at the root of your Obsidian vault (create it if
-you don't have one). Add a section with exactly this heading:
-
-```markdown
-## vault-bridge: configuration
-
-<yaml block here>
-```
-
-The yaml block tells vault-bridge how to access your files and how to
-route notes into subfolders. See the three preset profiles in the plugin's
-own `CLAUDE.md` (at the plugin root when installed) and copy the one that
-fits your workflow:
-
-- **Architecture practice** — project folders with SD/DD/CD phase
-  organization, bilingual folder names
-- **Photographer archive** — year-based with `_Selects/`, `_Contact/`,
-  edit/raw subfolders
-- **Writer's notebook** — `Drafts/`, `Published/`, `Research/`, `Meetings/`
-
-Customize the `routing.patterns` list for your own folder conventions.
-The pattern match is a case-insensitive substring check against the source
-path; first match wins.
-
-### Step 2 — validate your config
+### Step 1 — run setup
 
 ```
-/vault-bridge:validate-config
+/vault-bridge:setup
 ```
 
-If the output says "config is valid," you're set. If it errors, it will
-tell you exactly what to fix — no silent fallbacks.
+Setup asks two questions:
+1. **Where is your archive?** — the root folder vault-bridge will scan
+   (e.g. `/volume1/projects/`, `~/Documents/Archive/`, `/Volumes/Projects/`)
+2. **What kind of archive?** — pick a preset:
+   - **Architecture practice** — project folders with SD/DD/CD phase
+     organization, bilingual folder names
+   - **Photographer archive** — year-based with `_Selects/`, `_Contact/`,
+     edit/raw subfolders
+   - **Writer's notebook** — `Drafts/`, `Published/`, `Research/`, `Meetings/`
+   - **Custom** — define your own routing rules (advanced)
 
-### Step 3 — first scan
+Setup auto-detects whether you have a NAS MCP server, saves the config,
+and installs an Obsidian note template into your vault's `_Templates/`.
+
+### Step 2 — first scan
 
 Pick ONE project folder to start with. A folder you know well, where
 you'll notice if the output is wrong.
@@ -157,7 +149,7 @@ you'll notice if the output is wrong.
 Add `--dry-run` the first time if you want to preview the detected events
 and the estimated API call count before anything gets written.
 
-### Step 4 — check the output
+### Step 3 — check the output
 
 Open the resulting vault folder in Obsidian. Read a few notes. Every
 Template A note should feel accurate to what's in the source file — not
@@ -169,15 +161,23 @@ If everything looks right, scan the rest of your archive one project at
 a time. The scan index at `~/.vault-bridge/index.tsv` makes re-runs
 idempotent, so you can stop and resume.
 
-### Step 5 — set up heartbeat (optional)
+### Step 4 — set up heartbeat (optional)
 
 If you want new files to automatically appear as vault notes without
 manual intervention, set up a cron job:
 
 ```cron
 # Every 4 hours, scan for new/modified files and write vault notes
-0 */4 * * * cd /path/to/vault && claude -p "Run /vault-bridge:heartbeat-scan" >> ~/.vault-bridge/heartbeat.log 2>&1
+0 */4 * * * claude -p "Run /vault-bridge:heartbeat-scan" >> ~/.vault-bridge/heartbeat.log 2>&1
 ```
+
+### Advanced: custom routing via vault CLAUDE.md
+
+If you chose the "custom" preset and need your own routing patterns,
+add a `## vault-bridge: configuration` block to a `CLAUDE.md` file in
+your Obsidian vault with a YAML config. See the plugin's own `CLAUDE.md`
+for the three preset profiles you can adapt. This is only needed for
+custom routing — the three built-in presets work without it.
 
 ## LibreDWG setup for DWG reads on macOS
 

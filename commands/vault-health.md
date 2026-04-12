@@ -12,23 +12,35 @@ Argument `$1` is a vault project folder to audit. `--all` switches to
 auditing every note with `plugin: vault-bridge` across all projects in
 the vault.
 
-## Step 1 — parse config (just to get file_system.root_path)
+## Step 1 — load config
 
-Run:
+Try the simple config first:
 ```
-python3 ${CLAUDE_PLUGIN_ROOT}/scripts/parse_config.py CLAUDE.md
+python3 -c "
+import sys, json
+sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
+import setup_config
+config = setup_config.load_config()
+print(json.dumps(config))
+"
 ```
 
-Capture `file_system.root_path` — needed to check `source_path` existence.
+If that fails, try `parse_config.py CLAUDE.md` as fallback. If both fail,
+tell the user to run `/vault-bridge:setup` first and STOP.
+
+Capture `config.vault_root` and `config.file_system_type` — needed to check
+`source_path` existence and locate vault notes.
 
 ## Step 2 — find all plugin-generated notes in scope
 
-If `$1` is a project path:
-  Use Glob `$1/**/*.md` and filter to notes containing `plugin: vault-bridge`
-  in their frontmatter.
+Use the obsidian CLI to search for vault-bridge notes:
 
-If `--all`:
-  Use Glob `{vault-root}/**/*.md` across the whole vault.
+```bash
+obsidian search vault="$VAULT_NAME" query="plugin: vault-bridge" limit=500
+```
+
+If `$1` is a project path, filter results to notes under that path.
+If `--all`, use all results.
 
 ## Step 3 — load the scan index for duplicate detection
 
@@ -107,8 +119,13 @@ Flag it for manual review.
 
 ## Step 5 — write the health report
 
-Write to `{project-path}/_vault-health-{YYYY-MM-DD}.md` (or
-`{vault-root}/_vault-health-{YYYY-MM-DD}.md` for `--all`).
+Write the report to the vault via obsidian CLI:
+
+```bash
+obsidian create vault="$VAULT_NAME" name="_vault-health-{YYYY-MM-DD}" path="$PROJECT" content="$REPORT" silent overwrite
+```
+
+(For `--all`, write to vault root instead of a project subfolder.)
 
 Format:
 

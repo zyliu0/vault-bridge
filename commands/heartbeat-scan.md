@@ -131,10 +131,14 @@ For each delta file, follow the same per-event pipeline as retro-scan:
    The `event_date_source` enum is the same: `filename-prefix`,
    `parent-folder-prefix`, `mtime`.
    The `content_confidence` enum is the same: `high` or `metadata-only`.
-8. Write the note with Write tool
-9. **Validate**:
+8. Write the note via obsidian CLI (never the Write tool directly):
+   ```bash
+   obsidian create vault="$VAULT_NAME" name="$NOTE_NAME" path="$PROJECT/$SUBFOLDER" content="$FULL_CONTENT" silent overwrite
    ```
-   python3 ${CLAUDE_PLUGIN_ROOT}/scripts/validate_frontmatter.py "<note-path>"
+   If Obsidian is not running, STOP and log the error.
+9. **Validate** — read back and validate:
+   ```
+   python3 ${CLAUDE_PLUGIN_ROOT}/scripts/validate_frontmatter.py "$VAULT_ROOT/$PROJECT/$SUBFOLDER/$NOTE_NAME.md"
    ```
    Hard stop on non-zero exit.
 10. Append to the scan index

@@ -1,9 +1,28 @@
 # vault-bridge — plugin-scoped instructions
 
-Claude reads this file alongside the user's vault CLAUDE.md whenever the
-vault-bridge plugin is enabled. It documents the plugin's conventions, the
-fabrication firewall rules, and the three preset configuration profiles
-that users can copy-paste into their own vault CLAUDE.md.
+Claude reads this file whenever the vault-bridge plugin is enabled. It
+documents the plugin's conventions, the fabrication firewall rules, and
+the three preset configuration profiles.
+
+## Core principle: vault isolation
+
+vault-bridge runs from any working directory. It NEVER opens the Obsidian
+vault directly in Claude Code — the vault is a managed artifact, not a
+working directory. All vault reads and writes go through the `obsidian`
+CLI (provided by the obsidian-cli skill), which talks to a running
+Obsidian instance.
+
+**Three zones with strict tool boundaries:**
+
+| Zone | Access | Tools |
+|------|--------|-------|
+| Archive (NAS/drive) | Read-only | `mcp__nas__*` or `Read`/`Glob` |
+| Vault (Obsidian) | Via CLI only | `obsidian create`, `obsidian read`, `obsidian search`, `obsidian append`, `obsidian property:set` |
+| State (`~/.vault-bridge/`) | Read-write | Python scripts via `Bash` |
+
+Never use the `Write` or `Edit` tools to modify files inside the vault
+directory. If the obsidian CLI is unavailable (Obsidian not running),
+tell the user to open Obsidian and retry.
 
 ## Core principle: the fabrication firewall
 
@@ -35,9 +54,13 @@ is not literally present in the extracted content, STOP and cut the sentence.
 
 ## The 3 preset configuration profiles
 
-Each user copies ONE of these into their vault's `CLAUDE.md` under a
-`## vault-bridge: configuration` heading, then customizes the routing
-patterns for their own folder conventions.
+For most users, `/vault-bridge:setup` handles configuration automatically
+— no manual YAML needed. The presets below are the routing rules that
+setup applies. They are documented here for reference and for users who
+choose the "custom" preset and need to write their own routing config.
+
+Custom config goes in a `CLAUDE.md` file (in the vault or working
+directory) under a `## vault-bridge: configuration` heading.
 
 ### Preset 1: Architecture / design practice
 
@@ -187,19 +210,16 @@ style:
   summary_word_count: [100, 200]
 ```
 
-## Setup — where to put the config
+## Setup
 
-The user copies ONE of the presets above into their vault's `CLAUDE.md`
-file, under a heading exactly like:
+The recommended path is `/vault-bridge:setup`, which asks two questions
+and writes `~/.vault-bridge/config.json`. This works from any directory —
+you do NOT need to open your Obsidian vault in Claude Code.
 
-```
-## vault-bridge: configuration
-
-<yaml block from the preset>
-```
-
-Then runs `/vault-bridge:validate-config` to confirm the config parses
-cleanly before the first scan.
+For the "custom" preset only: add a `## vault-bridge: configuration`
+heading with a YAML block (from one of the presets above) to a `CLAUDE.md`
+file in your working directory or vault root. Then validate with
+`/vault-bridge:validate-config`.
 
 ## Note filename convention
 
