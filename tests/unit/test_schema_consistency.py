@@ -128,6 +128,26 @@ def test_setup_command_exists_and_calls_save():
     assert "preset" in content.lower()
 
 
+def test_revise_command_exists_and_calls_upgrade():
+    content = _command_file("revise.md")
+    if not content:
+        import pytest
+        pytest.skip("commands/revise.md not yet created")
+    assert "upgrade_frontmatter" in content
+    assert "validate_frontmatter" in content
+    assert "dry-run" in content.lower() or "dry_run" in content.lower()
+    assert "re-read" in content.lower() or "re_read" in content.lower()
+
+
+def test_revise_command_mentions_routing_check():
+    content = _command_file("revise.md")
+    if not content:
+        import pytest
+        pytest.skip("commands/revise.md not yet created")
+    assert "routing" in content.lower()
+    assert "mismatch" in content.lower()
+
+
 # ---------------------------------------------------------------------------
 # Heartbeat-scan command
 # ---------------------------------------------------------------------------
