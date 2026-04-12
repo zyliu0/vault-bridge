@@ -1,0 +1,19 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "vault-bridge",
+  "description": "Bridge your file archive to an Obsidian vault. Files become diary notes, organized by purpose, searchable as a decade of work.",
+  "owner": {
+    "name": "vault-bridge contributors"
+  },
+  "plugins": [
+    {
+      "name": "vault-bridge",
+      "description": "Archive-to-Obsidian vault bridge with retroactive scanning, heartbeat delta sync, and fabrication-safe diary notes.",
+      "source": "./",
+      "category": "productivity",
+      "version": "0.1.0",
+      "license": "MIT",
+      "keywords": ["obsidian", "vault", "archive", "nas", "scan"]
+    }
+  ]
+}
