@@ -53,7 +53,7 @@ EXPECTED_FILE_TYPES = {
 }
 
 EXPECTED_EVENT_DATE_SOURCES = {"filename-prefix", "parent-folder-prefix", "mtime"}
-EXPECTED_SCAN_TYPES = {"retro", "heartbeat"}
+EXPECTED_SCAN_TYPES = {"retro", "heartbeat", "manual"}
 EXPECTED_CONTENT_CONFIDENCES = {"high", "metadata-only"}
 
 
@@ -145,7 +145,7 @@ def test_event_date_source_enum_is_exactly_three_values():
     assert schema.ENUMS["event_date_source"] == EXPECTED_EVENT_DATE_SOURCES
 
 
-def test_scan_type_enum_is_exactly_two_values():
+def test_scan_type_enum_is_exactly_three_values():
     assert schema.ENUMS["scan_type"] == EXPECTED_SCAN_TYPES
 
 

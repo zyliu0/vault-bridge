@@ -9,19 +9,39 @@ You are running an autonomous delta scan for vault-bridge. Unlike retro-scan
 since the last heartbeat. Triggered by cron or `gstack /schedule`, runs
 silently, writes new vault notes for any new or modified files.
 
-## Step 1 — parse the user's config
+## Step 1 — load config
 
-Run:
+Try the simple config first (written by `/vault-bridge:setup`):
+
+```
+python3 -c "
+import sys, json
+sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
+import setup_config
+config = setup_config.load_config()
+preset = setup_config.get_preset(config['preset'])
+print(json.dumps({'config': config, 'preset': preset}))
+"
+```
+
+If exit 0 → use the config and preset.
+
+If exit 2 (SetupNeeded) → try the advanced config path:
 ```
 python3 ${CLAUDE_PLUGIN_ROOT}/scripts/parse_config.py CLAUDE.md
 ```
 
-If exit is non-zero, print stderr and STOP. A heartbeat scan cannot run
-with a broken config — especially one triggered by cron where no human
-sees the error live.
+If THAT also fails → log "vault-bridge not configured, heartbeat skipping"
+to `~/.vault-bridge/heartbeat.log` and EXIT 0 (not an error — a cron job
+that can't run because of missing config should not alarm).
 
-Capture the JSON output for `file_system.access_pattern`, `routing`,
-`skip_patterns`, `style`.
+Use `config.file_system_type` to choose tools:
+- `nas-mcp` → use `mcp__nas__list_files(path)` and `mcp__nas__read_file(path)`
+- `local-path` / `external-mount` → use Glob and Read tools
+
+Use `config.archive_root` as the base path to scan.
+Use `preset.routing_patterns`, `preset.skip_patterns`, `preset.style`
+for all routing and style decisions.
 
 ## Step 2 — acquire the scan lock
 

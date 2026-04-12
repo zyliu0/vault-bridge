@@ -98,6 +98,7 @@ ENUMS = {
     "scan_type": {
         "retro",
         "heartbeat",
+        "manual",
     },
     "content_confidence": {
         "high",

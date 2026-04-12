@@ -14,23 +14,46 @@ The argument `$1` is the source folder path. Optional flags:
 - `--date-from YYYY-MM-DD` — skip events older than this date
 - `--date-to YYYY-MM-DD` — skip events newer than this date
 
-## Step 1 — parse the user's config
+## Step 1 — load config
 
-Run:
+Try the simple config first (written by `/vault-bridge:setup`):
+
+```
+python3 -c "
+import sys, json
+sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
+import setup_config
+config = setup_config.load_config()
+preset = setup_config.get_preset(config['preset'])
+print(json.dumps({'config': config, 'preset': preset}))
+"
+```
+
+If exit 0 → use the config and preset from the output.
+
+If exit 2 (SetupNeeded) → try the advanced config path:
+
 ```
 python3 ${CLAUDE_PLUGIN_ROOT}/scripts/parse_config.py CLAUDE.md
 ```
 
-If exit code is non-zero, print stderr to the user and STOP. Do not scan.
-The user needs to fix their config first.
+If THAT also fails → print:
+"vault-bridge is not configured. Run /vault-bridge:setup first."
+and STOP.
 
-If exit code is 0, capture the JSON output. Use it for:
-- `file_system.access_pattern` — the tool-call instruction for reading files
-- `routing.patterns` — the list of substring-match → vault-subfolder rules
-- `routing.content_overrides` — rules that fire based on filename content
-- `routing.fallback` — the subfolder used when no pattern matches
-- `skip_patterns` — files/folders to never process
-- `style.summary_word_count` — the target word count range for summary paragraphs
+From the loaded config/preset, use:
+- `config.file_system_type` — determines which tools to call (nas-mcp → mcp__nas__* tools; local-path → Read/Glob)
+- `config.archive_root` — the base path for the archive
+- `preset.routing_patterns` — the list of substring-match → vault-subfolder rules
+- `preset.content_overrides` — rules that fire based on filename content
+- `preset.fallback` — the subfolder used when no pattern matches
+- `preset.skip_patterns` — files/folders to never process
+- `preset.style.summary_word_count` — the target word count range for summary paragraphs
+
+**File system access:**
+- If `file_system_type == "nas-mcp"`: use `mcp__nas__list_files(path)` to list and `mcp__nas__read_file(path)` to read.
+- If `file_system_type == "local-path"`: use `Glob` to list and `Read` to read.
+- If `file_system_type == "external-mount"`: same as local-path.
 
 ## Step 2 — acquire the scan lock
 

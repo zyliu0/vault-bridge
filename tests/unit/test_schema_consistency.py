@@ -118,6 +118,16 @@ def test_validate_config_command_exists_and_calls_parser():
     assert "parse_config.py" in content
 
 
+def test_setup_command_exists_and_calls_save():
+    content = _command_file("setup.md")
+    if not content:
+        import pytest
+        pytest.skip("commands/setup.md not yet created")
+    assert "setup_config" in content or "save_config" in content
+    assert "archive" in content.lower()
+    assert "preset" in content.lower()
+
+
 # ---------------------------------------------------------------------------
 # Heartbeat-scan command
 # ---------------------------------------------------------------------------
