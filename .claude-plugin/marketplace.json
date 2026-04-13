@@ -11,7 +11,7 @@
       "description": "Archive-to-Obsidian vault bridge with retroactive scanning, heartbeat delta sync, and fabrication-safe diary notes.",
       "source": "./",
       "category": "productivity",
-      "version": "0.1.0",
+      "version": "1.1.0",
       "license": "MIT",
       "keywords": ["obsidian", "vault", "archive", "nas", "scan"]
     }

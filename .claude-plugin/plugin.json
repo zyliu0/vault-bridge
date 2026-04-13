@@ -1,6 +1,6 @@
 {
   "name": "vault-bridge",
-  "version": "0.1.0",
+  "version": "1.1.0",
   "description": "Bridge your file archive to an Obsidian vault. Files become diary notes, organized by purpose, searchable as a decade of work.",
   "author": {
     "name": "vault-bridge contributors"
