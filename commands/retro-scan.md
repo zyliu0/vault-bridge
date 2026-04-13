@@ -1,7 +1,7 @@
 ---
 description: Full retroactive scan of an archive folder into vault notes
-allowed-tools: Read, Write, Edit, Bash, Glob, Grep
-argument-hint: "[folder-path] [--dry-run] [--date-from YYYY-MM-DD] [--date-to YYYY-MM-DD]"
+allowed-tools: Read, Bash, Glob, Grep, AskUserQuestion
+argument-hint: "[folder-path] [--domain DOMAIN_NAME] [--dry-run] [--date-from YYYY-MM-DD] [--date-to YYYY-MM-DD]"
 ---
 
 You are running a retroactive archive scan for vault-bridge. Your job is to
@@ -10,13 +10,14 @@ one vault note per event with strict schema compliance, and never fabricate
 content you did not actually read.
 
 The argument `$1` is the source folder path. Optional flags:
+- `--domain DOMAIN_NAME` — skip auto-detection and use the named domain directly
 - `--dry-run` — list detected events and the estimated API call count, write nothing
 - `--date-from YYYY-MM-DD` — skip events older than this date
 - `--date-to YYYY-MM-DD` — skip events newer than this date
 
-## Step 1 — load config
+## Step 1 — load config and resolve domain
 
-Try the simple config first (written by `/vault-bridge:setup`):
+Load the v2 multi-domain config:
 
 ```
 python3 -c "
@@ -24,31 +25,56 @@ import sys, json
 sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
 import setup_config
 config = setup_config.load_config()
-preset = setup_config.get_preset(config['preset'])
-print(json.dumps({'config': config, 'preset': preset}))
+print(json.dumps(config))
 "
 ```
 
-If exit 0 → use the config and preset from the output.
+If this fails (SetupNeeded) → try `parse_config.py CLAUDE.md` as fallback.
+If both fail → print "vault-bridge is not configured. Run /vault-bridge:setup first." and STOP.
 
-If exit 2 (SetupNeeded) → try the advanced config path:
+### Step 1b — resolve which domain this scan belongs to
 
+If `--domain DOMAIN_NAME` was passed, use that domain directly:
 ```
-python3 ${CLAUDE_PLUGIN_ROOT}/scripts/parse_config.py CLAUDE.md
+python3 -c "
+import sys, json
+sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
+import setup_config
+config = setup_config.load_config()
+domain = setup_config.get_domain_by_name(config, 'DOMAIN_NAME')
+print(json.dumps(domain))
+"
 ```
 
-If THAT also fails → print:
-"vault-bridge is not configured. Run /vault-bridge:setup first."
-and STOP.
+Otherwise, auto-detect via `domain_router.resolve_domain()`:
+```
+python3 -c "
+import sys, json
+sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
+import setup_config, domain_router
+config = setup_config.load_config()
+r = domain_router.resolve_domain('$1', config)
+print(json.dumps({'domain_name': r.domain_name, 'confidence': r.confidence, 'candidates': r.candidates, 'reason': r.reason}))
+"
+```
 
-From the loaded config/preset, use:
-- `config.file_system_type` — determines which tools to call (nas-mcp → mcp__nas__* tools; local-path → Read/Glob)
-- `config.archive_root` — the base path for the archive
-- `preset.routing_patterns` — the list of substring-match → vault-subfolder rules
-- `preset.content_overrides` — rules that fire based on filename content
-- `preset.fallback` — the subfolder used when no pattern matches
-- `preset.skip_patterns` — files/folders to never process
-- `preset.style.summary_word_count` — the target word count range for summary paragraphs
+Based on the confidence:
+- **exact**: proceed silently with that domain.
+- **inferred**: show the inference and ask for confirmation via AskUserQuestion
+  with options: the inferred domain, plus all other domains.
+- **ambiguous**: present a structured selection via AskUserQuestion using
+  `user_prompt.build_domain_selection_prompt()`. If user picks `__new__`,
+  tell them to run `/vault-bridge:setup` to add a domain and STOP.
+
+After domain is resolved, extract these values from the domain dict:
+- `domain.file_system_type` — determines which tools to call (nas-mcp → mcp__nas__* tools; local-path → Read/Glob)
+- `domain.archive_root` — the base path for the archive
+- `domain.routing_patterns` — the list of substring-match → vault-subfolder rules
+- `domain.content_overrides` — rules that fire based on filename content
+- `domain.fallback` — the subfolder used when no pattern matches
+- `domain.skip_patterns` — files/folders to never process
+- `domain.default_tags` — tags to apply to every note in this domain
+- `domain.style.summary_word_count` — the target word count range for summary paragraphs
 
 **File system access:**
 - If `file_system_type == "nas-mcp"`: use `mcp__nas__list_files(path)` to list and `mcp__nas__read_file(path)` to read.
@@ -296,15 +322,16 @@ YYMMDD prefix stripped, CJK/accents normalized, spaces preserved.
 
 ### 6i. Build the frontmatter
 
-All 13 required fields (+ `attachments` if images embedded), in canonical order:
+All 14 required fields (+ `attachments` and `tags` if applicable), in canonical order:
 
 ```yaml
 ---
-schema_version: 1
+schema_version: 2
 plugin: vault-bridge
+domain: "{domain-name}"
 project: "{project-name-from-top-level-folder}"
 source_path: "{absolute-path-on-source}"
-file_type: {folder | pdf | docx | pptx | xlsx | jpg | png | psd | ai | dxf | dwg | rvt | 3dm | mov | mp4 | image-folder}
+file_type: {folder | pdf | docx | pptx | xlsx | jpg | png | psd | ai | dxf | dwg | rvt | 3dm | mov | mp4 | image-folder | md | txt | html | csv | json}
 captured_date: {today YYYY-MM-DD}
 event_date: {computed in 6a}
 event_date_source: {filename-prefix | parent-folder-prefix | mtime}
@@ -316,11 +343,13 @@ read_bytes: {sum of bytes actually read}
 content_confidence: {high | metadata-only}
 attachments:
   - "2024-09-09--image-stem--abc12345.jpg"
+tags: [architecture]
 cssclasses: [img-grid]
 ---
 ```
 
 If no images embedded, omit the `attachments` field entirely and use `cssclasses: []`.
+If no tags, omit the `tags` field.
 
 ### 6j. Write the note via obsidian CLI
 
@@ -332,7 +361,7 @@ obsidian create vault="$VAULT_NAME" name="$NOTE_NAME" path="$PROJECT/$SUBFOLDER"
 ```
 
 Where:
-- `$VAULT_NAME` — from config.vault_root (the vault directory name)
+- `$VAULT_NAME` — from config.vault_name
 - `$NOTE_NAME` — the note filename without `.md` extension
 - `$PROJECT/$SUBFOLDER` — e.g. `2408 Sample Project/SD`
 - `$FULL_CONTENT` — the complete note including `---` frontmatter fences and body.
@@ -362,9 +391,10 @@ Pipe the content to the validator:
 python3 ${CLAUDE_PLUGIN_ROOT}/scripts/validate_frontmatter.py --stdin
 ```
 
-Or validate by reading from the vault's disk path (known from config):
+Alternatively, validate the content string before writing by saving it
+to a temp file:
 ```
-python3 ${CLAUDE_PLUGIN_ROOT}/scripts/validate_frontmatter.py "$VAULT_ROOT/$PROJECT/$SUBFOLDER/$NOTE_NAME.md"
+echo "$FULL_CONTENT" > /tmp/_vb_validate.md && python3 ${CLAUDE_PLUGIN_ROOT}/scripts/validate_frontmatter.py /tmp/_vb_validate.md
 ```
 
 **If exit code is 0:** continue to step 6l.

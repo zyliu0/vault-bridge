@@ -1,6 +1,6 @@
 ---
 description: Autonomous delta scan — detect new/modified files and produce vault notes
-allowed-tools: Read, Write, Edit, Bash, Glob, Grep
+allowed-tools: Read, Bash, Glob, Grep
 argument-hint: "[--dry-run] [--since YYYY-MM-DD]"
 ---
 
@@ -11,7 +11,7 @@ silently, writes new vault notes for any new or modified files.
 
 ## Step 1 — load config
 
-Try the simple config first (written by `/vault-bridge:setup`):
+Load the v2 multi-domain config:
 
 ```
 python3 -c "
@@ -19,29 +19,26 @@ import sys, json
 sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
 import setup_config
 config = setup_config.load_config()
-preset = setup_config.get_preset(config['preset'])
-print(json.dumps({'config': config, 'preset': preset}))
+print(json.dumps(config))
 "
 ```
 
-If exit 0 → use the config and preset.
-
-If exit 2 (SetupNeeded) → try the advanced config path:
-```
-python3 ${CLAUDE_PLUGIN_ROOT}/scripts/parse_config.py CLAUDE.md
-```
-
-If THAT also fails → log "vault-bridge not configured, heartbeat skipping"
+If this fails → log "vault-bridge not configured, heartbeat skipping"
 to `~/.vault-bridge/heartbeat.log` and EXIT 0 (not an error — a cron job
 that can't run because of missing config should not alarm).
 
-Use `config.file_system_type` to choose tools:
-- `nas-mcp` → use `mcp__nas__list_files(path)` and `mcp__nas__read_file(path)`
-- `local-path` / `external-mount` → use Glob and Read tools
+Heartbeat scans ALL domains. For each domain in `config.domains`:
+- Use `domain.file_system_type` to choose tools
+- Use `domain.archive_root` as the base path to scan
+- Use `domain.routing_patterns`, `domain.skip_patterns`, `domain.style`
 
-Use `config.archive_root` as the base path to scan.
-Use `preset.routing_patterns`, `preset.skip_patterns`, `preset.style`
-for all routing and style decisions.
+For each delta file, use `domain_router.resolve_domain()` to determine
+which domain it belongs to:
+- **exact**: proceed with that domain.
+- **inferred**: proceed but log the inference to heartbeat.log.
+- **ambiguous**: SKIP the file. Log: "domain-ambiguous, skipped,
+  needs manual retro-scan". Heartbeat NEVER asks the user — it must be
+  non-interactive.
 
 ## Step 2 — acquire the scan lock
 
@@ -120,14 +117,15 @@ For each delta file, follow the same per-event pipeline as retro-scan:
 5. Read the file content (Template A) or mark metadata-only (Template B)
 6. Apply the fabrication firewall stop-word list
 7. Build frontmatter with the required fields in canonical order:
-   `schema_version: 1`, `plugin: vault-bridge`, `project`, `source_path`,
-   `file_type`, `captured_date`, `event_date`, `event_date_source`,
-   **`scan_type: heartbeat`** (not retro — this is the only difference from
-   retro-scan's frontmatter), `sources_read`, `read_bytes`, `content_confidence`,
-   `attachments` (if images embedded), `cssclasses`.
+   `schema_version: 2`, `plugin: vault-bridge`, `domain`, `project`,
+   `source_path`, `file_type`, `captured_date`, `event_date`,
+   `event_date_source`, **`scan_type: heartbeat`** (not retro — this is the
+   only difference from retro-scan's frontmatter), `sources_read`, `read_bytes`,
+   `content_confidence`, `attachments` (if images embedded), `tags` (from
+   domain default_tags), `cssclasses`.
    The file_type enum is the same as retro-scan: `folder`, `image-folder`,
    `pdf`, `docx`, `pptx`, `xlsx`, `jpg`, `png`, `psd`, `ai`, `dxf`, `dwg`,
-   `rvt`, `3dm`, `mov`, `mp4`.
+   `rvt`, `3dm`, `mov`, `mp4`, `md`, `txt`, `html`, `csv`, `json`.
    The `event_date_source` enum is the same: `filename-prefix`,
    `parent-folder-prefix`, `mtime`.
    The `content_confidence` enum is the same: `high` or `metadata-only`.
@@ -138,7 +136,7 @@ For each delta file, follow the same per-event pipeline as retro-scan:
    If Obsidian is not running, STOP and log the error.
 9. **Validate** — read back and validate:
    ```
-   python3 ${CLAUDE_PLUGIN_ROOT}/scripts/validate_frontmatter.py "$VAULT_ROOT/$PROJECT/$SUBFOLDER/$NOTE_NAME.md"
+   obsidian read vault="$VAULT_NAME" path="$PROJECT/$SUBFOLDER/$NOTE_NAME.md" | python3 ${CLAUDE_PLUGIN_ROOT}/scripts/validate_frontmatter.py --stdin
    ```
    Hard stop on non-zero exit.
 10. Append to the scan index

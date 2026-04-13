@@ -39,11 +39,16 @@ def die(msg: str) -> None:
 
 
 def validate(note_path: str) -> None:
+    """Validate a note file at a filesystem path (for temp files only)."""
     path = Path(note_path)
     if not path.exists():
         die(f"{note_path}: file does not exist")
+    validate_content(path.read_text(), note_path)
 
-    content = path.read_text()
+
+def validate_content(content: str, label: str = "<stdin>") -> None:
+    """Validate note content from a string. Core validation logic."""
+    note_path = label  # used in error messages
 
     # 1. Extract the frontmatter block between the first two --- lines.
     m = re.match(r"^---\n(.*?)\n---\n", content, re.DOTALL)
@@ -69,8 +74,20 @@ def validate(note_path: str) -> None:
         if field in fm and isinstance(fm[field], (datetime.date, datetime.datetime)):
             fm[field] = fm[field].isoformat()
 
+    # 2b. Determine schema version for version-aware validation.
+    sv = fm.get("schema_version")
+    if not isinstance(sv, int) or sv not in schema.SUPPORTED_SCHEMA_VERSIONS:
+        die(
+            f"{note_path}: schema_version must be one of "
+            f"{sorted(schema.SUPPORTED_SCHEMA_VERSIONS)}, got {sv!r}"
+        )
+
+    req_fields = schema.get_required_fields(sv)
+    opt_fields = schema.get_optional_fields(sv)
+    field_order = schema.get_field_order(sv)
+
     # 3. Drift case 1: no unknown fields.
-    allowed = set(schema.REQUIRED_FIELDS) | set(schema.OPTIONAL_FIELDS)
+    allowed = set(req_fields) | set(opt_fields)
     unknown = set(fm.keys()) - allowed
     if unknown:
         die(
@@ -79,7 +96,7 @@ def validate(note_path: str) -> None:
         )
 
     # 4. Drift case 2: all required fields present.
-    missing = set(schema.REQUIRED_FIELDS) - set(fm.keys())
+    missing = set(req_fields) - set(fm.keys())
     if missing:
         die(f"{note_path}: missing required field(s): {sorted(missing)}")
 
@@ -113,7 +130,12 @@ def validate(note_path: str) -> None:
             )
 
     # 7. Literal fields have the exact required value.
+    # schema_version is version-specific — v1 notes must have 1, v2 must have 2.
+    # Other literals (plugin) are the same across all versions.
     for field, required_value in schema.LITERAL_VALUES.items():
+        if field == "schema_version":
+            # Already validated as a supported version in step 2b
+            continue
         if fm.get(field) != required_value:
             die(
                 f"{note_path}: {field} must be literally {required_value!r}, "
@@ -131,7 +153,7 @@ def validate(note_path: str) -> None:
     # slot into their canonical position when present; missing optional fields
     # are skipped without disturbing the order of what's present.
     actual_order = _extract_top_level_key_order(fm_yaml)
-    expected_order = [f for f in schema.FIELD_ORDER if f in fm]
+    expected_order = [f for f in field_order if f in fm]
 
     if actual_order != expected_order:
         die(
@@ -167,9 +189,16 @@ def _extract_top_level_key_order(yaml_text: str) -> list:
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 2:
-        sys.stderr.write("usage: validate_frontmatter.py <note-path>\n")
+    if len(sys.argv) == 2 and sys.argv[1] == "--stdin":
+        content = sys.stdin.read()
+        if not content.strip():
+            sys.stderr.write("validate_frontmatter.py: --stdin received empty input\n")
+            sys.exit(2)
+        validate_content(content, "<stdin>")
+    elif len(sys.argv) == 2:
+        validate(sys.argv[1])
+    else:
+        sys.stderr.write("usage: validate_frontmatter.py <note-path> | --stdin\n")
         sys.exit(2)
-    validate(sys.argv[1])
     # If we reach here, all checks passed.
     sys.exit(0)

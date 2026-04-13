@@ -290,8 +290,9 @@ def test_pipeline_5_note_write_and_validate(fixture_source, fixture_vault, fixtu
 
     # Build the note in canonical order
     frontmatter_lines = [
-        "schema_version: 1",
+        "schema_version: 2",
         "plugin: vault-bridge",
+        "domain: test-domain",
         'project: "sample-project"',
         f'source_path: "{pdf}"',
         "file_type: pdf",

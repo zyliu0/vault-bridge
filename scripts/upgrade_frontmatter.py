@@ -75,6 +75,7 @@ def upgrade_frontmatter(
     note_body: str,
     project_name: str,
     mtime_unix: float,
+    domain: str = "",
 ) -> dict:
     """Upgrade a note's frontmatter to the vault-bridge schema.
 
@@ -84,6 +85,7 @@ def upgrade_frontmatter(
         note_body: The full body text of the note (after the --- fence).
         project_name: The project folder name (e.g. "2408 Sample Project").
         mtime_unix: The note file's modification time (Unix timestamp).
+        domain: The domain name (e.g. "arch-projects"). Required for v2.
 
     Returns:
         A new dict with all vault-bridge schema fields in canonical order.
@@ -94,6 +96,9 @@ def upgrade_frontmatter(
     # --- Literal fields: always set to the required value ---
     for field, required_value in LITERAL_VALUES.items():
         fm[field] = required_value
+
+    # --- domain ---
+    fm["domain"] = existing_fm.get("domain") or domain
 
     # --- project ---
     fm["project"] = existing_fm.get("project") or project_name
@@ -169,6 +174,11 @@ def upgrade_frontmatter(
     existing_attachments = existing_fm.get("attachments")
     if isinstance(existing_attachments, list) and existing_attachments:
         fm["attachments"] = existing_attachments
+
+    # --- tags (optional) ---
+    existing_tags = existing_fm.get("tags")
+    if isinstance(existing_tags, list) and existing_tags:
+        fm["tags"] = existing_tags
 
     # --- cssclasses ---
     existing_css = existing_fm.get("cssclasses")

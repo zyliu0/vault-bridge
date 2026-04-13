@@ -1,7 +1,7 @@
 ---
 description: Upgrade existing vault notes to the vault-bridge schema
-allowed-tools: Read, Write, Edit, Bash, Glob, Grep
-argument-hint: "[project-folder-path] [--dry-run] [--re-read] [--move]"
+allowed-tools: Read, Bash, Glob, Grep, AskUserQuestion
+argument-hint: "[project-folder-path] [--dry-run] [--re-read] [--move] [--migrate-v2]"
 ---
 
 You are upgrading existing vault notes in a project folder to match the
@@ -12,6 +12,7 @@ and potentially fabricated content.
 The argument `$1` is a vault project folder path (e.g. `2408 Sample Project/`).
 
 Flags:
+- `--migrate-v2` — upgrade schema_version 1 notes to v2 (adds domain, tags)
 - `--dry-run` — Phase 1 only: show the audit report, change nothing
 - `--re-read` — Phase 2b: re-read source files on the NAS to verify content
   and upgrade content_confidence from metadata-only to high where grounded
@@ -21,7 +22,7 @@ Default (no flags): Phase 1 audit + Phase 2 frontmatter upgrade.
 
 ## Step 1 — load config
 
-Load the vault-bridge config via setup_config:
+Load the v2 multi-domain config:
 
 ```
 python3 -c "
@@ -29,16 +30,29 @@ import sys, json
 sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
 import setup_config
 config = setup_config.load_config()
-preset = setup_config.get_preset(config['preset'])
-print(json.dumps({'config': config, 'preset': preset}))
+print(json.dumps(config))
 "
 ```
 
 If this fails, try parse_config.py as a fallback. If both fail, tell the user
 to run `/vault-bridge:setup` first and STOP.
 
-Use `config.file_system_type` to decide which tools read the NAS/file system.
-Use `preset.routing_patterns` for Phase 3 routing checks.
+Determine which domain the project folder belongs to using
+`domain_router.resolve_domain()`. If ambiguous, ask the user via
+AskUserQuestion with structured options.
+
+Use `domain.file_system_type` to decide which tools read the NAS/file system.
+Use `domain.routing_patterns` for Phase 3 routing checks.
+
+### v1-to-v2 migration (--migrate-v2 only)
+
+When `--migrate-v2` is set, for each note with `schema_version: 1`:
+1. Infer the `domain` from the note's vault path (parent folder = domain name)
+   or ask the user via AskUserQuestion if unclear
+2. Set `tags` from `domain.default_tags`
+3. Set `schema_version: 2`
+4. Run through `upgrade_frontmatter()` with the domain parameter
+5. Validate with the v2 schema
 
 ## Step 2 — find all notes in the project folder
 
@@ -48,9 +62,9 @@ Use the obsidian CLI to search for notes in the project folder:
 obsidian search vault="$VAULT_NAME" query="path:$1" limit=500
 ```
 
-Or list via the vault's disk path (from config.vault_root):
-```
-Glob: $VAULT_ROOT/$1/**/*.md
+Or list via obsidian CLI with a path filter:
+```bash
+obsidian search vault="$VAULT_NAME" query="path:$1/" limit=500
 ```
 
 Exclude `_index.md`, `_scan-log.md`, `_vault-health-*.md` — those are meta
@@ -66,30 +80,33 @@ For each note, assess:
 
 ### 1a. Schema compliance
 
-Run the upgrade function mentally (or via Bash):
+First, read the note content via obsidian CLI:
+
+```bash
+obsidian read vault="$VAULT_NAME" path="NOTE_PATH"
+```
+
+Capture the output as `$NOTE_CONTENT`. Then run the upgrade check:
 
 ```
-python3 -c "
-import sys, json, yaml, re, os
+VB_CONTENT="$NOTE_CONTENT" python3 -c "
+import sys, json, yaml, re, os, time
 sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
 import upgrade_frontmatter as uf
 
-# Read the note
-content = open('NOTE_PATH').read()
+content = os.environ['VB_CONTENT']
 m = re.match(r'^---\n(.*?)\n---\n(.*)', content, re.DOTALL)
 existing_fm = yaml.safe_load(m.group(1)) if m else {}
 body = m.group(2) if m else content
 
-# Upgrade
 new_fm = uf.upgrade_frontmatter(
     existing_fm=existing_fm or {},
     note_filename='NOTE_FILENAME',
     note_body=body,
     project_name='PROJECT_NAME',
-    mtime_unix=os.path.getmtime('NOTE_PATH'),
+    mtime_unix=time.time(),
 )
 
-# Diff
 changes = {}
 for k, v in new_fm.items():
     old_v = existing_fm.get(k) if existing_fm else None
@@ -212,7 +229,7 @@ The body stays byte-for-byte identical (unless --re-read added a warning callout
 
 Run:
 ```
-python3 ${CLAUDE_PLUGIN_ROOT}/scripts/validate_frontmatter.py "$VAULT_ROOT/$NOTE_PATH"
+obsidian read vault="$VAULT_NAME" path="$NOTE_PATH" | python3 ${CLAUDE_PLUGIN_ROOT}/scripts/validate_frontmatter.py --stdin
 ```
 
 If exit 0 → success, move to next note.

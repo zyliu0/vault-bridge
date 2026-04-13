@@ -38,6 +38,7 @@ def _upgrade(
     note_body: str = "",
     project_name: str = "Test Project",
     mtime_unix: float = None,
+    domain: str = "test-domain",
 ):
     """Convenience wrapper around upgrade_frontmatter."""
     if mtime_unix is None:
@@ -48,6 +49,7 @@ def _upgrade(
         note_body=note_body,
         project_name=project_name,
         mtime_unix=mtime_unix,
+        domain=domain,
     )
 
 
@@ -61,9 +63,9 @@ def test_bare_note_gets_full_schema():
         assert field in fm, f"Missing required field: {field}"
 
 
-def test_bare_note_has_schema_version_1():
+def test_bare_note_has_schema_version_2():
     fm = _upgrade()
-    assert fm["schema_version"] == 1
+    assert fm["schema_version"] == 2
 
 
 def test_bare_note_has_plugin_vault_bridge():
@@ -124,8 +126,9 @@ def test_partial_fm_preserves_existing_event_date():
 
 def test_partial_fm_fills_missing_fields():
     fm = _upgrade(existing_fm={"project": "Foo", "event_date": "2024-01-01"})
-    assert fm["schema_version"] == 1
+    assert fm["schema_version"] == 2
     assert fm["plugin"] == "vault-bridge"
+    assert fm["domain"] == "test-domain"
     assert fm["sources_read"] == []
     assert fm["content_confidence"] == "metadata-only"
 
@@ -136,7 +139,7 @@ def test_partial_fm_fills_missing_fields():
 
 def test_wrong_schema_version_gets_corrected():
     fm = _upgrade(existing_fm={"schema_version": 99})
-    assert fm["schema_version"] == 1
+    assert fm["schema_version"] == 2
 
 
 def test_wrong_plugin_name_gets_corrected():

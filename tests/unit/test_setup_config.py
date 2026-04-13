@@ -1,7 +1,11 @@
-"""Tests for scripts/setup_config.py — the lightweight config store.
+"""Tests for scripts/setup_config.py — the multi-domain config store.
 
-Replaces the vault CLAUDE.md config block requirement with a simple
-~/.vault-bridge/config.json file written once during /vault-bridge:setup.
+v2 config replaces the single-preset model with a `domains` list. Each
+domain has its own archive_root, file_system_type, routing patterns, and
+default_tags. The vault_name is shared across all domains.
+
+Backward compatibility: a v1 config (flat preset) auto-upgrades to a
+single-domain config on load.
 """
 import json
 import sys
@@ -24,119 +28,196 @@ def state_dir(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# save + load roundtrip
+# v2 save + load roundtrip
 # ---------------------------------------------------------------------------
 
-def test_save_and_load_roundtrip(state_dir):
-    setup_config.save_config(
-        archive_root="/archive/",
-        preset="architecture",
-        file_system_type="nas-mcp",
-        vault_root="/Users/me/Obsidian",
-    )
+def _sample_domain(name="arch-projects", archive_root="/archive/", fs_type="nas-mcp"):
+    return {
+        "name": name,
+        "label": name.replace("-", " ").title(),
+        "archive_root": archive_root,
+        "file_system_type": fs_type,
+        "routing_patterns": [{"match": "CD", "subfolder": "CD"}],
+        "content_overrides": [],
+        "fallback": "Admin",
+        "skip_patterns": [".DS_Store"],
+        "default_tags": ["architecture"],
+        "style": {
+            "note_filename_pattern": "YYYY-MM-DD topic.md",
+            "writing_voice": "first-person-diary",
+            "summary_word_count": [100, 200],
+        },
+    }
 
+
+def test_save_and_load_roundtrip_v2(state_dir):
+    domains = [_sample_domain()]
+    setup_config.save_config(vault_name="Obsidian", domains=domains)
     config = setup_config.load_config()
-    assert config["archive_root"] == "/archive/"
-    assert config["preset"] == "architecture"
-    assert config["file_system_type"] == "nas-mcp"
-    assert config["vault_root"] == "/Users/me/Obsidian"
+    assert config["config_version"] == 2
+    assert config["vault_name"] == "Obsidian"
+    assert len(config["domains"]) == 1
+    assert config["domains"][0]["name"] == "arch-projects"
 
 
-def test_save_creates_config_json_file(state_dir):
-    path = setup_config.save_config("/archive/", "architecture", "nas-mcp", "/vault")
+def test_save_multi_domain(state_dir):
+    domains = [
+        _sample_domain("arch-projects", "/archive/", "nas-mcp"),
+        _sample_domain("content", "~/Documents/Content/", "local-path"),
+    ]
+    setup_config.save_config(vault_name="Obsidian", domains=domains)
+    config = setup_config.load_config()
+    assert len(config["domains"]) == 2
+    assert config["domains"][1]["name"] == "content"
+
+
+def test_save_creates_config_json(state_dir):
+    path = setup_config.save_config("Obsidian", [_sample_domain()])
     assert path.exists()
     assert path.name == "config.json"
-    data = json.loads(path.read_text())
-    assert data["preset"] == "architecture"
 
 
 def test_load_raises_when_no_config(state_dir):
-    with pytest.raises(setup_config.SetupNeeded) as exc_info:
+    with pytest.raises(setup_config.SetupNeeded, match="not configured"):
         setup_config.load_config()
-    assert "not configured" in str(exc_info.value).lower()
 
 
-def test_load_raises_on_missing_fields(state_dir):
-    path = state_dir / "config.json"
-    path.write_text(json.dumps({"archive_root": "/archive/"}) + "\n")
-    with pytest.raises(setup_config.SetupNeeded) as exc_info:
-        setup_config.load_config()
-    assert "missing" in str(exc_info.value).lower()
+def test_save_rejects_path_as_vault_name(state_dir):
+    with pytest.raises(ValueError, match="not a path"):
+        setup_config.save_config("/Users/me/Obsidian", [_sample_domain()])
 
 
-def test_load_raises_on_invalid_preset(state_dir):
-    path = state_dir / "config.json"
-    path.write_text(json.dumps({
-        "archive_root": "/x", "preset": "invalid",
-        "file_system_type": "local-path", "vault_root": "/v",
-    }) + "\n")
-    with pytest.raises(setup_config.SetupNeeded) as exc_info:
-        setup_config.load_config()
-    assert "preset" in str(exc_info.value).lower()
+def test_save_rejects_tilde_as_vault_name(state_dir):
+    with pytest.raises(ValueError, match="not a path"):
+        setup_config.save_config("~/Obsidian", [_sample_domain()])
 
 
-def test_load_raises_on_invalid_fs_type(state_dir):
-    path = state_dir / "config.json"
-    path.write_text(json.dumps({
-        "archive_root": "/x", "preset": "architecture",
-        "file_system_type": "webdav", "vault_root": "/v",
-    }) + "\n")
-    with pytest.raises(setup_config.SetupNeeded) as exc_info:
-        setup_config.load_config()
-    assert "file_system_type" in str(exc_info.value).lower()
+def test_save_rejects_empty_domains(state_dir):
+    with pytest.raises(ValueError, match="at least one domain"):
+        setup_config.save_config("Obsidian", [])
 
 
-def test_save_rejects_invalid_preset(state_dir):
-    with pytest.raises(ValueError):
-        setup_config.save_config("/x", "invalid", "local-path", "/v")
-
-
-def test_save_rejects_invalid_fs_type(state_dir):
-    with pytest.raises(ValueError):
-        setup_config.save_config("/x", "architecture", "webdav", "/v")
+def test_save_rejects_duplicate_domain_names(state_dir):
+    dup = [_sample_domain("foo"), _sample_domain("foo")]
+    with pytest.raises(ValueError, match="duplicate"):
+        setup_config.save_config("Obsidian", dup)
 
 
 # ---------------------------------------------------------------------------
-# Presets
+# v1 backward compatibility
 # ---------------------------------------------------------------------------
 
-def test_architecture_preset_has_routing_patterns():
-    preset = setup_config.get_preset("architecture")
-    assert len(preset["routing_patterns"]) > 5
-    assert preset["fallback"] == "Admin"
-    assert any(p["match"] == "3_施工图 CD" for p in preset["routing_patterns"])
+def test_v1_config_auto_upgrades_on_load(state_dir):
+    """A v1 config (flat preset) loads as a single-domain v2 config."""
+    v1 = {
+        "archive_root": "/archive/",
+        "preset": "architecture",
+        "file_system_type": "nas-mcp",
+        "vault_name": "Obsidian",
+    }
+    (state_dir / "config.json").write_text(json.dumps(v1) + "\n")
+    config = setup_config.load_config()
+    assert config["config_version"] == 2
+    assert len(config["domains"]) == 1
+    d = config["domains"][0]
+    assert d["name"] == "architecture"
+    assert d["archive_root"] == "/archive/"
+    assert d["file_system_type"] == "nas-mcp"
 
 
-def test_photographer_preset_has_selects_route():
-    preset = setup_config.get_preset("photographer")
-    assert any(p["match"] == "_Selects" for p in preset["routing_patterns"])
-    assert preset["fallback"] == "Archive"
+# ---------------------------------------------------------------------------
+# Domain templates (replacing presets)
+# ---------------------------------------------------------------------------
+
+def test_get_domain_template_architecture():
+    t = setup_config.get_domain_template("architecture")
+    assert len(t["routing_patterns"]) > 5
+    assert t["fallback"] == "Admin"
 
 
-def test_writer_preset_has_drafts_route():
-    preset = setup_config.get_preset("writer")
-    assert any(p["match"] == "Drafts" for p in preset["routing_patterns"])
-    assert preset["fallback"] == "Inbox"
+def test_get_domain_template_photographer():
+    t = setup_config.get_domain_template("photography")
+    assert any(p["match"] == "_Selects" for p in t["routing_patterns"])
+    assert t["fallback"] == "Archive"
 
 
-def test_custom_preset_raises_with_helpful_message():
-    with pytest.raises(KeyError) as exc_info:
-        setup_config.get_preset("custom")
-    assert "parse_config.py" in str(exc_info.value)
+def test_get_domain_template_writer():
+    t = setup_config.get_domain_template("writing")
+    assert any(p["match"] == "Drafts" for p in t["routing_patterns"])
+    assert t["fallback"] == "Inbox"
 
 
-def test_every_preset_has_required_keys():
-    required_keys = {"routing_patterns", "content_overrides", "fallback", "skip_patterns", "style"}
-    for name in ("architecture", "photographer", "writer"):
-        preset = setup_config.get_preset(name)
-        missing = required_keys - set(preset.keys())
-        assert not missing, f"Preset '{name}' missing keys: {missing}"
+def test_get_domain_template_social_media():
+    t = setup_config.get_domain_template("social-media")
+    assert t["fallback"] in ("Inbox", "Drafts")
+    assert "content-creation" in t["default_tags"]
 
 
-def test_every_preset_style_has_word_count():
-    for name in ("architecture", "photographer", "writer"):
-        preset = setup_config.get_preset(name)
-        wc = preset["style"]["summary_word_count"]
-        assert isinstance(wc, list)
-        assert len(wc) == 2
-        assert wc[0] < wc[1]
+def test_get_domain_template_research():
+    t = setup_config.get_domain_template("research")
+    assert "research" in t["default_tags"]
+
+
+def test_get_domain_template_general():
+    t = setup_config.get_domain_template("general")
+    assert t["fallback"] == "Inbox"
+
+
+def test_unknown_template_raises():
+    with pytest.raises(KeyError):
+        setup_config.get_domain_template("nonexistent")
+
+
+def test_every_template_has_required_keys():
+    required = {"routing_patterns", "content_overrides", "fallback",
+                "skip_patterns", "default_tags", "style"}
+    for name in setup_config.DOMAIN_TEMPLATES:
+        t = setup_config.get_domain_template(name)
+        missing = required - set(t.keys())
+        assert not missing, f"Template '{name}' missing: {missing}"
+
+
+def test_every_template_style_has_word_count():
+    for name in setup_config.DOMAIN_TEMPLATES:
+        t = setup_config.get_domain_template(name)
+        wc = t["style"]["summary_word_count"]
+        assert isinstance(wc, list) and len(wc) == 2 and wc[0] < wc[1]
+
+
+# ---------------------------------------------------------------------------
+# Domain lookup helpers
+# ---------------------------------------------------------------------------
+
+def test_get_domain_by_name(state_dir):
+    domains = [_sample_domain("alpha"), _sample_domain("beta", "/other/")]
+    setup_config.save_config("Obsidian", domains)
+    config = setup_config.load_config()
+    d = setup_config.get_domain_by_name(config, "beta")
+    assert d["archive_root"] == "/other/"
+
+
+def test_get_domain_by_name_not_found(state_dir):
+    domains = [_sample_domain("alpha")]
+    setup_config.save_config("Obsidian", domains)
+    config = setup_config.load_config()
+    with pytest.raises(KeyError, match="no domain named"):
+        setup_config.get_domain_by_name(config, "missing")
+
+
+def test_get_domain_for_path_exact(state_dir):
+    domains = [
+        _sample_domain("alpha", "/nas/alpha/"),
+        _sample_domain("beta", "/nas/beta/"),
+    ]
+    setup_config.save_config("Obsidian", domains)
+    config = setup_config.load_config()
+    d = setup_config.get_domain_for_path(config, "/nas/beta/project/file.pdf")
+    assert d["name"] == "beta"
+
+
+def test_get_domain_for_path_no_match(state_dir):
+    domains = [_sample_domain("alpha", "/nas/alpha/")]
+    setup_config.save_config("Obsidian", domains)
+    config = setup_config.load_config()
+    result = setup_config.get_domain_for_path(config, "/other/path/file.pdf")
+    assert result is None

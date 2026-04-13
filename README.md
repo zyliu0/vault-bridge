@@ -22,23 +22,28 @@ vault is the only thing that changes.
 
 ```
 your-vault/
-└── 2408 Sample Project/          ← project folder, created by vault-bridge
-    ├── _index.md                 ← auto-generated project overview
-    ├── _scan-log.md              ← audit trail of what was scanned
-    ├── Admin/                    ← contracts, briefs, correspondence
-    │   └── 2024-08-09 concept presentation memo.md
-    ├── Meetings/                 ← meeting memos detected from filenames
-    │   ├── 2024-09-09 client review.md
-    │   └── 2024-09-09 client review.canvas  ← diagram for complex events
-    ├── SD/                       ← schematic design phase notes
-    │   ├── 2024-07-15 site study.md
-    │   └── 2024-08-27 booklet update.md
-    ├── CD/                       ← construction document notes
-    │   └── 2025-10-01 structural drawings.md
-    ├── Renderings/
-    │   └── 2024-12-27 rendering compilation.md
-    └── _Attachments/             ← compressed image thumbnails
-        └── 2024-09-09--client-review--a3f2b9c1.jpg
+├── arch-projects/                    ← domain: architecture
+│   └── 2408 Sample Project/
+│       ├── _index.md
+│       ├── SD/
+│       │   └── 2024-07-15 site study.md
+│       ├── Meetings/
+│       │   ├── 2024-09-09 client review.md
+│       │   └── 2024-09-09 client review.canvas
+│       └── _Attachments/
+│           └── 2024-09-09--client-review--a3f2b9c1.jpg
+├── photography/                      ← domain: photography
+│   └── 2024 Client Shoot/
+│       ├── Selects/
+│       │   └── 2024-12-15 final selection.md
+│       └── Raw/
+│           └── 2024-12-10 shoot day.md
+└── content/                          ← domain: social media
+    └── YouTube Series/
+        ├── Published/
+        │   └── 2025-01-20 episode launch.md
+        └── Drafts/
+            └── 2025-02-01 script draft.md
 ```
 
 Each `.md` file is a diary paragraph about what's IN that source file or
@@ -123,19 +128,21 @@ at `~/.vault-bridge/config.json`, so it works from wherever you are.
 /vault-bridge:setup
 ```
 
-Setup asks two questions:
-1. **Where is your archive?** — the root folder vault-bridge will scan
-   (e.g. `/volume1/projects/`, `~/Documents/Archive/`, `/Volumes/Projects/`)
-2. **What kind of archive?** — pick a preset:
-   - **Architecture practice** — project folders with SD/DD/CD phase
-     organization, bilingual folder names
-   - **Photographer archive** — year-based with `_Selects/`, `_Contact/`,
-     edit/raw subfolders
-   - **Writer's notebook** — `Drafts/`, `Published/`, `Research/`, `Meetings/`
-   - **Custom** — define your own routing rules (advanced)
+Setup asks a few structured questions:
+1. **Vault name** — which Obsidian vault to write notes to
+2. **Simple or multi-domain** — one archive or multiple types of work?
+3. **For each domain:**
+   - A label (e.g., "Architecture Projects", "Photography")
+   - The archive root path
+   - A domain template to start from (architecture, photography, writing,
+     social media, research, or general)
 
-Setup auto-detects whether you have a NAS MCP server, saves the config,
-and installs an Obsidian note template into your vault's `_Templates/`.
+You can configure 1 domain or many — an architecture practice, a photography
+archive, and a social media content folder all in one vault. Each domain
+gets its own top-level folder and routing rules.
+
+Setup auto-detects file system types, saves the config, and optionally
+installs an Obsidian note template.
 
 ### Step 2 — first scan
 
@@ -264,7 +271,9 @@ vault-bridge/
 ├── scripts/                     # helper Python (all test-covered)
 │   ├── schema.py                # single source of truth for frontmatter contract
 │   ├── parse_config.py          # vault CLAUDE.md config parser + validator
-│   ├── setup_config.py          # lightweight config store (~/.vault-bridge/)
+│   ├── setup_config.py          # multi-domain config store (~/.vault-bridge/)
+│   ├── domain_router.py         # domain resolution and event routing
+│   ├── user_prompt.py           # structured prompt builder for AskUserQuestion
 │   ├── state.py                 # shared state directory resolution
 │   ├── validate_frontmatter.py  # write-time schema enforcer (the backstop)
 │   ├── upgrade_frontmatter.py   # old-workflow → vault-bridge schema migration
@@ -275,9 +284,9 @@ vault-bridge/
 ├── templates/
 │   └── vault-bridge-note.md     # Obsidian Templater template for manual notes
 ├── tests/
-│   ├── unit/                    # 200+ unit tests (pytest)
+│   ├── unit/                    # 250+ unit tests (pytest)
 │   └── integration/             # end-to-end scan on a fixture project
-├── CLAUDE.md                    # plugin-scoped instructions + 3 preset profiles
+├── CLAUDE.md                    # plugin-scoped instructions + domain config reference
 ├── LICENSE                      # MIT
 ├── README.md                    # you are here
 └── requirements.txt             # Pillow, PyYAML, PyPDF2, python-docx, python-pptx

@@ -125,7 +125,7 @@ def test_setup_command_exists_and_calls_save():
         pytest.skip("commands/setup.md not yet created")
     assert "setup_config" in content or "save_config" in content
     assert "archive" in content.lower()
-    assert "preset" in content.lower()
+    assert "domain" in content.lower()
 
 
 def test_revise_command_exists_and_calls_upgrade():
@@ -226,16 +226,18 @@ def test_readme_mentions_all_three_commands():
 # Plugin CLAUDE.md ships preset profiles
 # ---------------------------------------------------------------------------
 
-def test_plugin_claude_md_has_all_three_presets():
+def test_plugin_claude_md_mentions_domain_configuration():
     content = _plugin_claude_md()
     if not content:
         import pytest
         pytest.skip("CLAUDE.md not yet created")
-    # The 3 preset profile names from the design doc
-    presets = ["architecture", "photographer", "writer"]
-    for p in presets:
-        assert p.lower() in content.lower(), (
-            f"plugin CLAUDE.md does not include the '{p}' preset profile"
+    assert "domain" in content.lower(), (
+        "plugin CLAUDE.md does not mention domain configuration"
+    )
+    # Should mention at least the core domain templates
+    for name in ["architecture", "photography", "writing"]:
+        assert name.lower() in content.lower(), (
+            f"plugin CLAUDE.md does not mention the '{name}' domain template"
         )
 
 

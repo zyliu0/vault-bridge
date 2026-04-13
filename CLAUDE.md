@@ -2,7 +2,7 @@
 
 Claude reads this file whenever the vault-bridge plugin is enabled. It
 documents the plugin's conventions, the fabrication firewall rules, and
-the three preset configuration profiles.
+the domain-based configuration system.
 
 ## Core principle: vault isolation
 
@@ -16,7 +16,7 @@ Obsidian instance.
 
 | Zone | Access | Tools |
 |------|--------|-------|
-| Archive (NAS/drive) | Read-only | `mcp__nas__*` or `Read`/`Glob` |
+| Archive (NAS/drive) | Read-only, per-domain | `mcp__nas__*` or `Read`/`Glob` |
 | Vault (Obsidian) | Via CLI only | `obsidian create`, `obsidian read`, `obsidian search`, `obsidian append`, `obsidian property:set` |
 | State (`~/.vault-bridge/`) | Read-write | Python scripts via `Bash` |
 
@@ -27,18 +27,12 @@ tell the user to open Obsidian and retry.
 ## Core principle: the fabrication firewall
 
 vault-bridge writes vault notes from a user's file archive. The greatest
-risk is NOT getting schema drift wrong, NOT missing files, NOT routing
-things to the wrong subfolder — it is **writing diary-style prose about
-file content that was never actually read**. That's what Composition Test 1
-proved: a naive composition produces 50 plausible-sounding notes from
-folder names alone.
-
-Every Template A note body MUST be grounded in content that was actually
-read via the file_system.access_pattern. Every claim about architectural
-decisions, people, dates, amounts, dimensions, or relationships must be
-something the model literally saw in the extracted text. If the source
-was not read, the note uses Template B verbatim — fixed bullet template,
-no prose.
+risk is **writing diary-style prose about file content that was never
+actually read**. Every Template A note body MUST be grounded in content
+that was actually read. Every claim about decisions, people, dates,
+amounts, dimensions, or relationships must be something the model literally
+saw in the extracted text. If the source was not read, the note uses
+Template B verbatim — fixed bullet template, no prose.
 
 The stop-word list that enforces this:
 - "pulled the back wall in"
@@ -48,178 +42,95 @@ The stop-word list that enforces this:
 - "half a storey"
 - "40cm" (or any specific measurement not in the source)
 
-Before writing ANY sentence in a Template A body, check it against this
-list. If the sentence would contain any of these patterns AND the claim
-is not literally present in the extracted content, STOP and cut the sentence.
+These are examples of the kind of fabrication to catch. The general rule:
+any specific measurement, quote, decision, person, or date that was not
+literally read in the source content must not appear in the note.
 
-## The 3 preset configuration profiles
+## Data model: projects and events
 
-For most users, `/vault-bridge:setup` handles configuration automatically
-— no manual YAML needed. The presets below are the routing rules that
-setup applies. They are documented here for reference and for users who
-choose the "custom" preset and need to write their own routing config.
+Everything in vault-bridge is organized as **projects containing events**.
+An architecture drawing, a photo shoot, and a YouTube video are all the
+same structure — the data model does not vary by profession.
 
-Custom config goes in a `CLAUDE.md` file (in the vault or working
-directory) under a `## vault-bridge: configuration` heading.
+- **Domain** — a top-level vault folder that groups related projects
+  (e.g., `arch-projects/`, `photography/`, `content/`). Each domain has
+  its own archive root, routing rules, and default tags.
+- **Project** — a folder within a domain (e.g., `arch-projects/2408 Sample Project/`)
+- **Event** — a single diary note within a project, representing a milestone
 
-### Preset 1: Architecture / design practice
+## Multi-domain configuration
 
-The preset for architecture/design practices — project folders on a NAS
-with phase-based organization (SD/DD/CD/CA), date-stamped revision folders,
-meeting memos, rendering archives. Supports bilingual folder names.
+vault-bridge supports multiple domains in a single vault. Each domain has:
+- `name` — slug used in frontmatter and folder names (e.g., `arch-projects`)
+- `label` — display name (e.g., "Architecture Projects")
+- `archive_root` — where the source files live
+- `file_system_type` — `nas-mcp`, `local-path`, or `external-mount`
+- `routing_patterns` — path-based routing rules for subfolders
+- `content_overrides` — filename-based routing overrides
+- `fallback` — subfolder when no pattern matches
+- `default_tags` — tags applied to every note in this domain
+- `style` — writing voice, word count, filename pattern
 
-```yaml
-version: 1
+Config is stored at `~/.vault-bridge/config.json`. Run `/vault-bridge:setup`
+to configure. The setup wizard asks structured questions — no YAML editing
+needed.
 
-file_system:
-  type: nas-mcp
-  root_path: /archive/
-  access_pattern: |
-    Use mcp__nas__read_file(path) and mcp__nas__list_files(path) for all
-    file reads. Use mcp__nas__get_file_info(path) for DWG/RVT/3DM metadata.
+## Domain templates
 
-routing:
-  patterns:
-    - match: "3_施工图 CD"
-      subfolder: CD
-    - match: " CD"
-      subfolder: CD
-    - match: "2_方案SD"
-      subfolder: SD
-    - match: " SD"
-      subfolder: SD
-    - match: "1_概念Concept"
-      subfolder: SD
-    - match: "结构"
-      subfolder: Structure
-    - match: "Structure"
-      subfolder: Structure
-    - match: "模型汇总"
-      subfolder: Renderings
-    - match: "效果图"
-      subfolder: Renderings
-    - match: "渲染"
-      subfolder: Renderings
-    - match: "0_文档资料Docs"
-      subfolder: Admin
-  content_overrides:
-    - when: "filename contains one of ['meeting', '会议', '汇报', '汇']"
-      subfolder: Meetings
-  fallback: Admin
+Six built-in templates provide starting routing rules. Users pick one
+during setup; it gets written into their config for free editing.
 
-skip_patterns:
-  - "#recycle"
-  - "@eaDir"
-  - "_embedded_files"
-  - ".DS_Store"
-  - "Thumbs.db"
-  - "*.dwl"
-  - "*.dwl2"
-  - "*.bak"
-  - "*.tmp"
-  - "训练图集"
-  - "素材"
+### Architecture / design practice
 
-style:
-  note_filename_pattern: "YYYY-MM-DD topic.md"
-  writing_voice: first-person-diary
-  summary_word_count: [100, 200]
-  image_grid_cssclass: img-grid
-```
+Subfolders: `Admin/`, `SD/`, `DD/`, `CD/`, `CA/`, `Meetings/`,
+`Renderings/`, `Structure/`. Phase-based routing with bilingual folder
+name support (SD/DD/CD/CA). Meeting memos detected from filenames.
+Default tags: `[architecture]`. Fallback: `Admin`.
 
-### Preset 2: Photographer archive
+### Photography
 
-Top-level organization by year, with client or location subfolders,
-`_Selects/` for processed work, `_Contact/` for contact sheets. Assumes
-a locally mounted drive or external mount (not a NAS-MCP server).
+Subfolders: `Selects/`, `ContactSheets/`, `Edited/`, `Raw/`, `BTS/`,
+`Scouting/`, `Portfolio/`. Year-based with _Selects, _Contact, edit/raw
+conventions. Skips Lightroom catalog files.
+Default tags: `[photography]`. Fallback: `Archive`.
 
-```yaml
-version: 1
+### Writing
 
-file_system:
-  type: local-path
-  root_path: ~/Pictures/Archive
-  access_pattern: "Use the Read and Glob tools for all file reads."
+Subfolders: `Drafts/`, `Published/`, `Research/`, `Interviews/`,
+`Meetings/`. Meeting memos detected from filenames.
+Default tags: `[writing]`. Fallback: `Inbox`.
 
-routing:
-  patterns:
-    - match: "_Selects"
-      subfolder: Selects
-    - match: "_Contact"
-      subfolder: ContactSheets
-    - match: "Edited"
-      subfolder: Edited
-    - match: "Raw"
-      subfolder: Raw
-    - match: "Portfolio"
-      subfolder: Portfolio
-  fallback: Archive
+### Social media / content
 
-skip_patterns:
-  - ".DS_Store"
-  - "Thumbs.db"
-  - "*.xmp"        # sidecar files, not events
-  - "*.lrcat"      # Lightroom catalog
-  - "*.lrdata"
-  - "Previews.lrdata"
+Subfolders: `Scripts/`, `Short-form/`, `Long-form/`, `Threads/`,
+`Assets/`, `Analytics/`, `Collabs/`. Routes by content type (not by
+platform — platform goes in tags). Vlog scripts, reels, threads, and
+thumbnails each route to the right folder.
+Default tags: `[content-creation]`. Fallback: `Inbox`.
 
-style:
-  note_filename_pattern: "YYYY-MM-DD topic.md"
-  writing_voice: first-person-diary
-  summary_word_count: [100, 200]
-```
+### Research
 
-### Preset 3: Writer's notebook
+Subfolders: `Sources/`, `Notes/`, `Clippings/`, `Bookmarks/`,
+`References/`, `Highlights/`. Papers, annotations, bibliographies.
+Default tags: `[research]`. Fallback: `Inbox`.
 
-Drafts, published pieces, research, meetings, a catch-all inbox. Assumes
-a local directory of markdown and document files.
+### General
 
-```yaml
-version: 1
+Subfolders: `Documents/`, `Media/`, `Meetings/`. Minimal routing — good
+starting point for any domain. Meeting memos detected from filenames.
+Default tags: `[]`. Fallback: `Inbox`.
 
-file_system:
-  type: local-path
-  root_path: ~/Documents/Writing
-  access_pattern: "Use the Read and Glob tools for all file reads."
+## Domain resolution
 
-routing:
-  patterns:
-    - match: "Drafts"
-      subfolder: Drafts
-    - match: "Published"
-      subfolder: Published
-    - match: "Research"
-      subfolder: Research
-    - match: "Interviews"
-      subfolder: Interviews
-    - match: "Meetings"
-      subfolder: Meetings
-  content_overrides:
-    - when: "filename contains one of ['meeting', 'notes', 'call']"
-      subfolder: Meetings
-  fallback: Inbox
+When a scan command runs, vault-bridge auto-detects which domain a source
+file belongs to by matching the source path against each domain's
+`archive_root`. If the match is:
+- **exact** — proceed silently
+- **inferred** — ask for confirmation
+- **ambiguous** — present a structured selection via AskUserQuestion
 
-skip_patterns:
-  - ".DS_Store"
-  - "*.tmp"
-  - ".obsidian"   # the user's own Obsidian config
-
-style:
-  note_filename_pattern: "YYYY-MM-DD topic.md"
-  writing_voice: first-person-diary
-  summary_word_count: [100, 200]
-```
-
-## Setup
-
-The recommended path is `/vault-bridge:setup`, which asks two questions
-and writes `~/.vault-bridge/config.json`. This works from any directory —
-you do NOT need to open your Obsidian vault in Claude Code.
-
-For the "custom" preset only: add a `## vault-bridge: configuration`
-heading with a YAML block (from one of the presets above) to a `CLAUDE.md`
-file in your working directory or vault root. Then validate with
-`/vault-bridge:validate-config`.
+Heartbeat scans (autonomous, non-interactive) skip ambiguous files and log
+them for later manual retro-scan.
 
 ## Note filename convention
 
@@ -228,14 +139,21 @@ Every note vault-bridge writes uses this filename pattern:
   `YYYY-MM-DD short-topic.md`
 
 Where:
-- `YYYY-MM-DD` is the computed `event_date` (see extract_event_date.py for
-  the priority + conflict rule)
+- `YYYY-MM-DD` is the computed `event_date` (see extract_event_date.py)
 - `short-topic` is a lowercased, hyphenated, ASCII-normalized form of the
-  source filename or folder name, with the YYMMDD prefix stripped
+  source filename or folder name
 
-When the event_date is flipped to mtime via the >7-day conflict rule, the
-note filename still uses the mtime date (NOT the original filename prefix).
-The `event_date_source` frontmatter field records which source was used.
+## Frontmatter schema (v2)
+
+New notes use `schema_version: 2` with these required fields in canonical order:
+`schema_version`, `plugin`, `domain`, `project`, `source_path`, `file_type`,
+`captured_date`, `event_date`, `event_date_source`, `scan_type`,
+`sources_read`, `read_bytes`, `content_confidence`, `cssclasses`.
+
+Optional fields: `attachments`, `tags`.
+
+Existing v1 notes (without `domain` or `tags`) remain valid. Use
+`/vault-bridge:revise --migrate-v2` to upgrade them.
 
 ## Highlights, callouts, and canvas diagrams
 

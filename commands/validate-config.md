@@ -1,54 +1,58 @@
 ---
-description: Validate your vault-bridge config in CLAUDE.md
+description: Validate your vault-bridge configuration
 allowed-tools: Bash, Read
 ---
 
 Validate the user's vault-bridge configuration and report the result.
 
-## Step 1 — run the parser
+## Step 1 — try loading the v2 config
 
-Run this Bash command:
+```
+python3 -c "
+import sys, json
+sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
+import setup_config
+config = setup_config.load_config()
+print(json.dumps(config))
+"
+```
 
+If exit 0 → parse the JSON output and go to Step 2.
+
+If exit 2 (SetupNeeded) → try the advanced config path:
 ```
 python3 ${CLAUDE_PLUGIN_ROOT}/scripts/parse_config.py CLAUDE.md
 ```
 
-Capture stdout and the exit code.
+If THAT also fails → print the stderr verbatim plus:
+"No valid config found. Run /vault-bridge:setup to configure."
 
 ## Step 2 — report the result
 
-**If exit code is 0:**
-
-Parse the JSON output from stdout and show the user a readable summary:
+Show a per-domain summary:
 
 ```
 ✓ vault-bridge config is valid.
 
-File system
-  type:        {file_system.type}
-  root_path:   {file_system.root_path}
+Vault: {vault_name}
+Domains: {N}
 
-Routing
-  patterns:    {len(routing.patterns)} path-based rules
-  overrides:   {len(routing.content_overrides or [])} content overrides
-  fallback:    {routing.fallback}
+  [1] {domain.name} ({domain.label})
+    archive:   {domain.archive_root}
+    fs_type:   {domain.file_system_type}
+    patterns:  {len(routing_patterns)} path-based rules
+    overrides: {len(content_overrides)} content overrides
+    fallback:  {domain.fallback}
+    tags:      {domain.default_tags}
 
-Skip patterns: {len(skip_patterns or [])}
-
-Style
-  filename:    {style.note_filename_pattern or "YYYY-MM-DD topic.md (default)"}
-  voice:       {style.writing_voice or "first-person-diary (default)"}
-  word count:  {style.summary_word_count or "100-200 (default)"}
+  [2] ...
 ```
 
-Then one sentence: "Your vault-bridge configuration is ready. You can now run
+Then: "Your vault-bridge configuration is ready. Run
 `/vault-bridge:retro-scan <folder-path>` to scan a project folder."
 
-**If exit code is 2:**
-
-Print the stderr verbatim so the user sees exactly what's wrong. Do not
-paraphrase the error. Do not try to fix it automatically. Then append
-this one-line suggestion:
-
-"Fix the issue in CLAUDE.md and run /vault-bridge:validate-config again.
-See README.md §Setup for a template you can copy."
+If any domain has `file_system_type: nas-mcp`, verify the NAS is reachable:
+```bash
+mcp__nas__list_files path="{domain.archive_root}" limit=1
+```
+Report if the NAS is unreachable.

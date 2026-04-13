@@ -28,7 +28,7 @@ print(json.dumps(config))
 If that fails, try `parse_config.py CLAUDE.md` as fallback. If both fail,
 tell the user to run `/vault-bridge:setup` first and STOP.
 
-Capture `config.vault_root` and `config.file_system_type` — needed to check
+Capture `config.vault_name` and `config.file_system_type` — needed to check
 `source_path` existence and locate vault notes.
 
 ## Step 2 — find all plugin-generated notes in scope
@@ -90,7 +90,7 @@ source after the vault note was written. Flag it.
 
 For each note, run:
 ```
-python3 ${CLAUDE_PLUGIN_ROOT}/scripts/validate_frontmatter.py "<note-path>"
+obsidian read vault="$VAULT_NAME" path="<note-path>" | python3 ${CLAUDE_PLUGIN_ROOT}/scripts/validate_frontmatter.py --stdin
 ```
 
 Exit 0 → valid. Non-zero → capture stderr as the issue.

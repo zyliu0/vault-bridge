@@ -30,6 +30,7 @@ import schema  # noqa: E402
 EXPECTED_REQUIRED = (
     "schema_version",
     "plugin",
+    "domain",
     "project",
     "source_path",
     "file_type",
@@ -43,13 +44,14 @@ EXPECTED_REQUIRED = (
     "cssclasses",
 )
 
-EXPECTED_OPTIONAL = ("attachments",)
+EXPECTED_OPTIONAL = ("attachments", "tags")
 
 EXPECTED_FILE_TYPES = {
     "folder", "image-folder",
     "pdf", "docx", "pptx", "xlsx",
     "jpg", "png", "psd", "ai", "dxf",
     "dwg", "rvt", "3dm", "mov", "mp4",
+    "md", "txt", "html", "csv", "json",
 }
 
 EXPECTED_EVENT_DATE_SOURCES = {"filename-prefix", "parent-folder-prefix", "mtime"}
@@ -166,8 +168,8 @@ def test_every_enum_field_is_in_required_or_optional():
 # Literal-value fields
 # ---------------------------------------------------------------------------
 
-def test_schema_version_literal_is_1():
-    assert schema.LITERAL_VALUES["schema_version"] == 1
+def test_schema_version_literal_is_2():
+    assert schema.LITERAL_VALUES["schema_version"] == 2
 
 
 def test_plugin_literal_is_vault_bridge():
@@ -189,8 +191,9 @@ def test_every_literal_field_is_required():
 def _valid_template_a_frontmatter():
     """A minimal frontmatter dict that should pass all invariants (Template A)."""
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "plugin": "vault-bridge",
+        "domain": "arch-projects",
         "project": "Test Project",
         "source_path": "/some/path/file.pdf",
         "file_type": "pdf",
@@ -208,8 +211,9 @@ def _valid_template_a_frontmatter():
 def _valid_template_b_frontmatter():
     """A minimal frontmatter dict that should pass all invariants (Template B)."""
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "plugin": "vault-bridge",
+        "domain": "photography",
         "project": "Test Project",
         "source_path": "/some/path/file.dwg",
         "file_type": "dwg",
@@ -273,3 +277,84 @@ def test_invariants_collects_all_errors_not_just_first():
     assert len(errors) >= 2, (
         f"Expected at least 2 errors, got {len(errors)}: {errors}"
     )
+
+
+# ---------------------------------------------------------------------------
+# v2 schema — domain and tags fields
+# ---------------------------------------------------------------------------
+
+def test_domain_is_a_required_field():
+    assert "domain" in schema.REQUIRED_FIELDS
+
+
+def test_domain_is_str_type():
+    assert schema.FIELD_TYPES["domain"] is str
+
+
+def test_domain_appears_after_plugin_before_project():
+    order = list(schema.FIELD_ORDER)
+    assert order.index("domain") == order.index("plugin") + 1
+    assert order.index("domain") == order.index("project") - 1
+
+
+def test_tags_is_an_optional_field():
+    assert "tags" in schema.OPTIONAL_FIELDS
+
+
+def test_tags_is_list_type():
+    assert schema.FIELD_TYPES["tags"] is list
+
+
+def test_schema_version_is_2():
+    assert schema.SCHEMA_VERSION == 2
+
+
+def test_supported_schema_versions_contains_both():
+    assert 1 in schema.SUPPORTED_SCHEMA_VERSIONS
+    assert 2 in schema.SUPPORTED_SCHEMA_VERSIONS
+
+
+def test_v1_field_order_does_not_contain_domain_or_tags():
+    v1 = schema.get_field_order(1)
+    assert "domain" not in v1
+    assert "tags" not in v1
+
+
+def test_v2_field_order_contains_domain_and_tags():
+    v2 = schema.get_field_order(2)
+    assert "domain" in v2
+    assert "tags" in v2
+
+
+def test_get_field_order_returns_tuples():
+    assert isinstance(schema.get_field_order(1), tuple)
+    assert isinstance(schema.get_field_order(2), tuple)
+
+
+def test_get_required_fields_v1_has_no_domain():
+    req = schema.get_required_fields(1)
+    assert "domain" not in req
+
+
+def test_get_required_fields_v2_has_domain():
+    req = schema.get_required_fields(2)
+    assert "domain" in req
+
+
+def test_new_file_types_for_research_and_content():
+    for ft in ("md", "txt", "html", "csv", "json"):
+        assert ft in schema.ENUMS["file_type"], f"Missing file_type: {ft}"
+
+
+def test_invariant_domain_must_not_contain_path_separator():
+    fm = _valid_template_a_frontmatter()
+    fm["domain"] = "arch/projects"
+    errors = schema.check_invariants(fm)
+    assert any("domain" in e for e in errors)
+
+
+def test_invariant_domain_must_not_be_empty():
+    fm = _valid_template_a_frontmatter()
+    fm["domain"] = ""
+    errors = schema.check_invariants(fm)
+    assert any("domain" in e for e in errors)
