@@ -81,6 +81,7 @@ note that honestly says so.
 
 ## Prerequisites
 
+**Required:**
 - **Obsidian** with the [Obsidian CLI](https://help.obsidian.md/cli)
   installed. vault-bridge writes all notes through the `obsidian` CLI —
   it never touches vault files directly.
@@ -90,8 +91,26 @@ note that honestly says so.
   - A local directory (`type: local-path`)
   - A mounted drive (`type: external-mount`)
   - A NAS MCP server (`type: nas-mcp`) — for users who already run one
-- **For DWG reads on macOS** (optional): LibreDWG built from source. See
-  below.
+
+**Recommended (optional Claude Code skills):**
+- [`obsidian-cli`](https://github.com/obsidian-skills/obsidian-skills) — reference for the obsidian CLI when you hand-edit notes
+- [`obsidian-markdown`](https://github.com/obsidian-skills/obsidian-skills) — Obsidian-flavored markdown syntax guidance
+- [`obsidian-bases`](https://github.com/obsidian-skills/obsidian-skills) — Bases (.base) file authoring guidance
+
+These improve the experience when you manually edit Obsidian notes
+alongside vault-bridge. They are NOT required — vault-bridge generates
+notes via the obsidian CLI directly using its own schema.
+
+Install all three at once:
+```bash
+claude plugin marketplace add github.com/obsidian-skills/obsidian-skills
+claude plugin install obsidian-skills@obsidian-skills
+```
+
+**For DWG reads on macOS** (optional): LibreDWG built from source. See below.
+
+vault-bridge runs `dependency_check.py` automatically during `/vault-bridge:setup`
+to verify everything is in place.
 
 ## Install
 
@@ -268,10 +287,15 @@ vault-bridge/
 │   ├── heartbeat-scan.md        # autonomous delta scan
 │   ├── vault-health.md          # read-only vault audit
 │   └── revise.md                # upgrade old notes to vault-bridge schema
+├── hooks/
+│   ├── hooks.json               # auto-runs health check on every prompt
+│   └── scripts/
+│       └── health-check.sh      # validates .vault-bridge.json, auto-repairs
 ├── scripts/                     # helper Python (all test-covered)
 │   ├── schema.py                # single source of truth for frontmatter contract
 │   ├── parse_config.py          # vault CLAUDE.md config parser + validator
 │   ├── setup_config.py          # multi-domain config store (~/.vault-bridge/)
+│   ├── local_config.py          # project-level .vault-bridge.json manager
 │   ├── domain_router.py         # domain resolution and event routing
 │   ├── user_prompt.py           # structured prompt builder for AskUserQuestion
 │   ├── state.py                 # shared state directory resolution

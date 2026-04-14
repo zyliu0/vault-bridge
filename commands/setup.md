@@ -11,15 +11,31 @@ inside your Obsidian vault.
 All vault interaction goes through the `obsidian` CLI. Obsidian must be
 running during setup (for template install) and during scans.
 
-## Step 1 — verify obsidian CLI
+## Step 1 — check dependencies
+
+Run the dependency check:
 
 ```bash
-obsidian help
+python3 ${CLAUDE_PLUGIN_ROOT}/scripts/dependency_check.py
 ```
 
-If this fails, tell the user: "The obsidian CLI is required. Please install
-it from https://help.obsidian.md/cli and make sure Obsidian is running."
-and STOP.
+This checks:
+- **Obsidian CLI** (required) — `obsidian help` must work
+- **Python packages** (required) — Pillow, PyYAML, PyPDF2, python-docx, python-pptx
+- **Recommended Claude Code skills** (optional) — obsidian-cli, obsidian-markdown,
+  obsidian-bases skills improve hand-editing of notes but are not required
+  for vault-bridge to function
+
+**If the script exits 0:** all required deps present. Show the user any
+optional skill recommendations from the report, then continue to Step 2.
+
+**If the script exits 2:** required deps missing. Print the report verbatim
+(it includes install hints for each missing item). Then STOP and tell the
+user to install the missing deps and retry setup.
+
+vault-bridge cannot install other Claude Code plugins or skills automatically.
+The user must install them via `claude plugin marketplace add ...` and
+`claude plugin install ...`.
 
 ## Step 2 — ask which Obsidian vault to use
 
@@ -140,7 +156,37 @@ print('Config saved.')
 "
 ```
 
-## Step 6 — install the Obsidian template (optional)
+## Step 6 — create local project config
+
+Save a `.vault-bridge.json` in the current working directory. If the user
+configured multiple domains, ask which one is the default for this directory:
+
+```
+VB_DOMAIN="$FIRST_DOMAIN_NAME" python3 -c "
+import os, sys
+from pathlib import Path
+sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
+import local_config
+local_config.save_local_config(
+    Path.cwd(),
+    active_domain=os.environ['VB_DOMAIN'],
+)
+print('Local config saved to .vault-bridge.json')
+"
+```
+
+If multiple domains, present via AskUserQuestion:
+
+> "Which domain is the default for this working directory?"
+> - {domain 1 label}
+> - {domain 2 label}
+> - ...
+
+Tell the user: "Created `.vault-bridge.json` in your working directory.
+You can edit this file to change the active domain or add overrides.
+vault-bridge health-checks it automatically on every command."
+
+## Step 7 — install the Obsidian template (optional)
 
 Present via AskUserQuestion:
 
