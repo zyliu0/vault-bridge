@@ -87,6 +87,10 @@ note that honestly says so.
   to the vault-bridge schema. Audits frontmatter, fixes fields, optionally
   re-reads sources and moves misrouted notes.
 
+- **`/vault-bridge:viz`** — generate a canvas, excalidraw, or marp deck from
+  a description. No archive scan needed — writes the artifact directly into
+  the vault.
+
 ## Prerequisites
 
 **Required:**

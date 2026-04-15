@@ -44,6 +44,21 @@ RECOMMENDED_SKILLS = [
         "purpose": "Obsidian Bases (.base) file authoring guidance",
         "source": "obsidian-skills marketplace",
     },
+    {
+        "name": "obsidian-visual-skills:obsidian-canvas-creator",
+        "purpose": "Generate Obsidian JSON Canvas files for viz command",
+        "source": "obsidian-visual-skills marketplace",
+    },
+    {
+        "name": "obsidian-visual-skills:excalidraw-diagram",
+        "purpose": "Generate Excalidraw diagrams as Obsidian markdown for viz command",
+        "source": "obsidian-visual-skills marketplace",
+    },
+    {
+        "name": "marp-slide",
+        "purpose": "Generate Marp presentation decks for viz command",
+        "source": "marp-slide marketplace",
+    },
 ]
 
 

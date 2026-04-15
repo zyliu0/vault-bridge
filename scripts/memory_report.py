@@ -25,7 +25,7 @@ sys.path.insert(0, str(_HERE))
 import local_config  # noqa: E402
 
 
-VALID_SCAN_TYPES = {"retro", "heartbeat", "revise", "vault-health"}
+VALID_SCAN_TYPES = {"retro", "heartbeat", "revise", "vault-health", "viz"}
 
 
 def _render(scan_type: str, stats: dict, timestamp: datetime) -> str:
@@ -46,6 +46,12 @@ def _render(scan_type: str, stats: dict, timestamp: datetime) -> str:
         lines.append(f"- **Domain:** {stats['domain']}")
     if "dry_run" in stats:
         lines.append(f"- **Dry run:** {bool(stats['dry_run'])}")
+    if "viz_type" in stats:
+        lines.append(f"- **Viz type:** {stats['viz_type']}")
+    if "source_description" in stats:
+        lines.append(f"- **Description:** {stats['source_description']}")
+    if "vault_path" in stats:
+        lines.append(f"- **Vault path:** `{stats['vault_path']}`")
     lines.append("")
 
     counts = stats.get("counts") or {}
