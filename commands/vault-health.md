@@ -46,15 +46,16 @@ If `--all`, use all results.
 
 Run:
 ```
-python3 ${CLAUDE_PLUGIN_ROOT}/scripts/vault_scan.py load-index
+python3 ${CLAUDE_PLUGIN_ROOT}/scripts/vault_scan.py load-index --workdir "$(pwd)"
 ```
 
 Read the index.tsv directly for full lookups:
 ```
 python3 -c "
-import sys; sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
+import os, sys; sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
 import vault_scan, json
-by_path, by_fp = vault_scan.load_index()
+workdir = os.getcwd()
+by_path, by_fp = vault_scan.load_index(workdir)
 json.dump({'by_path': by_path, 'by_fp': by_fp}, open('/tmp/_vh_index.json', 'w'))
 "
 ```
@@ -69,8 +70,11 @@ Count incoming wikilinks to this note from other notes in the same project
 (or across all projects with `--all`). A note with ZERO incoming wikilinks
 AND that does NOT appear in any project's `_index.md` is orphaned.
 
-Exclude `_index.md`, `_scan-log.md`, and `_vault-health-*.md` from the
-orphan check — those are meta notes.
+If any legacy `_index.md`, `_scan-log.md`, or `_vault-health-*.md` files
+are present in the vault from previous plugin versions, exclude them from
+the orphan check — the current plugin no longer writes any of these into
+the vault (reports live in `<workdir>/.vault-bridge/reports/`). Flag them
+in the report under "Legacy plugin artifacts" so the user can delete them.
 
 ### Check 2 — Broken source_paths
 
@@ -117,15 +121,26 @@ frontmatter field does NOT match the index's `source_path` column, that's
 a rename that was recorded in the index but the note was not updated.
 Flag it for manual review.
 
-## Step 5 — write the health report
+## Step 5 — write the health report to the WORKING FOLDER (not the vault)
 
-Write the report to the vault via obsidian CLI:
+**Do NOT write the report into the vault.** The vault is reserved for real
+diary notes. Plugin diagnostics — including this health report — live in
+the working folder's `.vault-bridge/reports/`:
 
 ```bash
-obsidian create vault="$VAULT_NAME" name="_vault-health-{YYYY-MM-DD}" path="$PROJECT" content="$REPORT" silent overwrite
+python3 ${CLAUDE_PLUGIN_ROOT}/scripts/memory_report.py vault-health \
+  --workdir "$(pwd)" \
+  --stats-json "$STATS_JSON"
 ```
 
-(For `--all`, write to vault root instead of a project subfolder.)
+Where `$STATS_JSON` embeds the full report under the `notes` field and
+breaks the counts (orphan_notes, broken_source_paths, schema_drift,
+duplicate_events, stale_renames) into the `counts` object. The memory
+report helper writes
+`<workdir>/.vault-bridge/reports/{YYYY-MM-DD}_{HH-MM-SS}_vault-health.md`.
+
+(For `--all`, write from the vault-root working folder — still never into
+the vault itself.)
 
 Format:
 

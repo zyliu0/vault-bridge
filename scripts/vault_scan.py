@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """vault-bridge state management: lockfile, scan index, heartbeat manifest.
 
-State lives at ~/.vault-bridge/ by default, or at $VAULT_BRIDGE_STATE_DIR if
-set (tests override this for isolation). Three concerns:
+State lives at <workdir>/.vault-bridge/ (using local_config.local_dir).
+Three concerns:
 
 1. scan.lock — PID-aware mutual exclusion. Prevents concurrent retro-scans
    and heartbeat-scans from stepping on each other. If the lockfile contains
@@ -17,8 +17,13 @@ set (tests override this for isolation). Three concerns:
    .tsv (atomically via .tmp → rename), diffs against the previous one,
    and prunes old manifests.
 
-All three are simple enough to be testable without mocking — the tests use
-a temp state dir via the VAULT_BRIDGE_STATE_DIR env var.
+Backward compatibility: on first load_index(workdir) call, if a global
+~/.vault-bridge/index.tsv exists and the workdir index does NOT, the global
+index is copied to the workdir (Phase 2 migration). Same for manifests/.
+The old files are NOT deleted — that is left for the explicit Phase 3 migrate
+command.
+
+CLI: python3 vault_scan.py {acquire-lock|release-lock|load-index} [--workdir PATH]
 """
 import os
 import sys
@@ -28,24 +33,74 @@ from typing import List, Optional, Tuple
 
 
 # ---------------------------------------------------------------------------
-# State directory
+# Dependency: local_config.local_dir as single source of truth
 # ---------------------------------------------------------------------------
 
-from state import state_dir as _state_dir  # noqa: E402 — shared impl
+_HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(_HERE))
+
+from local_config import local_dir as _local_dir  # noqa: E402
 
 
-def _lock_path() -> Path:
-    return _state_dir() / "scan.lock"
+# ---------------------------------------------------------------------------
+# Legacy global state dir (for migration detection only)
+# ---------------------------------------------------------------------------
+
+from state import state_dir as _state_dir  # noqa: E402
 
 
-def _index_path() -> Path:
-    return _state_dir() / "index.tsv"
+# ---------------------------------------------------------------------------
+# Workdir-scoped path helpers
+# ---------------------------------------------------------------------------
+
+def _lock_path(workdir) -> Path:
+    d = _local_dir(workdir)
+    d.mkdir(parents=True, exist_ok=True)
+    return d / "scan.lock"
 
 
-def _manifests_dir() -> Path:
-    path = _state_dir() / "manifests"
-    path.mkdir(parents=True, exist_ok=True)
-    return path
+def _index_path(workdir) -> Path:
+    d = _local_dir(workdir)
+    d.mkdir(parents=True, exist_ok=True)
+    return d / "index.tsv"
+
+
+def _global_state_path() -> Path:
+    """Return the global state path without creating it."""
+    override = os.environ.get("VAULT_BRIDGE_STATE_DIR")
+    if override:
+        return Path(override)
+    return Path.home() / ".vault-bridge"
+
+
+def _workdir_manifests_dir(workdir, migrate: bool = False) -> Path:
+    """Return <workdir>/.vault-bridge/manifests/, creating it.
+
+    If migrate=True and the workdir manifests dir does not exist
+    while the global state dir has manifests, copy them over first.
+    Does NOT create the global state dir — only checks if it already exists.
+    """
+    dest = _local_dir(workdir) / "manifests"
+
+    if migrate and not dest.exists():
+        # Check if global state has manifests to migrate — peek without creating
+        try:
+            global_state = _global_state_path()
+            global_manifests = global_state / "manifests"
+            if global_manifests.exists() and any(global_manifests.glob("*.tsv")):
+                sys.stderr.write(
+                    "vault-bridge: migrated manifests/ from ~/.vault-bridge/ to "
+                    "./.vault-bridge/ (Phase 2 layout)\n"
+                )
+                dest.mkdir(parents=True, exist_ok=True)
+                for src_file in global_manifests.glob("*.tsv"):
+                    (dest / src_file.name).write_bytes(src_file.read_bytes())
+                return dest
+        except Exception:
+            pass
+
+    dest.mkdir(parents=True, exist_ok=True)
+    return dest
 
 
 # ---------------------------------------------------------------------------
@@ -77,8 +132,8 @@ def _is_pid_alive(pid: int) -> bool:
         return False
 
 
-def acquire_lock() -> Path:
-    """Acquire the scan lock. Returns the lockfile path.
+def acquire_lock(workdir) -> Path:
+    """Acquire the scan lock for the given working directory. Returns the lockfile path.
 
     Uses atomic exclusive-create (O_CREAT|O_EXCL via open mode 'x') to avoid
     the TOCTOU race between checking and writing the lock. If the lock
@@ -88,7 +143,7 @@ def acquire_lock() -> Path:
     If the existing lockfile contains a dead PID or garbage, removes it
     and retries the exclusive create.
     """
-    lock = _lock_path()
+    lock = _lock_path(workdir)
     lock.parent.mkdir(parents=True, exist_ok=True)
 
     try:
@@ -132,9 +187,9 @@ def acquire_lock() -> Path:
         )
 
 
-def release_lock() -> None:
+def release_lock(workdir) -> None:
     """Release the scan lock. No-op if the lock doesn't exist (defensive)."""
-    lock = _lock_path()
+    lock = _lock_path(workdir)
     try:
         lock.unlink()
     except FileNotFoundError:
@@ -145,7 +200,7 @@ def release_lock() -> None:
 # Scan index
 # ---------------------------------------------------------------------------
 
-def load_index() -> Tuple[dict, dict]:
+def load_index(workdir) -> Tuple[dict, dict]:
     """Load the scan index into two dicts for O(1) lookup.
 
     Returns (index_by_path, index_by_fp) where:
@@ -153,11 +208,20 @@ def load_index() -> Tuple[dict, dict]:
       index_by_fp:   {fingerprint: (source_path, note_path)}
 
     Missing or empty index file returns two empty dicts.
+
+    Migration: if no workdir index exists but a global ~/.vault-bridge/index.tsv
+    does, copies the global index to the workdir and emits a stderr warning.
+    The global file is NOT deleted.
     """
+    index_file = _index_path(workdir)
+
+    # Phase 2 migration: copy global index to workdir on first access
+    if not index_file.exists():
+        _maybe_migrate_index(workdir, index_file)
+
     index_by_path = {}
     index_by_fp = {}
 
-    index_file = _index_path()
     if not index_file.exists():
         return index_by_path, index_by_fp
 
@@ -168,7 +232,6 @@ def load_index() -> Tuple[dict, dict]:
         parts = line.split("\t")
         if len(parts) != 3:
             skipped += 1
-            import sys
             sys.stderr.write(
                 f"vault-bridge: index.tsv line {line_num}: expected 3 tab-separated "
                 f"fields, got {len(parts)} — skipping\n"
@@ -179,7 +242,6 @@ def load_index() -> Tuple[dict, dict]:
         index_by_fp[fingerprint] = (source_path, note_path)
 
     if skipped > 0:
-        import sys
         sys.stderr.write(
             f"vault-bridge: {skipped} malformed line(s) in index.tsv — "
             f"these events may be re-processed as new on the next scan\n"
@@ -188,7 +250,26 @@ def load_index() -> Tuple[dict, dict]:
     return index_by_path, index_by_fp
 
 
-def append_index(source_path: str, fingerprint: str, note_path: str) -> None:
+def _maybe_migrate_index(workdir, index_file: Path) -> None:
+    """Copy global index.tsv to workdir if global exists and workdir does not.
+
+    Uses _global_state_path() (peek without creating) so migration detection
+    never creates the global state dir as a side effect.
+    """
+    try:
+        global_index = _global_state_path() / "index.tsv"
+        if global_index.exists():
+            sys.stderr.write(
+                "vault-bridge: migrated index.tsv from ~/.vault-bridge/ to "
+                "./.vault-bridge/ (Phase 2 layout)\n"
+            )
+            index_file.parent.mkdir(parents=True, exist_ok=True)
+            index_file.write_bytes(global_index.read_bytes())
+    except Exception:
+        pass
+
+
+def append_index(workdir, source_path: str, fingerprint: str, note_path: str) -> None:
     """Append a new entry to the scan index.
 
     Raises ValueError if any field contains a tab (which would break the TSV).
@@ -204,7 +285,7 @@ def append_index(source_path: str, fingerprint: str, note_path: str) -> None:
             )
 
     line = f"{source_path}\t{fingerprint}\t{note_path}\n"
-    with _index_path().open("a") as f:
+    with _index_path(workdir).open("a") as f:
         f.write(line)
 
 
@@ -258,17 +339,19 @@ def lookup_event(
 # Heartbeat manifests: atomic write + diff + prune
 # ---------------------------------------------------------------------------
 
-def write_manifest(entries: List[Tuple[str, int, int]]) -> Path:
-    """Write a manifest file atomically.
+def write_manifest(workdir, entries: List[Tuple[str, int, int]]) -> Path:
+    """Write a manifest file atomically to <workdir>/.vault-bridge/manifests/.
 
     Args:
+        workdir: The project working directory.
         entries: List of (path, size, mtime_int) tuples.
 
     Returns the path to the written manifest (final name after rename).
     """
     import datetime
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d-%H%M%S")
-    final_path = _manifests_dir() / f"{timestamp}.tsv"
+    manifests_dir = _workdir_manifests_dir(workdir, migrate=True)
+    final_path = manifests_dir / f"{timestamp}.tsv"
     tmp_path = final_path.with_suffix(".tsv.tmp")
 
     with tmp_path.open("w") as f:
@@ -302,15 +385,16 @@ def diff_manifests(
     return new_files, modified, removed
 
 
-def prune_old_manifests(keep_n: int = 2) -> None:
+def prune_old_manifests(workdir, keep_n: int = 2) -> None:
     """Delete all but the `keep_n` most recent manifests by mtime.
 
     The heartbeat baseline needs at least 2 to diff against, so keep_n=2
     is the minimum sensible value. Callers can bump it higher for a
     recovery window.
     """
+    manifests_dir = _workdir_manifests_dir(workdir)
     manifests = sorted(
-        _manifests_dir().glob("*.tsv"),
+        manifests_dir.glob("*.tsv"),
         key=lambda p: p.stat().st_mtime,
         reverse=True,  # newest first
     )
@@ -319,22 +403,38 @@ def prune_old_manifests(keep_n: int = 2) -> None:
 
 
 if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        sys.stderr.write("usage: vault_scan.py <acquire-lock|release-lock|load-index>\n")
-        sys.exit(2)
+    import argparse
 
-    cmd = sys.argv[1]
+    parser = argparse.ArgumentParser(
+        description="vault-bridge state management",
+        prog="vault_scan.py",
+    )
+    parser.add_argument(
+        "command",
+        choices=["acquire-lock", "release-lock", "load-index"],
+        help="Command to run",
+    )
+    parser.add_argument(
+        "--workdir",
+        default=None,
+        help="Working directory (default: cwd)",
+    )
+    args = parser.parse_args()
+
+    wd = Path(args.workdir).resolve() if args.workdir else Path.cwd()
+
+    cmd = args.command
     if cmd == "acquire-lock":
         try:
-            path = acquire_lock()
+            path = acquire_lock(wd)
             print(path)
         except LockHeldError as e:
             sys.stderr.write(f"vault-bridge: {e}\n")
             sys.exit(1)
     elif cmd == "release-lock":
-        release_lock()
+        release_lock(wd)
     elif cmd == "load-index":
-        by_path, by_fp = load_index()
+        by_path, by_fp = load_index(wd)
         print(f"index entries: {len(by_path)}")
     else:
         sys.stderr.write(f"unknown command: {cmd}\n")

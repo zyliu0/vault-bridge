@@ -1,4 +1,10 @@
-"""Tests for scripts/setup_config.py — the multi-domain config store.
+"""Tests for the multi-domain config store and built-in domain templates.
+
+After Phase 1 restructure:
+- Template tests import from `domain_templates` (the narrowed module).
+- Config I/O tests still cover `setup_config` (the original module, kept for
+  backward compatibility — setup_config now re-exports everything from
+  effective_config for call-site compatibility).
 
 v2 config replaces the single-preset model with a `domains` list. Each
 domain has its own archive_root, file_system_type, routing patterns, and
@@ -16,7 +22,8 @@ import pytest
 SCRIPTS = Path(__file__).resolve().parents[2] / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
-import setup_config  # noqa: E402
+import setup_config       # noqa: E402
+import domain_templates   # noqa: E402
 
 
 @pytest.fixture
@@ -126,62 +133,78 @@ def test_v1_config_auto_upgrades_on_load(state_dir):
 
 
 # ---------------------------------------------------------------------------
-# Domain templates (replacing presets)
+# Domain templates — now sourced from domain_templates module
 # ---------------------------------------------------------------------------
 
 def test_get_domain_template_architecture():
-    t = setup_config.get_domain_template("architecture")
+    t = domain_templates.get_domain_template("architecture")
     assert len(t["routing_patterns"]) > 5
     assert t["fallback"] == "Admin"
 
 
 def test_get_domain_template_photographer():
-    t = setup_config.get_domain_template("photography")
+    t = domain_templates.get_domain_template("photography")
     assert any(p["match"] == "_Selects" for p in t["routing_patterns"])
     assert t["fallback"] == "Archive"
 
 
 def test_get_domain_template_writer():
-    t = setup_config.get_domain_template("writing")
+    t = domain_templates.get_domain_template("writing")
     assert any(p["match"] == "Drafts" for p in t["routing_patterns"])
     assert t["fallback"] == "Inbox"
 
 
 def test_get_domain_template_social_media():
-    t = setup_config.get_domain_template("social-media")
+    t = domain_templates.get_domain_template("social-media")
     assert t["fallback"] in ("Inbox", "Drafts")
     assert "content-creation" in t["default_tags"]
 
 
 def test_get_domain_template_research():
-    t = setup_config.get_domain_template("research")
+    t = domain_templates.get_domain_template("research")
     assert "research" in t["default_tags"]
 
 
 def test_get_domain_template_general():
-    t = setup_config.get_domain_template("general")
+    t = domain_templates.get_domain_template("general")
     assert t["fallback"] == "Inbox"
 
 
 def test_unknown_template_raises():
     with pytest.raises(KeyError):
-        setup_config.get_domain_template("nonexistent")
+        domain_templates.get_domain_template("nonexistent")
 
 
 def test_every_template_has_required_keys():
     required = {"routing_patterns", "content_overrides", "fallback",
                 "skip_patterns", "default_tags", "style"}
-    for name in setup_config.DOMAIN_TEMPLATES:
-        t = setup_config.get_domain_template(name)
+    for name in domain_templates.DOMAIN_TEMPLATES:
+        t = domain_templates.get_domain_template(name)
         missing = required - set(t.keys())
         assert not missing, f"Template '{name}' missing: {missing}"
 
 
 def test_every_template_style_has_word_count():
-    for name in setup_config.DOMAIN_TEMPLATES:
-        t = setup_config.get_domain_template(name)
+    for name in domain_templates.DOMAIN_TEMPLATES:
+        t = domain_templates.get_domain_template(name)
         wc = t["style"]["summary_word_count"]
         assert isinstance(wc, list) and len(wc) == 2 and wc[0] < wc[1]
+
+
+# ---------------------------------------------------------------------------
+# setup_config still re-exports template API (backward compat for commands)
+# ---------------------------------------------------------------------------
+
+def test_setup_config_still_exports_domain_templates():
+    """setup_config.DOMAIN_TEMPLATES must still be accessible for backward compat."""
+    assert hasattr(setup_config, "DOMAIN_TEMPLATES")
+    assert "architecture" in setup_config.DOMAIN_TEMPLATES
+
+
+def test_setup_config_still_exports_get_domain_template():
+    """setup_config.get_domain_template() must still work for backward compat."""
+    t = setup_config.get_domain_template("general")
+    assert t["fallback"] == "Inbox"
 
 
 # ---------------------------------------------------------------------------

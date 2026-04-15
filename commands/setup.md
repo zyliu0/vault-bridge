@@ -4,12 +4,16 @@ allowed-tools: Read, Bash, Glob, AskUserQuestion
 ---
 
 Set up vault-bridge. Asks a few questions, auto-detects file system types,
-saves config to `~/.vault-bridge/config.json`, and optionally installs an
-Obsidian note template. Works from any directory — you do NOT need to be
-inside your Obsidian vault.
+and writes configuration to THREE local files:
+- `_meta/vault-bridge/vault.json` and `_meta/vault-bridge/domains/<name>.json`
+  inside your Obsidian vault (read via the `obsidian` CLI — shared across
+  every project that targets this vault)
+- `<workdir>/.vault-bridge/settings.json` in the current working directory
+  (project-specific overrides + the active domain for this folder)
 
-All vault interaction goes through the `obsidian` CLI. Obsidian must be
-running during setup (for template install) and during scans.
+No state is written to `~/` — everything lives either in the vault or in
+the working folder. Works from any directory; Obsidian must be running so
+the `obsidian` CLI can write vault.json + domain files into the vault.
 
 ## Step 1 — check dependencies
 
@@ -141,37 +145,91 @@ If "multi-domain" was chosen in step 3, present via AskUserQuestion:
 
 If yes → loop back to 4a. If no → continue.
 
-## Step 5 — save the config
+## Step 5 — write vault-hosted config
+
+### Step 5a — write vault.json to the Obsidian vault
 
 ```
-VB_VAULT_NAME="$VAULT_NAME" VB_DOMAINS="$DOMAINS_JSON" python3 -c "
+VB_VAULT_NAME="$VAULT_NAME" python3 -c "
 import os, sys, json
+from datetime import datetime, timezone
 sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
-import setup_config
-setup_config.save_config(
-    vault_name=os.environ['VB_VAULT_NAME'],
-    domains=json.loads(os.environ['VB_DOMAINS']),
-)
-print('Config saved.')
+import vault_config_io as vci
+
+vault_name = os.environ['VB_VAULT_NAME']
+vault_json = {
+    'schema_version': 2,
+    'vault_name': vault_name,
+    'created_at': datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S'),
+    'fabrication_stopwords': [],
+    'global_style': {
+        'writing_voice': 'first-person-diary',
+        'summary_word_count': [100, 200],
+        'note_filename_pattern': 'YYYY-MM-DD topic.md',
+    },
+    'note_template_name': 'vault-bridge-note',
+}
+vci.write_vault_config(vault_name, vault_json)
+print('vault.json written.')
 "
 ```
 
-## Step 6 — create local project config
+### Step 5b — write domains/<name>.json for each domain
 
-Save a `.vault-bridge.json` in the current working directory. If the user
-configured multiple domains, ask which one is the default for this directory:
+For each domain configured in Step 4:
 
 ```
-VB_DOMAIN="$FIRST_DOMAIN_NAME" python3 -c "
+VB_VAULT_NAME="$VAULT_NAME" VB_DOMAIN_JSON="$DOMAIN_JSON" python3 -c "
+import os, sys, json
+sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
+import vault_config_io as vci
+from domain_templates import get_domain_template
+
+vault_name = os.environ['VB_VAULT_NAME']
+d = json.loads(os.environ['VB_DOMAIN_JSON'])
+template_seed = d.get('template_seed', 'general')
+t = get_domain_template(template_seed) if template_seed in __import__('domain_templates').DOMAIN_TEMPLATES else {}
+
+domain_json = {
+    'schema_version': 2,
+    'name': d['name'],
+    'label': d.get('label', d['name']),
+    'template_seed': template_seed,
+    'archive_root': d.get('archive_root', ''),
+    'file_system_type': d.get('file_system_type', 'local-path'),
+    'default_tags': d.get('default_tags', t.get('default_tags', [])),
+    'fallback': d.get('fallback', t.get('fallback', 'Inbox')),
+    'style': d.get('style', t.get('style', {})),
+    'seed_routing_patterns': d.get('routing_patterns', t.get('routing_patterns', [])),
+    'seed_content_overrides': d.get('content_overrides', t.get('content_overrides', [])),
+    'seed_skip_patterns': d.get('skip_patterns', t.get('skip_patterns', [])),
+}
+vci.write_domain_config(vault_name, domain_json)
+print(f'Domain config written: {d[\"name\"]}')
+"
+```
+
+## Step 6 — create local project folder
+
+Create a `.vault-bridge/` folder in the current working directory with:
+- `settings.json` — active domain + vault_name + overrides
+- `reports/` — per-scan memory reports (heartbeat/retro/revise write here)
+
+If the user configured multiple domains, ask which one is the default for
+this directory:
+
+```
+VB_VAULT_NAME="$VAULT_NAME" VB_DOMAIN="$FIRST_DOMAIN_NAME" python3 -c "
 import os, sys
 from pathlib import Path
 sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
 import local_config
-local_config.save_local_config(
+path = local_config.save_local_config(
     Path.cwd(),
     active_domain=os.environ['VB_DOMAIN'],
+    vault_name=os.environ['VB_VAULT_NAME'],
 )
-print('Local config saved to .vault-bridge.json')
+print(f'Local config saved to {path}')
 "
 ```
 
@@ -182,9 +240,10 @@ If multiple domains, present via AskUserQuestion:
 > - {domain 2 label}
 > - ...
 
-Tell the user: "Created `.vault-bridge.json` in your working directory.
-You can edit this file to change the active domain or add overrides.
-vault-bridge health-checks it automatically on every command."
+Tell the user: "Created `.vault-bridge/` in your working directory with
+`settings.json` (active domain + overrides) and `reports/` (per-scan memory
+reports). You can edit `settings.json` to change the active domain or add
+overrides. vault-bridge health-checks it automatically on every command."
 
 ## Step 7 — install the Obsidian template (optional)
 
@@ -201,26 +260,33 @@ If yes:
    obsidian create vault="$VAULT_NAME" name="vault-bridge-note" path="_Templates" content="$TEMPLATE_CONTENT" silent overwrite
    ```
 
-## Step 7 — verify and report
+## Step 7 — install the Obsidian template (optional) — see above
+
+(Already listed as Step 7 in the original. Renumbering here for clarity.)
+
+## Step 8 — verify and report
+
+Verify the vault-hosted config is readable:
 
 ```
 python3 -c "
 import sys, json
+from pathlib import Path
 sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
-import setup_config
-config = setup_config.load_config()
-print(json.dumps(config, indent=2))
+import effective_config as ec
+cfg = ec.load_effective_config(Path.cwd())
+print(json.dumps(cfg.to_dict(), indent=2))
 "
 ```
 
 Report:
 
-> "vault-bridge is configured. Config saved to `~/.vault-bridge/config.json`.
+> "vault-bridge is configured. Config written to vault `_meta/vault-bridge/`.
 >
 > - Vault: {vault_name}
 > - Domains: {N}
 >   {for each domain:}
->   - {label} ({name}/) — {archive_root} — {len(routing_patterns)} rules
+>   - {label} ({name}/) — {archive_root} — {len(seed_routing_patterns)} seed rules
 >
 > You can run vault-bridge commands from any directory.
 > Next: `/vault-bridge:retro-scan <project-folder-path>` to scan your first project.

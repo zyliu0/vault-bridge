@@ -339,12 +339,13 @@ def test_pipeline_6_idempotency_skip_on_second_scan(fixture_source, fixture_stat
     """First scan records the event; second scan sees it as 'skip'."""
     pdf = fixture_source / "240909 memo.pdf"
     fp = fingerprint.fingerprint_file(pdf)
+    workdir = fixture_state_dir
 
     # First scan: append
-    vault_scan.append_index(str(pdf), fp, "vault/Admin/2024-09-09 memo.md")
+    vault_scan.append_index(workdir, str(pdf), fp, "vault/Admin/2024-09-09 memo.md")
 
     # Second scan: load, lookup
-    by_path, by_fp = vault_scan.load_index()
+    by_path, by_fp = vault_scan.load_index(workdir)
     decision = vault_scan.lookup_event(
         source_path=str(pdf),
         fingerprint=fp,
@@ -360,14 +361,15 @@ def test_pipeline_6_rename_detected_by_index(fixture_source, fixture_state_dir):
     fingerprint returns 'rename'."""
     folder_old = fixture_source / "2024-10-15 CD drawings"
     fp = fingerprint.fingerprint_folder(folder_old)
+    workdir = fixture_state_dir
 
     # Record under the OLD path
     vault_scan.append_index(
-        str(folder_old), fp, "vault/CD/2024-10-15 CD drawings.md"
+        workdir, str(folder_old), fp, "vault/CD/2024-10-15 CD drawings.md"
     )
 
     # Now simulate that the folder was renamed on disk
-    by_path, by_fp = vault_scan.load_index()
+    by_path, by_fp = vault_scan.load_index(workdir)
     decision = vault_scan.lookup_event(
         source_path=str(fixture_source / "2024-10-15 CD drawings v2"),
         fingerprint=fp,  # SAME fingerprint
@@ -385,11 +387,12 @@ def test_pipeline_6_rename_detected_by_index(fixture_source, fixture_state_dir):
 
 def test_pipeline_7_lockfile_acquire_release(fixture_state_dir):
     """A scan can acquire, then release, then acquire again — no stale lock."""
-    lock1 = vault_scan.acquire_lock()
+    workdir = fixture_state_dir
+    lock1 = vault_scan.acquire_lock(workdir)
     assert lock1.exists()
-    vault_scan.release_lock()
+    vault_scan.release_lock(workdir)
     assert not lock1.exists()
     # Can re-acquire after release
-    lock2 = vault_scan.acquire_lock()
+    lock2 = vault_scan.acquire_lock(workdir)
     assert lock2.exists()
-    vault_scan.release_lock()
+    vault_scan.release_lock(workdir)

@@ -15,22 +15,70 @@ The argument `$1` is the source folder path. Optional flags:
 - `--date-from YYYY-MM-DD` — skip events older than this date
 - `--date-to YYYY-MM-DD` — skip events newer than this date
 
+## Step 0 — ensure setup has been run
+
+Before anything else, verify vault-bridge is configured for the current
+working directory and that Obsidian is reachable:
+
+```bash
+python3 ${CLAUDE_PLUGIN_ROOT}/scripts/local_config.py --is-setup "$(pwd)"
+```
+
+If this fails, vault-bridge has not been set up here. **Run
+`/vault-bridge:setup` first, then resume this scan.** Do not attempt to
+write any notes before setup completes — the scan depends on the vault
+name, the domain list, and the local `.vault-bridge/reports/` folder that
+setup creates.
+
+Load the vault_name from project settings:
+
+```bash
+python3 -c "
+import sys, json
+from pathlib import Path
+sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
+import local_config
+cfg = local_config.load_local_config(Path.cwd())
+print(cfg.get('vault_name', '') if cfg else '')
+"
+```
+
+Check vault reachability (skip if vault_name is empty — legacy install
+without vault_name in project.json falls back to global config):
+
+```bash
+VAULT_NAME=$(python3 -c "
+import sys, json; from pathlib import Path
+sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
+import local_config
+cfg = local_config.load_local_config(Path.cwd())
+print(cfg.get('vault_name', '') if cfg else '')
+")
+if [ -n "$VAULT_NAME" ]; then
+  obsidian vaults | grep -q "$VAULT_NAME" || {
+    echo "Vault '$VAULT_NAME' not visible — open Obsidian and retry."
+    exit 1
+  }
+fi
+```
+
 ## Step 1 — load config and resolve domain
 
-Load the v2 multi-domain config:
+Load the effective configuration (vault-hosted preferred, legacy fallback):
 
 ```
 python3 -c "
 import sys, json
+from pathlib import Path
 sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
-import setup_config
-config = setup_config.load_config()
-print(json.dumps(config))
+import effective_config as ec
+cfg = ec.load_effective_config(Path.cwd())
+print(json.dumps(cfg.to_dict()))
 "
 ```
 
 If this fails (SetupNeeded) → try `parse_config.py CLAUDE.md` as fallback.
-If both fail → print "vault-bridge is not configured. Run /vault-bridge:setup first." and STOP.
+If both fail → run `/vault-bridge:setup` first, then restart this scan.
 
 ### Step 1b — resolve which domain this scan belongs to
 
@@ -85,14 +133,14 @@ After domain is resolved, extract these values from the domain dict:
 
 Run:
 ```
-python3 ${CLAUDE_PLUGIN_ROOT}/scripts/vault_scan.py acquire-lock
+python3 ${CLAUDE_PLUGIN_ROOT}/scripts/vault_scan.py acquire-lock --workdir "$(pwd)"
 ```
 
 If exit is non-zero, another scan is already running. Print the message
 and STOP.
 
 Register a cleanup step: on ANY exit (success, error, interrupt), run
-`python3 ${CLAUDE_PLUGIN_ROOT}/scripts/vault_scan.py release-lock`.
+`python3 ${CLAUDE_PLUGIN_ROOT}/scripts/vault_scan.py release-lock --workdir "$(pwd)"`.
 Do this via a Bash trap if you're using a shell, or by wrapping your work
 in a try/finally structure conceptually — never leave the lockfile behind.
 
@@ -100,7 +148,7 @@ in a try/finally structure conceptually — never leave the lockfile behind.
 
 Run:
 ```
-python3 ${CLAUDE_PLUGIN_ROOT}/scripts/vault_scan.py load-index
+python3 ${CLAUDE_PLUGIN_ROOT}/scripts/vault_scan.py load-index --workdir "$(pwd)"
 ```
 
 Keep the index available (conceptually — re-load it in each event's decision
@@ -116,6 +164,120 @@ under `$1`. The access pattern tells you which tools to call:
 - `external-mount` → use Glob with the mount path
 
 Apply `skip_patterns` to filter out ignored files/folders.
+
+## Step 4.5 — discover and classify new subfolders
+
+Before detecting events, walk the top-level subfolders of `$1` and identify
+any that don't match current routing rules. This step fires interactively so
+the user can decide how to route new folder structures before the scan begins.
+
+### 4.5a — run the discovery pass
+
+```bash
+python3 -c "
+import sys, json
+from pathlib import Path
+sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
+import effective_config, discover_structure as ds
+
+effective = effective_config.load_effective_config(Path.cwd())
+discovered = ds.walk_top_level_subfolders(
+    '$1',
+    skip_patterns=list(effective.skip_patterns),
+)
+prompts = ds.build_category_prompts(discovered, effective)
+print(json.dumps([
+    {
+        'name': p.subfolder.name,
+        'absolute_path': p.subfolder.absolute_path,
+        'child_count': p.subfolder.child_count,
+        'suggestions': p.suggestions,
+    }
+    for p in prompts
+]))
+"
+```
+
+Capture the output as `$PROMPTS_JSON` — a JSON array of prompt objects.
+
+### 4.5b — decide how to handle the prompts
+
+**If `$PROMPTS_JSON` is an empty array `[]`:** Skip this step entirely —
+all subfolders are already covered by routing rules.
+
+**If there are 1–5 prompts:** Present them one by one (go to 4.5c).
+
+**If there are more than 5 prompts:** Ask a single batched question first:
+
+> AskUserQuestion: "{N} new subfolders found that don't match any routing
+> rule. How would you like to handle them?"
+> Options:
+>   - "Classify them one by one" → continue to 4.5c
+>   - "Route all to fallback ({fallback_name}) for this scan" → skip 4.5c,
+>     record all as action="fallback" (no persistence), go to 4.5e
+
+### 4.5c — individual classification prompts (1–5 prompts, or user chose "one by one")
+
+For each prompt object in `$PROMPTS_JSON`, ask via AskUserQuestion:
+
+> "Found new subfolder **{name}** ({child_count} items). It doesn't match
+> any existing routing rule. What should vault-bridge do with it?"
+>
+> Options:
+>   - "Add as new category" → go to 4.5d (ask for target vault subfolder)
+>   - "Route to fallback ({effective.fallback})" → record action="fallback"
+>   - "Skip this subfolder (add to skip list)" → record action="skip"
+
+### 4.5d — target subfolder follow-up (for "Add as new category")
+
+Ask via AskUserQuestion:
+
+> "Which vault subfolder should **{name}** route to?"
+>
+> Options (build from suggestions list + fallback + a free-text option):
+>   - Each item in `suggestions` (the existing vault subfolder names)
+>   - `{effective.fallback}` (the current fallback, if not already in suggestions)
+>   - "Create a new subfolder (type name)" → prompt for free text
+
+Record the decision as: `{subfolder_name: name, action: "add", target: chosen_subfolder}`.
+
+### 4.5e — apply all decisions in one batch
+
+After collecting decisions for all prompts, build a JSON array and apply:
+
+```bash
+DECISIONS_JSON='[
+  {"subfolder_name": "Interior", "action": "add", "target": "SD"},
+  {"subfolder_name": "Renders",  "action": "skip", "target": null},
+  {"subfolder_name": "Photos",   "action": "fallback", "target": null}
+]'
+
+python3 ${CLAUDE_PLUGIN_ROOT}/scripts/category_decisions.py apply \
+  --workdir "$(pwd)" \
+  --decisions-json "$DECISIONS_JSON"
+```
+
+Capture the returned stats (added, skipped_to_fallback, added_to_skip_list) for
+the Step 9 memory report.
+
+### 4.5f — reload the effective config
+
+After applying decisions, reload effective config so subsequent steps see the
+new routing rules:
+
+```bash
+python3 -c "
+import sys, json
+from pathlib import Path
+sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
+import effective_config
+cfg = effective_config.load_effective_config(Path.cwd())
+print(json.dumps(cfg.to_dict()))
+"
+```
+
+Replace the in-memory `$EFFECTIVE_CONFIG` with the reloaded version before
+continuing to Step 5.
 
 ## Step 5 — detect events
 
@@ -415,7 +577,8 @@ VB_SRC="$SOURCE_PATH" VB_FP="$FINGERPRINT" VB_NOTE="$NOTE_PATH" python3 -c "
 import os, sys
 sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
 import vault_scan
-vault_scan.append_index(os.environ['VB_SRC'], os.environ['VB_FP'], os.environ['VB_NOTE'])
+workdir = os.getcwd()
+vault_scan.append_index(workdir, os.environ['VB_SRC'], os.environ['VB_FP'], os.environ['VB_NOTE'])
 "
 ```
 
@@ -436,27 +599,74 @@ After every 10 events, stop and re-read your last 3 notes via
 If any check fails, STOP. Rewrite the offending note before continuing.
 Log the self-check result in the scan summary.
 
-## Step 7 — write the scan log
+## Step 7 — the scan summary goes in the memory report, NOT the vault
 
-After processing all events, write a scan summary to the vault via:
+**Do NOT write a `_scan-log.md` into the vault.** The vault contains only
+real diary notes, their companion canvas files, and `_Attachments/`.
+Everything else — scan summaries, health reports, activity logs — lives in
+the working folder's `.vault-bridge/reports/` via the memory report in
+Step 9.
 
-```bash
-obsidian create vault="$VAULT_NAME" name="_scan-log" path="$PROJECT" content="$SCAN_LOG" silent overwrite
-```
-
-Include in the scan log:
+Collect the scan summary fields in memory for the Step 9 report:
 - Scan date and source folder
 - Events processed / skipped / failed counts
 - Total `read_file` calls made and bytes read
-- List of Template A vs Template B counts
+- Template A vs Template B counts
 - Any renames detected
 - Any self-check findings
+
+These go into the `notes` and `counts` fields of the `$STATS_JSON` passed
+to `memory_report.py retro` in Step 9.
 
 ## Step 8 — release the lock
 
 Run:
 ```
-python3 ${CLAUDE_PLUGIN_ROOT}/scripts/vault_scan.py release-lock
+python3 ${CLAUDE_PLUGIN_ROOT}/scripts/vault_scan.py release-lock --workdir "$(pwd)"
 ```
 
-Report to the user: "Scan complete. N events processed. Vault at {path}."
+## Step 9 — write a memory report
+
+Write a per-scan report into the working directory's
+`.vault-bridge/reports/` folder. Pass compact stats as JSON:
+
+```bash
+python3 ${CLAUDE_PLUGIN_ROOT}/scripts/memory_report.py retro \
+  --workdir "$(pwd)" \
+  --stats-json "$STATS_JSON"
+```
+
+Where `$STATS_JSON` is a JSON object with (all optional but include what
+you know): `started`, `finished`, `duration_sec`, `workdir`, `source`,
+`domain`, `dry_run`, `counts` (object: events, written, skipped, failed,
+template_a, template_b, renames, new_subfolders_discovered, categories_added,
+skipped_subfolders, routed_to_fallback), `notes_written` (list of vault paths),
+`warnings` (list of strings), `errors` (list of strings), and optional
+freeform `notes` (string).
+
+The four new count fields come from Step 4.5:
+- `new_subfolders_discovered` — total subfolders that had no existing routing rule
+- `categories_added` — those the user classified with action="add" (persisted)
+- `skipped_subfolders` — those the user added to skip_patterns (persisted)
+- `routed_to_fallback` — those routed to fallback without persistence
+
+Do this even on dry-runs and on failure — the report is the durable
+breadcrumb for the user.
+
+## Step 10 — append scan-end to memory log
+
+```bash
+python3 ${CLAUDE_PLUGIN_ROOT}/scripts/memory_log.py append \
+  --workdir "$(pwd)" \
+  --event scan-end \
+  --summary "retro-scan finished: $EVENTS_WRITTEN notes written"
+```
+
+## Step 11 — regenerate CLAUDE.md
+
+```bash
+python3 ${CLAUDE_PLUGIN_ROOT}/scripts/render_claude_md.py --workdir "$(pwd)"
+```
+
+Report to the user: "Scan complete. N events processed. Report at
+`.vault-bridge/reports/{filename}`. Vault at {path}."

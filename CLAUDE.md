@@ -17,8 +17,16 @@ Obsidian instance.
 | Zone | Access | Tools |
 |------|--------|-------|
 | Archive (NAS/drive) | Read-only, per-domain | `mcp__nas__*` or `Read`/`Glob` |
-| Vault (Obsidian) | Via CLI only | `obsidian create`, `obsidian read`, `obsidian search`, `obsidian append`, `obsidian property:set` |
-| State (`~/.vault-bridge/`) | Read-write | Python scripts via `Bash` |
+| Vault (Obsidian) | Via CLI only, **real notes only** | `obsidian create`, `obsidian read`, `obsidian search`, `obsidian append`, `obsidian property:set` |
+| Project state (`<workdir>/.vault-bridge/`) | Read-write | Python scripts via `Bash` |
+
+**Only REAL notes go in the vault.** The vault receives: diary notes written
+by retro/heartbeat/revise, their companion `.canvas` files, and
+`_Attachments/` images. Nothing else. Scan logs, health reports, memory
+logs, CLAUDE.md, and per-run summaries live in
+`<workdir>/.vault-bridge/` — never the vault. The optional Obsidian note
+template at `_Templates/vault-bridge-note` is the one exception, and is
+user-opt-in during setup.
 
 Never use the `Write` or `Edit` tools to modify files inside the vault
 directory. If the obsidian CLI is unavailable (Obsidian not running),
@@ -131,6 +139,34 @@ file belongs to by matching the source path against each domain's
 
 Heartbeat scans (autonomous, non-interactive) skip ambiguous files and log
 them for later manual retro-scan.
+
+## Interactive structure discovery
+
+Every project has its own subfolder structure that may differ from the
+domain template (e.g. an architecture project may have `Interior/`,
+`Acoustic/`, `Landscape/` in addition to the standard SD/DD/CD phases).
+vault-bridge discovers these at scan time rather than asking the user to
+enumerate them at setup.
+
+During **retro-scan** (interactive), unknown subfolders — those with no
+existing routing rule — are presented in batches of up to 5. For each, the
+user picks one of three actions:
+- **Add as new category** — vault subfolder name is persisted to
+  `.vault-bridge/settings.json` as a `routing_patterns` entry; files in
+  that subfolder will always route there in future scans.
+- **Route to fallback for now** — no persisted change; files land in the
+  domain's `fallback` subfolder this run.
+- **Skip always** — subfolder name added to `skip_patterns`; ignored in all
+  future scans.
+
+During **heartbeat-scan** (non-interactive), all unknown subfolders are
+silently routed to fallback and logged. The user can run
+`/vault-bridge:retro-scan` or `/vault-bridge:revise --classify` to classify
+them interactively later.
+
+`discover_structure.py` and `category_decisions.py` implement this logic.
+A subfolder is "worth prompting" when it has ≥3 direct children OR contains
+at least one scannable file (pdf, docx, jpg, etc.).
 
 ## Note filename convention
 

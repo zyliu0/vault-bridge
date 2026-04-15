@@ -17,25 +17,60 @@ Flags:
 - `--re-read` — Phase 2b: re-read source files on the NAS to verify content
   and upgrade content_confidence from metadata-only to high where grounded
 - `--move` — Phase 3: offer to move misrouted notes (interactive per note)
+- `--classify` — Phase 4: walk the archive root and interactively classify
+  subfolders that have no routing rule (same prompts as retro-scan Step 4.5)
 
 Default (no flags): Phase 1 audit + Phase 2 frontmatter upgrade.
 
+## Step 0 — ensure setup has been run
+
+Before anything else, verify vault-bridge is configured for the current
+working directory and that Obsidian is reachable:
+
+```bash
+python3 ${CLAUDE_PLUGIN_ROOT}/scripts/local_config.py --is-setup "$(pwd)"
+```
+
+If this fails, **run `/vault-bridge:setup` first, then resume
+this revise run.** Revise needs both the domain list (to compute
+tags and routing) and the local `.vault-bridge/reports/` folder (for the
+memory report).
+
+Check vault reachability:
+
+```bash
+VAULT_NAME=$(python3 -c "
+import sys, json; from pathlib import Path
+sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
+import local_config
+cfg = local_config.load_local_config(Path.cwd())
+print(cfg.get('vault_name', '') if cfg else '')
+")
+if [ -n "$VAULT_NAME" ]; then
+  obsidian vaults | grep -q "$VAULT_NAME" || {
+    echo "Vault '$VAULT_NAME' not visible — open Obsidian and retry."
+    exit 1
+  }
+fi
+```
+
 ## Step 1 — load config
 
-Load the v2 multi-domain config:
+Load the effective configuration (vault-hosted preferred, legacy fallback):
 
 ```
 python3 -c "
 import sys, json
+from pathlib import Path
 sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
-import setup_config
-config = setup_config.load_config()
-print(json.dumps(config))
+import effective_config as ec
+cfg = ec.load_effective_config(Path.cwd())
+print(json.dumps(cfg.to_dict()))
 "
 ```
 
-If this fails, try parse_config.py as a fallback. If both fail, tell the user
-to run `/vault-bridge:setup` first and STOP.
+If this fails, try parse_config.py as a fallback. If both fail, run
+`/vault-bridge:setup` first and then restart this command.
 
 Determine which domain the project folder belongs to using
 `domain_router.resolve_domain()`. If ambiguous, ask the user via
@@ -67,8 +102,10 @@ Or list via obsidian CLI with a path filter:
 obsidian search vault="$VAULT_NAME" query="path:$1/" limit=500
 ```
 
-Exclude `_index.md`, `_scan-log.md`, `_vault-health-*.md` — those are meta
-files, not event notes.
+If any legacy `_index.md`, `_scan-log.md`, or `_vault-health-*.md` files
+remain in the vault from previous plugin versions, exclude them — they are
+not event notes and the current plugin no longer creates them. Reports now
+live in `<workdir>/.vault-bridge/reports/`.
 
 For each note found, read it via obsidian CLI and parse:
 - The frontmatter block (between `---` fences)
@@ -250,6 +287,7 @@ from pathlib import Path
 
 source = os.environ['VB_SRC']
 note = os.environ['VB_NOTE']
+workdir = os.getcwd()
 
 fp = ''
 if source and Path(source).exists():
@@ -260,7 +298,7 @@ if source and Path(source).exists():
 elif source:
     fp = 'unknown'
 
-vault_scan.append_index(source, fp, note)
+vault_scan.append_index(workdir, source, fp, note)
 "
 ```
 
@@ -292,6 +330,61 @@ If no: skip, note the discrepancy in the final report.
 
 If "skip all": stop asking for the rest of the notes. No more moves.
 
+## Phase 4 — Interactive structure discovery (only if --classify flag is set)
+
+Walk the archive root under the project folder and classify subfolders that
+have no existing routing rule. Presents the same AskUserQuestion prompts as
+retro-scan Step 4.5 — then persists the decisions into the project's
+`.vault-bridge/settings.json`.
+
+```
+python3 -c "
+import os, sys, json
+from pathlib import Path
+sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
+import effective_config as ec
+import discover_structure as ds
+
+workdir = Path(os.getcwd())
+effective = ec.load_effective_config(workdir)
+discovered = ds.walk_top_level_subfolders(
+    effective.archive_root,
+    skip_patterns=list(effective.skip_patterns),
+)
+prompts = ds.build_category_prompts(discovered, effective)
+print(json.dumps([
+    {
+        'name': p.subfolder.name,
+        'path': p.subfolder.absolute_path,
+        'child_count': p.subfolder.child_count,
+        'suggestions': p.suggestions,
+    }
+    for p in prompts
+]))
+"
+```
+
+For each prompt in the returned list, present via AskUserQuestion:
+
+> "Found subfolder '{name}' ({child_count} items) with no routing rule.
+>  What should vault-bridge do with files here?"
+>
+> - "Add as new category" → ask for target vault subfolder name (free text,
+>   with `suggestions` offered as examples)
+> - "Route to fallback for now" → no persisted change
+> - "Skip always" → adds to skip_patterns so it is never prompted again
+
+Once all individual decisions are collected, batch-apply with:
+
+```bash
+python3 ${CLAUDE_PLUGIN_ROOT}/scripts/category_decisions.py apply \
+  --workdir "$(pwd)" \
+  --decisions-json "$DECISIONS_JSON"
+```
+
+If there are no prompts (everything already classified), print:
+"No new subfolders found — project routing is fully classified."
+
 ## Step 3 — final report
 
 Print a completion summary:
@@ -318,4 +411,39 @@ Next steps:
   - Run /vault-bridge:retro-scan on the same project folder to pick up
     any events the old workflow missed (idempotent — won't duplicate
     already-indexed notes)
+```
+
+## Step 4 — write a memory report
+
+Write a per-revise report into the working directory's
+`.vault-bridge/reports/` folder:
+
+```bash
+python3 ${CLAUDE_PLUGIN_ROOT}/scripts/memory_report.py revise \
+  --workdir "$(pwd)" \
+  --stats-json "$STATS_JSON"
+```
+
+Where `$STATS_JSON` includes: `started`, `finished`, `duration_sec`,
+`source` (project folder), `domain`, `dry_run`, `counts` (object:
+notes_found, upgraded, already_valid, validation_failed, moved,
+index_entries_added, flagged_unverified), `notes_written` (list of vault
+paths that were rewritten), `warnings`, `errors`, and optional `notes`.
+
+Write the report even on dry-runs and on failure — the user relies on
+this to know what this revise run actually did.
+
+## Step 5 — append scan-end to memory log
+
+```bash
+python3 ${CLAUDE_PLUGIN_ROOT}/scripts/memory_log.py append \
+  --workdir "$(pwd)" \
+  --event scan-end \
+  --summary "revise finished: $NOTES_UPGRADED notes upgraded"
+```
+
+## Step 6 — regenerate CLAUDE.md
+
+```bash
+python3 ${CLAUDE_PLUGIN_ROOT}/scripts/render_claude_md.py --workdir "$(pwd)"
 ```

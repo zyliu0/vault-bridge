@@ -21,10 +21,9 @@ vault is the only thing that changes.
 ## What it produces
 
 ```
-your-vault/
+your-vault/                           ← REAL notes only
 ├── arch-projects/                    ← domain: architecture
 │   └── 2408 Sample Project/
-│       ├── _index.md
 │       ├── SD/
 │       │   └── 2024-07-15 site study.md
 │       ├── Meetings/
@@ -32,6 +31,14 @@ your-vault/
 │       │   └── 2024-09-09 client review.canvas
 │       └── _Attachments/
 │           └── 2024-09-09--client-review--a3f2b9c1.jpg
+
+<working-folder>/                      ← plugin state (never in vault)
+└── .vault-bridge/
+    ├── settings.json                 ← active domain + overrides
+    ├── CLAUDE.md                     ← auto-generated operating rules
+    ├── memory.md                     ← rolling log of scans + decisions
+    └── reports/                      ← per-scan + health reports
+        └── 2026-04-15_17-20-03_retro.md
 ├── photography/                      ← domain: photography
 │   └── 2024 Client Shoot/
 │       ├── Selects/
@@ -72,8 +79,9 @@ note that honestly says so.
   vault notes for the delta. Runs silently.
 
 - **`/vault-bridge:vault-health <project-path>`** — read-only audit. Finds
-  orphaned notes, broken source paths, schema drift, and duplicates. Reports
-  them in `_vault-health-YYYY-MM-DD.md`. Never modifies notes.
+  orphaned notes, broken source paths, schema drift, and duplicates. Writes
+  the report to `<workdir>/.vault-bridge/reports/` — never into the vault.
+  Never modifies notes.
 
 - **`/vault-bridge:revise <project-path>`** — upgrade existing vault notes
   to the vault-bridge schema. Audits frontmatter, fixes fields, optionally
@@ -260,7 +268,7 @@ your archive                         vault-bridge                    your vault
   260121 revision/                  │  3. load index                     Admin/
   ...                               │  4. detect events                  Renderings/
                                     │  5. for each event:                _Attachments/
-                                    │     - extract date                 _scan-log.md
+                                    │     - extract date
                                     │     - compute fingerprint
                                     │     - decide action
                                     │     - route to subfolder
@@ -269,7 +277,7 @@ your archive                         vault-bridge                    your vault
                                     │     - write note
                                     │     - VALIDATE ← hard stop
                                     │     - append to index
-                                    │  6. write scan log
+                                    │  6. write memory report (local)
                                     │  7. release lock
                                     └─
 ```
