@@ -203,16 +203,6 @@ def _recompute_hash(content: str) -> str:
     """Recompute the SHA-256 hash of the content excluding the hash comment line."""
     lines = content.splitlines()
     body_lines = [l for l in lines if not _HASH_PATTERN.search(l) and _RENDER_COMMENT not in l]
-    # Remove trailing empty lines added by join, then re-join
-    body = "\n".join(body_lines)
-    # Strip trailing newline to match how body was originally computed
-    # The body text before hash injection ends with a trailing newline from _render_body
-    # We need the hash to match what was computed during render:
-    # render() computes sha256(_render_body(...)) before injecting the hash line.
-    # So to verify, we need to reconstruct the body as _render_body would produce it.
-    # Strategy: remove the hash line and the render comment line, then strip the title line
-    # back to what _render_body produced.
-    # Simpler: remove hash + comment lines, rejoin, and treat as the body.
     body_text = "\n".join(body_lines)
     # _render_body output ends with "\n" (trailing empty line + join produces trailing \n)
     # After splitlines/join we lose the trailing \n, so add it back:

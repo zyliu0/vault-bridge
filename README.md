@@ -91,6 +91,10 @@ note that honestly says so.
   a description. No archive scan needed — writes the artifact directly into
   the vault.
 
+- **`/vault-bridge:research`** — research a topic, write a grounded report with cited sources.
+
+- **Image pipeline** — transports archive images, extracts embedded ones from containers (PDF/DOCX/PPTX), LLM-describes, writes to vault as binary attachments with wiki-embed references (`![[filename.jpg]]`).
+
 ## Prerequisites
 
 **Required:**

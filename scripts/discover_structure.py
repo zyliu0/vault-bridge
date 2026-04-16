@@ -9,7 +9,7 @@ Pure Python, no shell-outs. Read-only — never mutates any state.
 """
 import fnmatch
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional
 

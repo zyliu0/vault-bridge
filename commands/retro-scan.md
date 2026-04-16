@@ -15,7 +15,7 @@ The argument `$1` is the source folder path. Optional flags:
 - `--date-from YYYY-MM-DD` — skip events older than this date
 - `--date-to YYYY-MM-DD` — skip events newer than this date
 
-## Step 0 — ensure setup has been run
+## Step 0 — ensure setup has been run and transport is healthy
 
 Before anything else, verify vault-bridge is configured for the current
 working directory and that Obsidian is reachable:
@@ -29,6 +29,32 @@ If this fails, vault-bridge has not been set up here. **Run
 write any notes before setup completes — the scan depends on the vault
 name, the domain list, and the local `.vault-bridge/reports/` folder that
 setup creates.
+
+### Step 0b — transport health check
+
+```bash
+python3 -c "
+import sys
+from pathlib import Path
+sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
+import transport_loader
+try:
+    transport_loader.load_transport(Path.cwd())
+    print('transport: ok')
+except transport_loader.TransportMissing as e:
+    print(f'TRANSPORT_MISSING: {e}')
+    import sys; sys.exit(1)
+except transport_loader.TransportInvalid as e:
+    print(f'TRANSPORT_INVALID: {e}')
+    import sys; sys.exit(1)
+"
+```
+
+If exit code is non-zero, print the typed error message and:
+> "Transport helper missing or invalid. Run `/vault-bridge:setup` to
+> scaffold and probe the transport helper before running scans."
+
+Then exit 1. Do not proceed with the scan.
 
 Load the vault_name from project settings:
 
@@ -349,17 +375,61 @@ Check the file type against the file_type handling table:
 | File type | Handling |
 |-----------|----------|
 | pdf, docx, pptx, xlsx | Read via file_system.access_pattern. Template A. |
-| jpg, png (≥50KB) | Read via access pattern. Template A. Compress via compress_images.py. |
+| jpg, png (≥50KB) | Read via access pattern. Template A. Process via image_pipeline. |
 | psd, ai | Read via access pattern (returns composite). Template A. |
 | dxf | Read via access pattern. Template A. |
 | dwg | Read via access pattern. Template A. (Requires LibreDWG setup.) |
 | rvt, 3dm, mov, mp4 | NEVER read — metadata-only. Template B. |
 | folder | Read 1-3 representative files inside. Template A with multi-source. |
 
+### 6e-image. Run image pipeline for image-bearing events
+
+For events with file types that may contain or be images (jpg, png, pdf,
+docx, pptx), after reading the file content, run the image pipeline:
+
+```bash
+python3 -c "
+import sys, json, tempfile
+from pathlib import Path
+sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
+import image_pipeline
+
+with tempfile.TemporaryDirectory() as tmpdir:
+    result = image_pipeline.process_source_for_images(
+        workdir=Path.cwd(),
+        vault_name='$VAULT_NAME',
+        archive_path='$SOURCE_PATH',
+        file_type='$FILE_TYPE',
+        event_date='$EVENT_DATE',
+        project_vault_path='$PROJECT/$SUBFOLDER',
+        out_tempdir=Path(tmpdir),
+    )
+    print(json.dumps({
+        'source_images': result['source_images'],
+        'vault_wiki_embeds': result['vault_wiki_embeds'],
+        'attachments': result['attachments'],
+        'images_embedded': result['images_embedded'],
+        'warnings': result['warnings'],
+        'errors': result['errors'],
+    }))
+"
+```
+
+Capture `SOURCE_IMAGES`, `VAULT_WIKI_EMBEDS`, `ATTACHMENTS`, `IMAGES_EMBEDDED`.
+
+If `errors` is non-empty, add them to the scan's warning list. Continue with
+the note — image errors do not stop the scan.
+
+If `images_embedded == 0` but `source_images` is non-empty (images existed
+but couldn't be embedded), use Template B fallback for the image section:
+> `> [!info] Images referenced but not embedded`
+> `> Source images listed in frontmatter.`
+
 **Template A** — content was successfully read. `sources_read` is non-empty.
 `content_confidence: high`. Body is a 100-200 word first-person diary paragraph
 grounded in what you actually saw in the extracted content. Preceded by any
-image embeds, each with a preceding description sentence.
+image wiki-embeds (`![[filename.jpg]]`), each with a preceding description
+sentence about what the LLM saw.
 
 **Template B** — content was NOT read (metadata-only event). `sources_read: []`.
 `content_confidence: metadata-only`. Body uses this EXACT template verbatim:
@@ -484,7 +554,7 @@ YYMMDD prefix stripped, CJK/accents normalized, spaces preserved.
 
 ### 6i. Build the frontmatter
 
-All 14 required fields (+ `attachments` and `tags` if applicable), in canonical order:
+All 14 required fields (+ optional fields if applicable), in canonical order:
 
 ```yaml
 ---
@@ -505,13 +575,22 @@ read_bytes: {sum of bytes actually read}
 content_confidence: {high | metadata-only}
 attachments:
   - "2024-09-09--image-stem--abc12345.jpg"
+source_images:
+  - "/nas/path/to/source.jpg"
+images_embedded: 1
 tags: [architecture]
 cssclasses: [img-grid]
 ---
 ```
 
-If no images embedded, omit the `attachments` field entirely and use `cssclasses: []`.
-If no tags, omit the `tags` field.
+Field rules:
+- Always emit `source_images` when the event had image sources (may be empty list).
+- Always emit `images_embedded: N` when `source_images` is non-empty.
+- Emit `attachments` only when `images_embedded > 0`.
+- `len(attachments)` MUST equal `images_embedded` — the validator enforces this.
+- If no images processed at all, omit `source_images`, `images_embedded`, and `attachments`.
+- If no tags, omit the `tags` field.
+- `cssclasses: [img-grid]` when attachments present; `cssclasses: []` otherwise.
 
 ### 6j. Write the note via obsidian CLI
 

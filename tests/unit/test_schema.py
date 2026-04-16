@@ -44,7 +44,7 @@ EXPECTED_REQUIRED = (
     "cssclasses",
 )
 
-EXPECTED_OPTIONAL = ("attachments", "tags")
+EXPECTED_OPTIONAL = ("attachments", "source_images", "images_embedded", "tags")
 
 EXPECTED_FILE_TYPES = {
     "folder", "image-folder",
@@ -358,3 +358,72 @@ def test_invariant_domain_must_not_be_empty():
     fm["domain"] = ""
     errors = schema.check_invariants(fm)
     assert any("domain" in e for e in errors)
+
+
+# ---------------------------------------------------------------------------
+# v2 schema — source_images and images_embedded fields (image pipeline)
+# ---------------------------------------------------------------------------
+
+def test_source_images_is_an_optional_field():
+    assert "source_images" in schema.OPTIONAL_FIELDS
+
+
+def test_images_embedded_is_an_optional_field():
+    assert "images_embedded" in schema.OPTIONAL_FIELDS
+
+
+def test_source_images_is_list_type():
+    assert schema.FIELD_TYPES["source_images"] is list
+
+
+def test_images_embedded_is_int_type():
+    assert schema.FIELD_TYPES["images_embedded"] is int
+
+
+def test_source_images_appears_after_attachments_before_tags():
+    order = list(schema.FIELD_ORDER)
+    assert order.index("source_images") > order.index("attachments")
+    assert order.index("source_images") < order.index("tags")
+
+
+def test_images_embedded_appears_after_source_images():
+    order = list(schema.FIELD_ORDER)
+    assert order.index("images_embedded") == order.index("source_images") + 1
+
+
+def test_invariant_images_embedded_positive_requires_matching_attachments():
+    """images_embedded > 0 but attachments absent → invariant violation."""
+    fm = _valid_template_a_frontmatter()
+    fm["images_embedded"] = 2
+    # No attachments key
+    errors = schema.check_invariants(fm)
+    assert any("images_embedded" in e for e in errors)
+
+
+def test_invariant_images_embedded_matches_attachments_length():
+    """images_embedded: 2 but only 1 attachment → invariant violation."""
+    fm = _valid_template_a_frontmatter()
+    fm["images_embedded"] = 2
+    fm["attachments"] = ["only-one.jpg"]
+    errors = schema.check_invariants(fm)
+    assert any("images_embedded" in e and "attachments" in e for e in errors)
+
+
+def test_invariant_images_embedded_matches_attachments_passes():
+    """images_embedded: 2 with 2 attachments → no invariant violation."""
+    fm = _valid_template_a_frontmatter()
+    fm["images_embedded"] = 2
+    fm["attachments"] = ["file1.jpg", "file2.jpg"]
+    errors = schema.check_invariants(fm)
+    # Filter to only images_embedded related errors
+    img_errors = [e for e in errors if "images_embedded" in e]
+    assert not img_errors
+
+
+def test_invariant_images_embedded_zero_passes_without_attachments():
+    """images_embedded: 0 with no attachments → no violation."""
+    fm = _valid_template_b_frontmatter()
+    fm["images_embedded"] = 0
+    errors = schema.check_invariants(fm)
+    img_errors = [e for e in errors if "images_embedded" in e]
+    assert not img_errors

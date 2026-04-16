@@ -1,0 +1,17 @@
+"""vault-bridge transport helper — nas-mcp.
+YOU MUST EDIT THIS FILE. See templates/transport/README.md for guidance.
+Archive root: ${ARCHIVE_ROOT}
+"""
+from pathlib import Path
+
+
+def fetch_to_local(archive_path: str) -> Path:
+    # TODO: implement your NAS fetch logic here.
+    # Example patterns:
+    # 1. paramiko SFTP: download archive_path to /tmp, return the local path.
+    # 2. Pre-mounted SMB: translate archive_path to mount-based local path.
+    # 3. rsync-over-ssh: one-shot pull to local cache.
+    raise NotImplementedError(
+        "Edit <workdir>/.vault-bridge/transport.py to implement fetch_to_local(). "
+        "See templates/transport/README.md."
+    )

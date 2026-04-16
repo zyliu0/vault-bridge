@@ -199,6 +199,25 @@ chars on topic, hyphen-boundary truncation). Computed by `scripts/viz_naming.py`
 type `viz`, including `viz_type`, `source_description`, and `vault_path` in
 the stats payload.
 
+## Research command
+
+`/vault-bridge:research <topic>` performs open-web research using the
+`defuddle` CLI for clean HTML extraction, grounds every claim in cited
+sources via footnotes, and writes a single markdown report into the
+vault at `_Research/YYYY-MM-DD topic.md` (or `<project>/_Research/...`
+when `--project` is given or cwd matches a vault folder).
+
+Sources are tiered by URL/domain (tier 1 = authoritative, tier 2 = trade
+press, tier 3 = verified social, tier 4 = discarded). Chinese-target
+topics auto-switch to bilingual search and include Chinese outlets
+(澎湃, 36kr, 虎嗅, 界面, 财新). WeChat public posts work via
+`mp.weixin.qq.com` direct URLs; Xiaohongshu web pages usually return
+stubs and are skipped (logged in `warnings[]`).
+
+Images referenced in sources are captured as metadata-only URLs in
+`source_images:` frontmatter; a future command will materialize them
+into `_Attachments/`.
+
 ## Note filename convention
 
 Every note vault-bridge writes uses this filename pattern:
@@ -217,7 +236,7 @@ New notes use `schema_version: 2` with these required fields in canonical order:
 `captured_date`, `event_date`, `event_date_source`, `scan_type`,
 `sources_read`, `read_bytes`, `content_confidence`, `cssclasses`.
 
-Optional fields: `attachments`, `tags`.
+Optional fields: `attachments`, `source_images`, `images_embedded`, `tags`.
 
 Existing v1 notes (without `domain` or `tags`) remain valid. Use
 `/vault-bridge:revise --migrate-v2` to upgrade them.
@@ -245,16 +264,47 @@ Template B (metadata-only) events NEVER get highlights, callouts, or canvases.
 
 ## Image handling
 
-Images get compressed and saved to `[Project]/_Attachments/` by
-`scripts/compress_images.py`. Naming:
+**Pipeline diagram:**
+
+  `archive → transport.fetch_to_local → extract (if container) → compress → LLM-vision → vault_binary → wiki-embed`
+
+Each stage is implemented in a dedicated script:
+- `transport_loader.py` — loads `<workdir>/.vault-bridge/transport.py` and calls `fetch_to_local`
+- `extract_embedded_images.py` — extracts images from PDF/DOCX/PPTX containers
+- `compress_images.py` — compresses to JPEG, strips EXIF, deduplicates by content hash
+- `vault_binary.py` — writes binary files to Obsidian vault via `obsidian eval`
+- `image_pipeline.py` — chains all stages for scan commands
+
+**Transport helper:**
+
+`<workdir>/.vault-bridge/transport.py` defines:
+```python
+def fetch_to_local(archive_path: str) -> Path: ...
+```
+Shipped templates under `templates/transport/`: `local.py.tmpl`,
+`external-mount.py.tmpl`, `nas-mcp.py.tmpl`. The setup wizard scaffolds the
+correct template (or a multi-branch dispatch) from configured domains.
+
+**Wiki-embed syntax:** always `![[filename.jpg]]` — never `![](path)`.
+Obsidian renders the vault attachment inline.
+
+**Template B fallback:** when image extraction or vision fails (empty result
+or vision returns < 10 chars), fall back to:
+```
+> [!info] Images referenced but not embedded
+> Source images listed in frontmatter.
+```
+Never fabricate image descriptions.
+
+**Attachment naming:**
 
   `YYYY-MM-DD--{source-stem}--{sha256-prefix-8}.jpg`
 
 The 8-char sha256 prefix is the de-duplication key. Same source bytes
 across two events → one file in `_Attachments/`, two notes embedding it.
 
-Compression: max 1200px longest side, JPEG quality 82, EXIF stripped,
+**Compression:** max 1200px longest side, JPEG quality 82, EXIF stripped,
 RGBA/CMYK/P converted to RGB, EXIF orientation applied before resize.
 
-Sampling: ≤10 images in a folder → embed all; >10 → 10 deterministic
+**Sampling:** ≤10 images in a folder → embed all; >10 → 10 deterministic
 samples via sorted-filename index walk (reproducible across runs).

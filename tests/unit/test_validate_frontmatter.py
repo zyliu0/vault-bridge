@@ -353,3 +353,85 @@ def test_literal_plugin_must_be_vault_bridge(tmp_path):
     code, stderr = run_validator(note)
     assert code != 0
     assert "plugin" in stderr
+
+
+# ---------------------------------------------------------------------------
+# v2 schema — images_embedded / source_images invariant checks
+# ---------------------------------------------------------------------------
+
+# A valid v2 frontmatter template with attachments + image fields
+VALID_V2_WITH_IMAGES = """schema_version: 2
+plugin: vault-bridge
+domain: arch-projects
+project: "Test Project"
+source_path: "/nas/test.pdf"
+file_type: pdf
+captured_date: 2026-04-12
+event_date: 2024-09-09
+event_date_source: filename-prefix
+scan_type: retro
+sources_read:
+  - "/nas/test.pdf"
+read_bytes: 1024
+content_confidence: high
+attachments:
+  - "2026-04-12--test--abc12345.jpg"
+  - "2026-04-12--test2--def67890.jpg"
+source_images:
+  - "/nas/test.pdf"
+images_embedded: 2
+cssclasses: []
+"""
+
+VALID_V2_NO_IMAGES = """schema_version: 2
+plugin: vault-bridge
+domain: arch-projects
+project: "Test Project"
+source_path: "/nas/test.pdf"
+file_type: pdf
+captured_date: 2026-04-12
+event_date: 2024-09-09
+event_date_source: filename-prefix
+scan_type: retro
+sources_read:
+  - "/nas/test.pdf"
+read_bytes: 1024
+content_confidence: high
+cssclasses: []
+"""
+
+
+def test_v2_with_matching_images_embedded_and_attachments_passes(tmp_path):
+    """images_embedded: 2 with 2 attachments → valid."""
+    note = write_note(tmp_path, "v2_images.md", VALID_V2_WITH_IMAGES)
+    code, stderr = run_validator(note)
+    assert code == 0, f"Should pass with matching images_embedded and attachments:\n{stderr}"
+
+
+def test_v2_without_image_fields_passes(tmp_path):
+    """v2 note without source_images/images_embedded fields → valid (optional fields)."""
+    note = write_note(tmp_path, "v2_no_images.md", VALID_V2_NO_IMAGES)
+    code, stderr = run_validator(note)
+    assert code == 0, f"Should pass without image fields:\n{stderr}"
+
+
+def test_v2_images_embedded_mismatch_fails(tmp_path):
+    """images_embedded: 3 but only 2 attachments → invariant violation."""
+    fm = VALID_V2_WITH_IMAGES.replace("images_embedded: 2", "images_embedded: 3")
+    note = write_note(tmp_path, "v2_mismatch.md", fm)
+    code, stderr = run_validator(note)
+    assert code != 0
+    assert "images_embedded" in stderr
+    assert "attachments" in stderr
+
+
+def test_v2_images_embedded_positive_no_attachments_fails(tmp_path):
+    """images_embedded: 1 with no attachments field → invariant violation."""
+    fm = VALID_V2_NO_IMAGES.replace(
+        "cssclasses: []",
+        "source_images:\n  - \"/nas/test.pdf\"\nimages_embedded: 1\ncssclasses: []",
+    )
+    note = write_note(tmp_path, "v2_no_attach.md", fm)
+    code, stderr = run_validator(note)
+    assert code != 0
+    assert "images_embedded" in stderr

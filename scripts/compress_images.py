@@ -17,7 +17,6 @@ import hashlib
 import re
 import unicodedata
 from pathlib import Path
-from typing import Optional
 
 from PIL import Image, ImageOps
 

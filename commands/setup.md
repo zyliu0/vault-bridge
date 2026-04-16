@@ -245,6 +245,108 @@ Tell the user: "Created `.vault-bridge/` in your working directory with
 reports). You can edit `settings.json` to change the active domain or add
 overrides. vault-bridge health-checks it automatically on every command."
 
+## Step 6.5 — scaffold transport helper
+
+After the local folder is created, scaffold the transport helper that scan
+commands will use to fetch archive files to the local machine.
+
+Collect the list of configured domains from Step 4. Build a JSON array:
+```json
+[
+  {"name": "arch-projects", "archive_root": "/nas/archive", "file_system_type": "nas-mcp"},
+  {"name": "photography",  "archive_root": "/local/photos",  "file_system_type": "local-path"}
+]
+```
+
+Run the scaffolder:
+```bash
+VB_DOMAINS_JSON='$DOMAINS_JSON' python3 -c "
+import os, sys, json
+from pathlib import Path
+sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
+import transport_scaffold
+
+domains = json.loads(os.environ['VB_DOMAINS_JSON'])
+out = transport_scaffold.scaffold_transport(Path.cwd(), domains)
+print(f'Transport helper written to: {out}')
+"
+```
+
+Print the absolute path of the written file.
+
+**If any domain has `file_system_type == "nas-mcp"`**, present via AskUserQuestion:
+
+> "The NAS template at `<path>` is a skeleton — you must edit
+> `fetch_to_local()` before scans will work.
+>
+> - 'Edit now — I will come back' → setup pauses. Rerun `/vault-bridge:setup`
+>   after editing the transport.py to proceed to the capability probe.
+> - 'Continue probe — I have already edited the transport' → proceed to Step 6.6"
+
+If the user chooses "Edit now — I will come back", STOP here. Do not proceed
+to Step 6.6. Tell them to open `.vault-bridge/transport.py` and implement
+`fetch_to_local()`, then rerun `/vault-bridge:setup`.
+
+## Step 6.6 — capability probe
+
+For each configured `file_system_type`, ask for a sample archive path via
+AskUserQuestion (free text, file must exist):
+
+> "To verify the image pipeline works end-to-end, provide a sample archive
+> path for `{domain_label}` (e.g., `/path/to/a/photo.jpg` or
+> `/path/to/a/document.pdf`). This file will be fetched, compressed, and
+> written to the vault as a probe. It will not be kept."
+
+Also ask once:
+
+> "Do you have a sample PDF, DOCX, or PPTX on your archive to test image
+> extraction?"
+>
+> Options:
+> - "Yes — provide path" → prompt for free text path
+> - "Skip extraction test" → use None
+
+For the vision test: After step 3 (compress) of the probe completes and
+produces a compressed JPEG, Claude uses the Read tool to view that JPEG and
+writes ONE literal sentence describing what it sees.
+
+Pin this wording in the command verbatim:
+> Read the file at `$PROBE_JPEG` using the Read tool. Write one literal
+> sentence describing what you see, in plain English, no hedging. Example:
+> "A black-and-white photograph of a kitchen counter with three empty
+> glasses." Do not describe anything you cannot see. If the image is blank
+> or unreadable, write "Unable to describe — image appears corrupt or empty."
+
+Run the probe:
+```bash
+python3 -c "
+import sys, json
+from pathlib import Path
+sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
+import setup_probe
+
+# vision_callback is replaced by Claude's inline Read + describe
+def vision_callback(jpeg_path):
+    return '$VISION_SENTENCE'
+
+result = setup_probe.run_probe(
+    workdir=Path.cwd(),
+    vault_name='$VAULT_NAME',
+    sample_archive_paths=['$SAMPLE_PATH'],
+    sample_container_path='$SAMPLE_CONTAINER' if '$SAMPLE_CONTAINER' != 'None' else None,
+    vision_callback=vision_callback,
+)
+print(json.dumps(result))
+"
+```
+
+If probe `ok: False`, print failing check details and present via AskUserQuestion:
+
+> - "Fix transport and retry probe" → loop back to Step 6.6
+> - "Skip probe and finish setup anyway (not recommended)" → proceed to Step 7
+
+If probe `ok: True`, proceed to Step 7.
+
 ## Step 7 — install the Obsidian template (optional)
 
 Present via AskUserQuestion:
@@ -287,6 +389,11 @@ Report:
 > - Domains: {N}
 >   {for each domain:}
 >   - {label} ({name}/) — {archive_root} — {len(seed_routing_patterns)} seed rules
+> - Transport helper: `.vault-bridge/transport.py`
+> - Capability probe: {probe_ok} ({N_passed}/{N_total} checks passed)
+>   {if probe had failures:}
+>   - Failing checks: {list failed check names}
+>   - Tip: fix transport.py and rerun `/vault-bridge:setup` to re-run the probe
 >
 > You can run vault-bridge commands from any directory.
 > Next: `/vault-bridge:retro-scan <project-folder-path>` to scan your first project.

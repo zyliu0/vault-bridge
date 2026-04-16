@@ -17,8 +17,15 @@ import importlib
 import shutil
 import subprocess
 import sys
-from pathlib import Path
 
+
+REQUIRED_CLIS = [
+    {
+        "name": "defuddle",
+        "purpose": "clean HTML extraction for /vault-bridge:research",
+        "install": "npm install -g defuddle",
+    },
+]
 
 REQUIRED_PYTHON_PACKAGES = [
     ("yaml", "PyYAML"),
@@ -59,7 +66,41 @@ RECOMMENDED_SKILLS = [
         "purpose": "Generate Marp presentation decks for viz command",
         "source": "marp-slide marketplace",
     },
+    {
+        "name": "obsidian-skills:defuddle",
+        "purpose": "Documents defuddle CLI usage for /vault-bridge:research",
+        "source": "obsidian-skills marketplace",
+    },
 ]
+
+
+def check_required_clis() -> dict:
+    """Check that required external CLI tools are on PATH."""
+    results = []
+    missing = []
+    for cli in REQUIRED_CLIS:
+        available = shutil.which(cli["name"]) is not None
+        results.append({
+            "name": cli["name"],
+            "purpose": cli["purpose"],
+            "install": cli["install"],
+            "available": available,
+        })
+        if not available:
+            missing.append(cli["name"])
+    return {
+        "name": "Required CLIs",
+        "required": True,
+        "clis": results,
+        "missing": missing,
+        "install_hint": (
+            "; ".join(
+                f"Run: {c['install']}"
+                for c in REQUIRED_CLIS
+                if c["name"] in missing
+            )
+        ) if missing else None,
+    }
 
 
 def _run_command(cmd: list, timeout: int = 5):
@@ -137,15 +178,17 @@ def check_all() -> dict:
     """Run all dependency checks and return a combined result."""
     obsidian = check_obsidian_cli()
     pkgs = check_python_packages()
+    clis = check_required_clis()
     skills = check_recommended_skills()
 
     # Overall OK if all required deps are present
-    ok = obsidian["available"] and not pkgs["missing"]
+    ok = obsidian["available"] and not pkgs["missing"] and not clis["missing"]
 
     return {
         "ok": ok,
         "obsidian_cli": obsidian,
         "python_packages": pkgs,
+        "required_clis": clis,
         "recommended_skills": skills,
     }
 
@@ -172,6 +215,15 @@ def format_report(result: dict) -> str:
             lines.append(f"    -> {pkgs['install_hint']}")
     else:
         lines.append("[OK] Python packages")
+
+    # Required CLIs
+    clis = result.get("required_clis", {})
+    if clis.get("missing"):
+        lines.append(f"[MISSING] Required CLIs: {', '.join(clis['missing'])}")
+        if clis.get("install_hint"):
+            lines.append(f"    -> {clis['install_hint']}")
+    else:
+        lines.append("[OK] Required CLIs")
 
     # Recommended skills
     lines.append("")

@@ -135,3 +135,68 @@ def test_write_report_viz_renders_viz_stats(workdir):
     assert "canvas" in content
     assert "Kickoff" in content
     assert "2408 Sample/" in content
+
+
+# ---------------------------------------------------------------------------
+# research scan type — new tests (Phase 1h)
+# ---------------------------------------------------------------------------
+
+def test_research_in_valid_scan_types():
+    """'research' must be a member of VALID_SCAN_TYPES."""
+    assert "research" in mr.VALID_SCAN_TYPES
+
+
+def test_write_report_research_filename_pattern(workdir):
+    """write_report with scan_type='research' produces a *_research.md filename."""
+    stats = {"topic": "OpenAI", "goal": "Understand mission"}
+    path = mr.write_report(workdir, "research", stats)
+    assert path.exists()
+    assert path.name.endswith("_research.md")
+    assert path.parent == workdir / ".vault-bridge" / "reports"
+
+
+def test_write_report_research_renders_topic_goal_chinese_mode(workdir):
+    """research-specific stats keys topic, goal, chinese_mode render in body."""
+    stats = {
+        "topic": "ByteDance",
+        "goal": "Competitive analysis",
+        "chinese_mode": True,
+    }
+    path = mr.write_report(workdir, "research", stats)
+    content = path.read_text()
+    assert "ByteDance" in content
+    assert "Competitive analysis" in content
+    assert "True" in content or "true" in content.lower()
+
+
+# ---------------------------------------------------------------------------
+# probe scan type — new tests (Phase 4b)
+# ---------------------------------------------------------------------------
+
+def test_probe_in_valid_scan_types():
+    """'probe' must be a member of VALID_SCAN_TYPES."""
+    assert "probe" in mr.VALID_SCAN_TYPES
+
+
+def test_write_report_probe_filename_pattern(workdir):
+    """write_report with scan_type='probe' produces a *_probe.md filename."""
+    stats = {}
+    path = mr.write_report(workdir, "probe", stats)
+    assert path.exists()
+    assert path.name.endswith("_probe.md")
+
+
+def test_write_report_probe_renders_check_list(workdir):
+    """probe_results list is rendered with check names and PASS/FAIL status."""
+    stats = {
+        "probe_results": [
+            {"name": "check_transport_fetch", "ok": True, "detail": "fetched OK"},
+            {"name": "check_compress", "ok": False, "detail": "compress failed"},
+        ]
+    }
+    path = mr.write_report(workdir, "probe", stats)
+    content = path.read_text()
+    assert "check_transport_fetch" in content
+    assert "PASS" in content
+    assert "check_compress" in content
+    assert "FAIL" in content

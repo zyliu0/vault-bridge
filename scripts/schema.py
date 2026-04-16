@@ -41,11 +41,13 @@ FIELD_ORDER = (
     "read_bytes",
     "content_confidence",
     "attachments",       # optional
+    "source_images",     # optional — archive paths processed for images
+    "images_embedded",   # optional — count of images successfully written to vault
     "tags",              # optional
     "cssclasses",        # last — Obsidian rendering directive
 )
 
-_OPTIONAL_SET = frozenset({"attachments", "tags"})
+_OPTIONAL_SET = frozenset({"attachments", "source_images", "images_embedded", "tags"})
 
 REQUIRED_FIELDS = tuple(f for f in FIELD_ORDER if f not in _OPTIONAL_SET)
 OPTIONAL_FIELDS = tuple(f for f in FIELD_ORDER if f in _OPTIONAL_SET)
@@ -114,6 +116,8 @@ FIELD_TYPES = {
     "read_bytes": int,
     "content_confidence": str,
     "attachments": list,
+    "source_images": list,
+    "images_embedded": int,
     "tags": list,
     "cssclasses": list,
 }
@@ -204,6 +208,19 @@ def check_invariants(frontmatter: dict) -> list:
         elif "/" in domain or "\\" in domain:
             errors.append(
                 f"domain must not contain path separators: '{domain}'"
+            )
+
+    images_embedded = frontmatter.get("images_embedded")
+    if images_embedded is not None and images_embedded > 0:
+        attachments = frontmatter.get("attachments", [])
+        if not attachments:
+            errors.append(
+                f"images_embedded ({images_embedded}) > 0 but attachments is absent or empty"
+            )
+        elif len(attachments) != images_embedded:
+            errors.append(
+                f"images_embedded ({images_embedded}) does not match "
+                f"len(attachments) ({len(attachments)})"
             )
 
     return errors

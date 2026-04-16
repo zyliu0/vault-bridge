@@ -25,7 +25,7 @@ sys.path.insert(0, str(_HERE))
 import local_config  # noqa: E402
 
 
-VALID_SCAN_TYPES = {"retro", "heartbeat", "revise", "vault-health", "viz"}
+VALID_SCAN_TYPES = {"retro", "heartbeat", "revise", "vault-health", "viz", "research", "probe"}
 
 
 def _render(scan_type: str, stats: dict, timestamp: datetime) -> str:
@@ -52,6 +52,12 @@ def _render(scan_type: str, stats: dict, timestamp: datetime) -> str:
         lines.append(f"- **Description:** {stats['source_description']}")
     if "vault_path" in stats:
         lines.append(f"- **Vault path:** `{stats['vault_path']}`")
+    if "topic" in stats:
+        lines.append(f"- **Topic:** {stats['topic']}")
+    if "goal" in stats:
+        lines.append(f"- **Goal:** {stats['goal']}")
+    if "chinese_mode" in stats:
+        lines.append(f"- **Chinese mode:** {bool(stats['chinese_mode'])}")
     lines.append("")
 
     counts = stats.get("counts") or {}
@@ -86,6 +92,18 @@ def _render(scan_type: str, stats: dict, timestamp: datetime) -> str:
         lines.append("")
         for e in errors:
             lines.append(f"- {e}")
+        lines.append("")
+
+    probe_results = stats.get("probe_results") or []
+    if probe_results:
+        lines.append("## Probe checks")
+        lines.append("")
+        for check in probe_results:
+            name = check.get("name", "?")
+            ok = check.get("ok", False)
+            detail = check.get("detail", "")
+            status = "PASS" if ok else "FAIL"
+            lines.append(f"- **{name}**: {status} — {detail}")
         lines.append("")
 
     notes = stats.get("notes")

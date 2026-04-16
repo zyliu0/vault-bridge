@@ -43,13 +43,6 @@ from local_config import local_dir as _local_dir  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
-# Legacy global state dir (for migration detection only)
-# ---------------------------------------------------------------------------
-
-from state import state_dir as _state_dir  # noqa: E402
-
-
-# ---------------------------------------------------------------------------
 # Workdir-scoped path helpers
 # ---------------------------------------------------------------------------
 

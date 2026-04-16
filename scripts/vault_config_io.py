@@ -55,10 +55,6 @@ class VaultUnreachable(Exception):
     """Raised when the vault CLI fails or Obsidian is unreachable."""
 
 
-class VaultConfigMissing(Exception):
-    """Raised when a required vault config file is missing."""
-
-
 class InvalidVaultConfig(Exception):
     """Raised when vault config JSON is malformed or has an unsupported schema_version."""
 

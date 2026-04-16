@@ -9,7 +9,7 @@ You are running an autonomous delta scan for vault-bridge. Unlike retro-scan
 since the last heartbeat. Triggered by cron, runs
 silently, writes new vault notes for any new or modified files.
 
-## Step 0 — ensure setup has been run
+## Step 0 — ensure setup has been run and transport is healthy
 
 Heartbeat is the autonomous path, so it NEVER prompts the user. Check that
 the working directory has a `.vault-bridge/` folder:
@@ -22,6 +22,27 @@ If this fails, log "vault-bridge not configured, heartbeat
 skipping — run /vault-bridge:setup from this working directory" to
 `~/.vault-bridge/heartbeat.log` and EXIT 0. Do not attempt setup
 non-interactively; wait for the user to run it.
+
+### Step 0b — transport health check (non-interactive)
+
+```bash
+python3 -c "
+import sys
+from pathlib import Path
+sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
+import transport_loader
+try:
+    transport_loader.load_transport(Path.cwd())
+    print('transport: ok')
+except (transport_loader.TransportMissing, transport_loader.TransportInvalid) as e:
+    print(f'TRANSPORT_ERROR: {e}', file=__import__('sys').stderr)
+    import sys; sys.exit(1)
+"
+```
+
+If exit code is non-zero, log "vault-bridge heartbeat: transport missing or
+invalid — run /vault-bridge:setup" to `~/.vault-bridge/heartbeat.log` and
+EXIT 0 (cron-friendly — do not error the cron job).
 
 Check vault reachability (non-interactive: skip if vault is unreachable):
 

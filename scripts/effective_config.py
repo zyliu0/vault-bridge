@@ -317,7 +317,7 @@ def load_effective_config(
             vault_json = _vci.read_vault_config(_lookup_name, vault_cli=effective_vault_cli)
         except _vci.VaultUnreachable as exc:
             raise VaultUnreachable(str(exc)) from exc
-        except VaultUnreachable as exc:
+        except VaultUnreachable:
             raise
         except _vci.InvalidVaultConfig as exc:
             raise SetupNeeded(

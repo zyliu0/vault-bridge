@@ -19,11 +19,9 @@ Rules:
   with a non-empty sources_read (honest — we don't know what the old scan read)
 - The output is ordered per FIELD_ORDER (canonical serialization order)
 """
-import os
 import re
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
 
 # Make sibling scripts importable
 import sys
@@ -34,10 +32,8 @@ from schema import (  # noqa: E402
     FIELD_ORDER,
     ENUMS,
     LITERAL_VALUES,
-    REQUIRED_FIELDS,
-    OPTIONAL_FIELDS,
 )
-from extract_event_date import extract_event_date, parse_date_prefix  # noqa: E402
+from extract_event_date import extract_event_date  # noqa: E402
 
 # Extensions that map to known file_type enum values
 _EXT_TO_FILE_TYPE = {
@@ -174,6 +170,16 @@ def upgrade_frontmatter(
     existing_attachments = existing_fm.get("attachments")
     if isinstance(existing_attachments, list) and existing_attachments:
         fm["attachments"] = existing_attachments
+
+    # --- source_images (optional) --- preserve if present, never invent
+    existing_source_images = existing_fm.get("source_images")
+    if isinstance(existing_source_images, list) and existing_source_images:
+        fm["source_images"] = existing_source_images
+
+    # --- images_embedded (optional) --- preserve if present, never invent
+    existing_images_embedded = existing_fm.get("images_embedded")
+    if isinstance(existing_images_embedded, int) and existing_images_embedded >= 0:
+        fm["images_embedded"] = existing_images_embedded
 
     # --- tags (optional) ---
     existing_tags = existing_fm.get("tags")

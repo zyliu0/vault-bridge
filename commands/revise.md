@@ -22,7 +22,7 @@ Flags:
 
 Default (no flags): Phase 1 audit + Phase 2 frontmatter upgrade.
 
-## Step 0 — ensure setup has been run
+## Step 0 — ensure setup has been run and transport is healthy
 
 Before anything else, verify vault-bridge is configured for the current
 working directory and that Obsidian is reachable:
@@ -35,6 +35,29 @@ If this fails, **run `/vault-bridge:setup` first, then resume
 this revise run.** Revise needs both the domain list (to compute
 tags and routing) and the local `.vault-bridge/reports/` folder (for the
 memory report).
+
+### Step 0b — transport health check
+
+```bash
+python3 -c "
+import sys
+from pathlib import Path
+sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
+import transport_loader
+try:
+    transport_loader.load_transport(Path.cwd())
+    print('transport: ok')
+except (transport_loader.TransportMissing, transport_loader.TransportInvalid) as e:
+    print(f'TRANSPORT_ERROR: {e}')
+    import sys; sys.exit(1)
+"
+```
+
+If exit code is non-zero, print the typed error message and:
+> "Transport helper missing or invalid. Run `/vault-bridge:setup` to
+> scaffold and probe the transport helper before running revise."
+
+Then exit 1. Do not proceed.
 
 Check vault reachability:
 
@@ -241,6 +264,40 @@ If `--re-read` AND the source_path exists on the file system:
 
 This is the fabrication detection step. It's expensive (one read per note)
 and only runs when the user explicitly asks for it.
+
+### 2b-image. Re-process images (only if --re-read flag is set)
+
+After re-reading text content, also re-run the image pipeline for image-bearing
+events. Skip re-writes for attachments whose hash prefix already appears in the
+existing `attachments` frontmatter list (de-dup via the 8-char sha256 prefix in
+the filename):
+
+```bash
+python3 -c "
+import sys, json, tempfile
+from pathlib import Path
+sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
+import image_pipeline
+
+# Only process if source_path is image-bearing
+with tempfile.TemporaryDirectory() as tmpdir:
+    result = image_pipeline.process_source_for_images(
+        workdir=Path.cwd(),
+        vault_name='$VAULT_NAME',
+        archive_path='$SOURCE_PATH',
+        file_type='$FILE_TYPE',
+        event_date='$EVENT_DATE',
+        project_vault_path='$PROJECT_PATH',
+        out_tempdir=Path(tmpdir),
+    )
+    print(json.dumps(result))
+"
+```
+
+For each attachment in the result, check if the hash prefix already exists in
+the note's `attachments` list. If yes, skip that write (idempotent). If no,
+write the new attachment. Update `images_embedded` and `attachments` in the
+upgraded frontmatter accordingly.
 
 ### 2c. Write the upgraded note
 
