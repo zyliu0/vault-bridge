@@ -32,7 +32,6 @@ Show a per-domain summary:
 vault-bridge config is valid (schema v4).
 
 Vault:       {cfg.vault_name}
-Vault path:  {cfg.vault_path or "(not set)"}
 Domains:     {len(cfg.domains)}
 Active:      {cfg.active_domain or "(none — multi-domain, resolved per scan)"}
 

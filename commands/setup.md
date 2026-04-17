@@ -102,15 +102,6 @@ Present via AskUserQuestion:
 If possible, list available vaults by running `obsidian vaults` and
 presenting them as structured options. If that fails, ask for free text.
 
-Then ask:
-
-> "Enter the absolute filesystem path to your vault (e.g.
-> /Users/you/Documents/MyVault). This is optional but strongly recommended
-> — it lets vault-bridge read vault files without the Obsidian CLI."
-
-Store this as `vault_path`. If the user skips or enters nothing, set
-`vault_path = None`.
-
 Verify the vault name:
 ```bash
 obsidian vault="$VAULT_NAME" search query="test" limit=1
@@ -246,7 +237,7 @@ from config import Config, ProjectOverrides, save_config
 config = Config(
     schema_version=4,
     vault_name=vault_name,
-    vault_path=vault_path,  # May be None if user skipped
+    vault_path=None,
     created_at=datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S'),
     fabrication_stopwords=[],
     global_style={
