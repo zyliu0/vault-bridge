@@ -304,10 +304,11 @@ Present via AskUserQuestion with options:
 > - **Writing** — Drafts, Published, Research, Meetings
 > - **Social media / content** — platform-based routing, scheduled/published
 > - **Research** — Sources, Notes, Clippings, References
+> - **Coding** — src, tests, docs, ADR, CI/CD, reviews, releases
 > - **General** — minimal routing, good starting point
 
 Map selection to template name: architecture, photography, writing,
-social-media, research, general.
+social-media, research, coding, general.
 
 Load the template:
 ```python
