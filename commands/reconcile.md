@@ -36,7 +36,7 @@ Flags:
 - `--re-read` — Phase 2b: re-read source files on the NAS to verify content
   and upgrade content_confidence from metadata-only to high where grounded
 - `--move` — Phase 3: offer to move misrouted notes (interactive per note)
-- `--classify` — Phase 4: walk the archive root and interactively classify
+- `--classify` — Phase 5: walk the archive root and interactively classify
   subfolders that have no routing rule (same prompts as retro-scan Step 4.5)
 
 Default (no flags): Phase 1 audit + Phase 2 frontmatter upgrade.
@@ -461,7 +461,63 @@ vault_scan.append_index(workdir, source, fp, note)
 For NAS sources (not locally accessible), the fingerprint will be `unknown`
 until a future retro-scan or heartbeat-scan can compute it from the NAS.
 
-## Phase 3 — Routing fixes (only if --move flag is set)
+## Phase 2f — Rewrite metadata-only notes (auto, always runs)
+
+After all Phase 2 upgrades, scan all notes in the project. Any note with
+`content_confidence: metadata-only` (meaning the original scan couldn't read
+the source) is a candidate for a full rewrite.
+
+### 2f-1. Find meta-only notes
+
+```
+Meta-only notes (source_path exists but note is metadata-only):
+  - SD/2024-09-09 site visit.md
+  - CD/2024-10-01 inspection.md
+```
+
+Use `obsidian search` filtered on `content_confidence: metadata-only` to find
+all such notes in the project. Or iterate all notes found in Phase 2 and filter
+on `content_confidence == "metadata-only"`.
+
+### 2f-2. For each meta-only note, rescan the archive source
+
+**For each meta-only note, present via AskUserQuestion:**
+
+> "Note **{filename}** is metadata-only (source was not readable at scan time).
+> Rescan the archive source now?"
+>
+> - "Yes — rescan and rewrite" → proceed to Step 2f-3
+> - "Skip — keep it as metadata-only" → leave the note unchanged
+> - "Skip all remaining" → stop prompting, apply no more rewrites
+
+### 2f-3. Rescan and rewrite
+
+Run the same retro-scan event detection pipeline as if the user were running
+`/vault-bridge:retro-scan` on the source folder for this event only. This
+means:
+1. Re-resolve the archive path from the note's `source_path`
+2. Re-run the image pipeline (Step 6e-image) with LLM vision descriptions
+3. Re-generate the frontmatter and Template A body
+4. **Delete the existing note** from the vault
+5. **Write a new note** at the same vault path with fresh frontmatter + body
+
+The `cssclasses: [img-grid]` is set if the rescan produced images.
+
+If the rescan fails (transport error, file still unreadable):
+- Log the failure: "Rescan failed for {note}: {reason}"
+- Keep the original note unchanged — do NOT delete a valid note on failure
+- Continue to the next meta-only note
+
+### 2f-4. Update the scan index
+
+After rewriting, call `vault_scan.rewrite_index_entry` for the new note
+so the index reflects the fresh fingerprint.
+
+### 2f-5. Update the frontmatter check in Phase 1
+
+Also flag notes that are `metadata-only` but whose `source_path` no longer
+exists on disk. These cannot be rescanned — flag them as `source broken`
+under Check 2 in vault-health.
 
 For each note with a routing mismatch:
 
@@ -486,7 +542,7 @@ If no: skip, note the discrepancy in the final report.
 
 If "skip all": stop asking for the rest of the notes. No more moves.
 
-## Phase 4 — Interactive structure discovery (only if --classify flag is set)
+## Phase 5 — Interactive structure discovery (only if --classify flag is set)
 
 Walk the archive root under the project folder and classify subfolders that
 have no existing routing rule. Presents the same AskUserQuestion prompts as
@@ -559,6 +615,11 @@ Skipped (validation failed): {N}
 Notes moved:           {N} (if --move was used)
 Index entries added:   {N}
 
+Metadata-only rewrites:
+  Rewritten to Template A: {N}
+  Kept as metadata-only:    {N}
+  Rescan failed:            {N}
+
 Content verification:
   Upgraded to high confidence: {N} (if --re-read was used)
   Flagged as unverified:       {N}
@@ -585,8 +646,8 @@ python3 ${CLAUDE_PLUGIN_ROOT}/scripts/memory_report.py reconcile \
 Where `$STATS_JSON` includes: `started`, `finished`, `duration_sec`,
 `source` (project folder), `domain`, `dry_run`, `counts` (object:
 notes_found, upgraded, already_valid, validation_failed, moved,
-index_entries_added, flagged_unverified), `notes_written` (list of vault
-paths that were rewritten), `warnings`, `errors`, and optional `notes`.
+index_entries_added, meta_only_rewritten, meta_only_kept, rescan_failed,
+flagged_unverified), `notes_written` (list of vault paths that were rewritten)
 
 Write the report even on dry-runs and on failure — the user relies on
 this to know what this reconcile run actually did.

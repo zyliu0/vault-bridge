@@ -1,0 +1,53 @@
+/* vault-bridge image grid
+   Adds responsive CSS grid layout for notes with cssclasses: [img-grid]
+   Based on the image grid pattern from Minimal theme by kepano.
+
+   Installation (optional):
+   1. Copy this file to your vault's .obsidian/snippets/ folder
+   2. Enable it in Obsidian: Settings > Appearance > CSS Snippets > Toggle
+   3. Notes with cssclasses: [img-grid] will render images in a responsive grid
+
+   Without this snippet, images still display inline — the grid is purely
+   a display enhancement for photo-heavy event notes.
+*/
+
+/* Image grid container — applied when cssclasses includes img-grid */
+.img-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 8px;
+  margin: 16px 0;
+}
+
+/* Each image inside the grid fills its cell */
+.img-grid img {
+  width: 100%;
+  height: 200px;
+  object-fit: cover;
+  border-radius: 4px;
+  display: block;
+}
+
+/* Caption text under each image (via alt text or following paragraph) */
+.img-grid img + p {
+  font-size: 0.75em;
+  color: var(--text-muted);
+  margin: 4px 0 12px;
+  text-align: center;
+}
+
+/* Wide images that span multiple columns — mark with .img-wide class
+   on the attachment wiki-embed line */
+.img-grid .img-wide {
+  grid-column: span 2;
+}
+
+/* For screens narrower than 600px, force single column */
+@media (max-width: 600px) {
+  .img-grid {
+    grid-template-columns: 1fr;
+  }
+  .img-grid .img-wide {
+    grid-column: span 1;
+  }
+}

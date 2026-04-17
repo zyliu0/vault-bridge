@@ -621,6 +621,7 @@ with tempfile.TemporaryDirectory() as tmpdir:
     print(json.dumps({
         'source_images': result['source_images'],
         'vault_wiki_embeds': result['vault_wiki_embeds'],
+        'compressed_paths': [str(p) for p in result['compressed_paths']],
         'attachments': result['attachments'],
         'images_embedded': result['images_embedded'],
         'warnings': result['warnings'],
@@ -629,10 +630,26 @@ with tempfile.TemporaryDirectory() as tmpdir:
 "
 ```
 
-Capture `SOURCE_IMAGES`, `VAULT_WIKI_EMBEDS`, `ATTACHMENTS`, `IMAGES_EMBEDDED`.
+Capture all result fields. `compressed_paths` is the key — it contains the
+local paths of compressed JPEGs that have been written to the vault.
 
-If `errors` is non-empty, add them to the scan's warning list. Continue with
-the note — image errors do not stop the scan.
+**For each `compressed_path`, use the Read tool to look at the image:**
+
+> Read the file at `$COMPRESSED_JPEG` using the Read tool. Write one literal
+> sentence describing what you see, in plain English, no hedging. Example:
+> "A black-and-white photograph of a kitchen counter with three empty
+> glasses." Do not describe anything you cannot see. If the image is blank
+> or unreadable, write "Unable to describe — image appears corrupt or empty."
+
+Build `VISION_DESCRIPTIONS` as a list of description sentences, one per
+compressed image, in the same order as `compressed_paths`.
+
+Then build `VAULT_WIKI_EMEDS` by prepending each description to its wiki-embed:
+```
+VISION_DESCRIPTIONS[0] ![[attachments[0]]]
+VISION_DESCRIPTIONS[1] ![[attachments[1]]]
+...
+```
 
 If `images_embedded == 0` but `source_images` is non-empty (images existed
 but couldn't be embedded), use Template B fallback for the image section:
@@ -642,8 +659,15 @@ but couldn't be embedded), use Template B fallback for the image section:
 **Template A** — content was successfully read. `sources_read` is non-empty.
 `content_confidence: high`. Body is a 100-200 word first-person diary paragraph
 grounded in what you actually saw in the extracted content. Preceded by any
-image wiki-embeds (`![[filename.jpg]]`), each with a preceding description
-sentence about what the LLM saw.
+image wiki-embeds with LLM vision descriptions — each image line looks like:
+
+```
+A brief description of what the image shows. ![[attachment-filename.jpg]]
+```
+
+The description sentence comes from Step 6e-image and is the literal output
+of the LLM reading the compressed JPEG. If images_embedded > 0,
+`cssclasses: [img-grid]` is set to trigger the vault CSS grid layout.
 
 **Template B** — content was NOT read (metadata-only event). `sources_read: []`.
 `content_confidence: metadata-only`. Body uses this EXACT template verbatim:
