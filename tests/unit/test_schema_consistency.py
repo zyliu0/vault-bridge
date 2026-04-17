@@ -81,13 +81,17 @@ def test_retro_scan_mentions_validator_call():
     )
 
 
-def test_retro_scan_mentions_parse_config_call():
+def test_retro_scan_mentions_config_load_call():
     content = _command_file("retro-scan.md")
     if not content:
         import pytest
         pytest.skip("commands/retro-scan.md not yet created")
-    assert "parse_config.py" in content or "parse-config.py" in content, (
-        "retro-scan.md does not call parse_config.py — "
+    assert (
+        "load_config" in content
+        or "parse_config.py" in content
+        or "parse-config.py" in content
+    ), (
+        "retro-scan.md does not call load_config or parse_config.py — "
         "the config will not be parsed and the routing table will be missing"
     )
 
@@ -115,7 +119,8 @@ def test_validate_config_command_exists_and_calls_parser():
     if not content:
         import pytest
         pytest.skip("commands/validate-config.md not yet created")
-    assert "parse_config.py" in content
+    # v5+: uses load_config from config module; earlier versions used parse_config.py
+    assert "load_config" in content or "parse_config.py" in content
 
 
 def test_setup_command_exists_and_calls_save():
@@ -128,22 +133,22 @@ def test_setup_command_exists_and_calls_save():
     assert "domain" in content.lower()
 
 
-def test_revise_command_exists_and_calls_upgrade():
-    content = _command_file("revise.md")
+def test_reconcile_command_exists_and_calls_upgrade():
+    content = _command_file("reconcile.md")
     if not content:
         import pytest
-        pytest.skip("commands/revise.md not yet created")
+        pytest.skip("commands/reconcile.md not yet created")
     assert "upgrade_frontmatter" in content
     assert "validate_frontmatter" in content
     assert "dry-run" in content.lower() or "dry_run" in content.lower()
     assert "re-read" in content.lower() or "re_read" in content.lower()
 
 
-def test_revise_command_mentions_routing_check():
-    content = _command_file("revise.md")
+def test_reconcile_command_mentions_routing_check():
+    content = _command_file("reconcile.md")
     if not content:
         import pytest
-        pytest.skip("commands/revise.md not yet created")
+        pytest.skip("commands/reconcile.md not yet created")
     assert "routing" in content.lower()
     assert "mismatch" in content.lower()
 
@@ -196,13 +201,14 @@ def test_vault_health_mentions_fingerprint_duplicate_check():
 # README must document the preset profiles and the setup steps
 # ---------------------------------------------------------------------------
 
-def test_readme_mentions_config_heading():
-    """The README must tell users what heading to add to their CLAUDE.md."""
+def test_readme_mentions_config_location():
+    """The README must tell users where the config file lives (v5: workdir-scoped)."""
     content = _readme()
     if not content:
         import pytest
         pytest.skip("README.md not yet created")
-    assert "vault-bridge: configuration" in content
+    # v5: config is stored in <workdir>/.vault-bridge/config.json, not vault CLAUDE.md
+    assert "config.json" in content or ".vault-bridge" in content
 
 
 def test_readme_documents_requirements_txt():

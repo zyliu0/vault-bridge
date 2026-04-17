@@ -29,8 +29,8 @@ sys.path.insert(0, str(SCRIPTS))
 import effective_config as ec    # noqa: E402
 import render_claude_md as rcm   # noqa: E402
 
-# Also need BUILTIN_FABRICATION_STOPWORDS for test 6
-from effective_config import BUILTIN_FABRICATION_STOPWORDS  # noqa: E402
+# v5: BUILTIN_FABRICATION_STOPWORDS canonical home is config module
+from config import BUILTIN_FABRICATION_STOPWORDS  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -51,7 +51,7 @@ def _sample_effective_config(**kwargs):
         vault_name="TestVault",
         domain_name="arch-projects",
         archive_root="/nas/archive/",
-        file_system_type="nas-mcp",
+        transport_name="home-nas-smb",
         routing_patterns=[
             {"match": "CD", "subfolder": "CD"},
             {"match": "SD", "subfolder": "SD"},
@@ -79,7 +79,7 @@ def _write_global_config(state_dir, vault_name="TestVault", domains=None):
             "name": "arch-projects",
             "label": "Architecture Projects",
             "archive_root": "/nas/archive/",
-            "file_system_type": "nas-mcp",
+            "transport": "home-nas-smb",
             "routing_patterns": [{"match": "CD", "subfolder": "CD"}],
             "content_overrides": [],
             "fallback": "Admin",
@@ -128,7 +128,7 @@ def test_render_includes_all_sections():
     assert "TestVault" in out
     assert "arch-projects" in out
     assert "/nas/archive/" in out
-    assert "nas-mcp" in out
+    assert "home-nas-smb" in out
     assert "Admin" in out  # fallback
     assert "## Observed structure" in out
     assert "## Effective routing rules" in out

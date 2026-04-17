@@ -3,17 +3,69 @@ description: Configure vault-bridge — vault name, domains, archive paths
 allowed-tools: Read, Bash, Glob, AskUserQuestion
 ---
 
-Set up vault-bridge. Asks a few questions, auto-detects file system types,
-and writes configuration to THREE local files:
-- `_meta/vault-bridge/vault.json` and `_meta/vault-bridge/domains/<name>.json`
-  inside your Obsidian vault (read via the `obsidian` CLI — shared across
-  every project that targets this vault)
-- `<workdir>/.vault-bridge/settings.json` in the current working directory
-  (project-specific overrides + the active domain for this folder)
+Set up vault-bridge. Asks a few questions, builds transports per domain,
+and writes a single config file:
+- `<workdir>/.vault-bridge/config.json` — all vault-bridge configuration for
+  this working directory (schema v4, shared format across vault-bridge v6+)
 
-No state is written to `~/` — everything lives either in the vault or in
-the working folder. Works from any directory; Obsidian must be running so
-the `obsidian` CLI can write vault.json + domain files into the vault.
+No config is written to `~/` or into the Obsidian vault. Everything lives in
+the working directory's `.vault-bridge/` folder. Works from any directory.
+Obsidian must be running for the capability probe (Step 6.6).
+
+NOTE: Users with multiple working directories for the same vault should run
+`/vault-bridge:setup` in each working directory. The migration path runs once
+per workdir. Future versions may share config across workdirs — currently not
+implemented.
+
+## Step 0 — detect and offer to import legacy config
+
+Check for legacy config before running the dependency check:
+
+```python
+import sys, os
+from pathlib import Path
+sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
+
+# Check for legacy global config
+from state import state_dir
+legacy_global = state_dir() / "config.json"
+has_legacy_global = legacy_global.exists()
+
+# Check for vault-hosted config (requires vault_path to be known — skip if not)
+has_legacy_vault = False
+```
+
+If `has_legacy_global` is True, present via AskUserQuestion:
+
+> "vault-bridge detects existing configuration at `~/.vault-bridge/config.json`.
+> Import it into the new v4 format?"
+>
+> - "Yes — import and move old files to .deprecated-v5"
+> - "No — start fresh (old files will remain untouched)"
+
+If Yes:
+
+```python
+import sys, json
+from pathlib import Path
+sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
+import import_legacy
+from config import save_config
+
+config = import_legacy.import_legacy(Path.cwd())
+if config is not None:
+    saved_path = save_config(Path.cwd(), config)
+    print(f"Imported legacy config. Saved to: {saved_path}")
+    print(json.dumps(config.to_dict(), indent=2))
+else:
+    print("Nothing found to import.")
+```
+
+If import succeeds (config is not None), **jump directly to Step 6.5**
+(transport builder per domain). The rest of the interactive setup questions are
+not needed.
+
+If No → fall through to Step 1.
 
 ## Step 1 — check dependencies
 
@@ -50,7 +102,16 @@ Present via AskUserQuestion:
 If possible, list available vaults by running `obsidian vaults` and
 presenting them as structured options. If that fails, ask for free text.
 
-Verify the vault exists:
+Then ask:
+
+> "Enter the absolute filesystem path to your vault (e.g.
+> /Users/you/Documents/MyVault). This is optional but strongly recommended
+> — it lets vault-bridge read vault files without the Obsidian CLI."
+
+Store this as `vault_path`. If the user skips or enters nothing, set
+`vault_path = None`.
+
+Verify the vault name:
 ```bash
 obsidian vault="$VAULT_NAME" search query="test" limit=1
 ```
@@ -67,16 +128,37 @@ Present via AskUserQuestion with options:
 
 ## Step 4 — configure each domain (loop)
 
+A **domain** is a top-level grouping of related archives — for example
+"Architecture Projects", "Photography", or "Content Creation". Each domain
+has its own archive folder, routing rules, and writes notes into its own
+vault subfolder. If the user picked "Simple" in Step 3 there is one
+domain; if "Multi-domain", we'll loop through as many as they want.
+
 For each domain:
 
 ### 4a. Ask for a domain label
 
-Present via AskUserQuestion (free text needed here):
+Present via AskUserQuestion (free text needed here). Phrase the prompt so
+the user knows what's being asked and where they are in the loop:
 
-> "Name this domain (e.g., 'Architecture Projects', 'Photography', 'Content'):"
+> **First domain**: "What would you like to call the first grouping of
+>   archives? A domain is a category of work — examples: 'Architecture
+>   Projects', 'Photography', 'Content Creation'."
+>
+> **Simple mode (only one domain)**: "What would you like to call this
+>   archive? This is a short, human-readable label — examples:
+>   'Architecture Projects', 'My Photos', 'Research Notes'."
+>
+> **Nth domain (N ≥ 2)**: "What would you like to call the next domain?
+>   Examples so far: {already_configured_labels}. Examples of new ones:
+>   'Photography', 'Writing', 'Research'."
 
-Auto-generate the domain `name` by slugifying the label (lowercase, hyphens
-for spaces, ASCII only). E.g., "Architecture Projects" → "arch-projects".
+The answer is the human-readable **label** (spaces and capitals allowed).
+Auto-generate the internal `name` slug by lowercasing, replacing spaces
+with hyphens, and stripping to ASCII. E.g., "Architecture Projects" →
+"arch-projects"; "我的照片" falls back to "domain-2" if the slug is empty.
+Show the generated slug in the confirmation so the user sees how it'll
+appear in vault subfolders and frontmatter.
 
 ### 4b. Ask where the archive lives
 
@@ -89,11 +171,10 @@ for spaces, ASCII only). E.g., "Architecture Projects" → "arch-projects".
 
 Verify the path exists.
 
-### 4c. Auto-detect file_system_type
+### 4c. (No auto-detection — transport is configured in Step 6.5)
 
-- If `mcp__nas__list_files` is available AND the path starts with `/` (NAS
-  convention) → `nas-mcp`
-- Otherwise → `local-path`
+The transport type (how to reach the archive) is no longer guessed here.
+`Domain.transport` starts as `None` and is bound during Step 6.5.
 
 ### 4d. Ask which domain template to start from
 
@@ -112,27 +193,33 @@ Map selection to template name: architecture, photography, writing,
 social-media, research, general.
 
 Load the template:
-```
-python3 -c "
+```python
 import sys, json
 sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
-import setup_config
-t = setup_config.get_domain_template('TEMPLATE_NAME')
+from setup_config import get_domain_template
+t = get_domain_template('TEMPLATE_NAME')
 print(json.dumps(t))
-"
 ```
 
 ### 4e. Build the domain dict
 
-Combine user input with the template:
+Combine user input with the template. `transport=None` — will be set in Step 6.5.
+
 ```python
-domain = {
-    "name": slugified_label,
-    "label": user_label,
-    "archive_root": user_path,
-    "file_system_type": detected_fs_type,
-    **template,  # routing_patterns, content_overrides, fallback, skip_patterns, default_tags, style
-}
+from config import Domain
+domain = Domain(
+    name=slugified_label,
+    label=user_label,
+    template_seed=template_name,
+    archive_root=user_path,
+    transport=None,          # bound during Step 6.5 per domain
+    default_tags=list(template.get("default_tags", [])),
+    fallback=template.get("fallback", "Inbox"),
+    style=dict(template.get("style", {})),
+    routing_patterns=list(template.get("routing_patterns", [])),
+    content_overrides=list(template.get("content_overrides", [])),
+    skip_patterns=list(template.get("skip_patterns", [])),
+)
 ```
 
 ### 4f. Ask if they want another domain
@@ -145,160 +232,95 @@ If "multi-domain" was chosen in step 3, present via AskUserQuestion:
 
 If yes → loop back to 4a. If no → continue.
 
-## Step 5 — write vault-hosted config
+## Step 5 — write config.json
 
-### Step 5a — write vault.json to the Obsidian vault
+Write the v4 config to `<workdir>/.vault-bridge/config.json`:
 
-```
-VB_VAULT_NAME="$VAULT_NAME" python3 -c "
-import os, sys, json
+```python
+import sys, json
 from datetime import datetime, timezone
+from pathlib import Path
 sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
-import vault_config_io as vci
+from config import Config, ProjectOverrides, save_config
 
-vault_name = os.environ['VB_VAULT_NAME']
-vault_json = {
-    'schema_version': 2,
-    'vault_name': vault_name,
-    'created_at': datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S'),
-    'fabrication_stopwords': [],
-    'global_style': {
+config = Config(
+    schema_version=4,
+    vault_name=vault_name,
+    vault_path=vault_path,  # May be None if user skipped
+    created_at=datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S'),
+    fabrication_stopwords=[],
+    global_style={
         'writing_voice': 'first-person-diary',
         'summary_word_count': [100, 200],
         'note_filename_pattern': 'YYYY-MM-DD topic.md',
     },
-    'note_template_name': 'vault-bridge-note',
-}
-vci.write_vault_config(vault_name, vault_json)
-print('vault.json written.')
-"
-```
-
-### Step 5b — write domains/<name>.json for each domain
-
-For each domain configured in Step 4:
-
-```
-VB_VAULT_NAME="$VAULT_NAME" VB_DOMAIN_JSON="$DOMAIN_JSON" python3 -c "
-import os, sys, json
-sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
-import vault_config_io as vci
-from domain_templates import get_domain_template
-
-vault_name = os.environ['VB_VAULT_NAME']
-d = json.loads(os.environ['VB_DOMAIN_JSON'])
-template_seed = d.get('template_seed', 'general')
-t = get_domain_template(template_seed) if template_seed in __import__('domain_templates').DOMAIN_TEMPLATES else {}
-
-domain_json = {
-    'schema_version': 2,
-    'name': d['name'],
-    'label': d.get('label', d['name']),
-    'template_seed': template_seed,
-    'archive_root': d.get('archive_root', ''),
-    'file_system_type': d.get('file_system_type', 'local-path'),
-    'default_tags': d.get('default_tags', t.get('default_tags', [])),
-    'fallback': d.get('fallback', t.get('fallback', 'Inbox')),
-    'style': d.get('style', t.get('style', {})),
-    'seed_routing_patterns': d.get('routing_patterns', t.get('routing_patterns', [])),
-    'seed_content_overrides': d.get('content_overrides', t.get('content_overrides', [])),
-    'seed_skip_patterns': d.get('skip_patterns', t.get('skip_patterns', [])),
-}
-vci.write_domain_config(vault_name, domain_json)
-print(f'Domain config written: {d[\"name\"]}')
-"
-```
-
-## Step 6 — create local project folder
-
-Create a `.vault-bridge/` folder in the current working directory with:
-- `settings.json` — active domain + vault_name + overrides
-- `reports/` — per-scan memory reports (heartbeat/retro/revise write here)
-
-If the user configured multiple domains, ask which one is the default for
-this directory:
-
-```
-VB_VAULT_NAME="$VAULT_NAME" VB_DOMAIN="$FIRST_DOMAIN_NAME" python3 -c "
-import os, sys
-from pathlib import Path
-sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
-import local_config
-path = local_config.save_local_config(
-    Path.cwd(),
-    active_domain=os.environ['VB_DOMAIN'],
-    vault_name=os.environ['VB_VAULT_NAME'],
+    active_domain=None,  # save_config auto-fills for single-domain setups
+    domains=configured_domains,  # list of Domain objects from Step 4
+    project_overrides=ProjectOverrides(),
+    discovered_structure={'last_walked_at': None, 'observed_subfolders': []},
 )
-print(f'Local config saved to {path}')
-"
+saved_path = save_config(Path.cwd(), config)
+print(f'Config written to: {saved_path}')
 ```
 
-If multiple domains, present via AskUserQuestion:
+For single-domain setups, `save_config` automatically sets `active_domain`
+to the domain's name. For multi-domain setups, `active_domain` remains null
+and scan commands resolve the domain per-invocation via `domain_router`.
 
-> "Which domain is the default for this working directory?"
-> - {domain 1 label}
-> - {domain 2 label}
-> - ...
+## Step 6.5 — build transport per domain
 
-Tell the user: "Created `.vault-bridge/` in your working directory with
-`settings.json` (active domain + overrides) and `reports/` (per-scan memory
-reports). You can edit `settings.json` to change the active domain or add
-overrides. vault-bridge health-checks it automatically on every command."
+For each configured domain, offer to build a transport using the
+`transport-builder` skill. AskUserQuestion per domain:
 
-## Step 6.5 — scaffold transport helper
+> "How should vault-bridge connect to the archive for '{domain.label}' ({domain.archive_root})?"
+>
+> - "Build a new transport now" → invoke the transport-builder skill
+> - "Reuse an existing transport (from a previous build)" → list and pick
+> - "Skip — I'll build it via /vault-bridge:build-transport later"
 
-After the local folder is created, scaffold the transport helper that scan
-commands will use to fetch archive files to the local machine.
+**Option 1 — Build a new transport now:**
+Invoke the `transport-builder` skill with `--domain {domain.name}`.
+The skill handles the full interview, code generation, validation, and
+registration. After the skill completes and returns a `slug`, bind it:
 
-Collect the list of configured domains from Step 4. Build a JSON array:
-```json
-[
-  {"name": "arch-projects", "archive_root": "/nas/archive", "file_system_type": "nas-mcp"},
-  {"name": "photography",  "archive_root": "/local/photos",  "file_system_type": "local-path"}
-]
-```
-
-Run the scaffolder:
-```bash
-VB_DOMAINS_JSON='$DOMAINS_JSON' python3 -c "
-import os, sys, json
+```python
+import sys
 from pathlib import Path
 sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
-import transport_scaffold
-
-domains = json.loads(os.environ['VB_DOMAINS_JSON'])
-out = transport_scaffold.scaffold_transport(Path.cwd(), domains)
-print(f'Transport helper written to: {out}')
-"
+from config import config_bind_transport
+config_bind_transport(Path.cwd(), domain.name, slug)
+print(f"Bound transport '{slug}' to domain '{domain.name}'")
 ```
 
-Print the absolute path of the written file.
+**Option 2 — Reuse an existing transport:**
+List transports:
+```bash
+python3 -c "
+import sys; sys.path.insert(0, 'scripts')
+from pathlib import Path
+from transport_registry import list_transports
+transports = list_transports(Path('.'))
+for t in transports:
+    print(t['name'], '—', 'valid' if t['valid'] else 'INVALID')
+"
+```
+Present the valid ones as options. User picks one. Bind it via
+`config_bind_transport(Path.cwd(), domain.name, selected_slug)`.
 
-**If any domain has `file_system_type == "nas-mcp"`**, present via AskUserQuestion:
+**Option 3 — Skip:**
+Leave `domain.transport = None`. User can build later with
+`/vault-bridge:build-transport --domain {domain.name}`.
 
-> "The NAS template at `<path>` is a skeleton — you must edit
-> `fetch_to_local()` before scans will work.
->
-> - 'Edit now — I will come back' → setup pauses. Rerun `/vault-bridge:setup`
->   after editing the transport.py to proceed to the capability probe.
-> - 'Continue probe — I have already edited the transport' → proceed to Step 6.6"
+## Step 6.6 — capability probe per transport
 
-If the user chooses "Edit now — I will come back", STOP here. Do not proceed
-to Step 6.6. Tell them to open `.vault-bridge/transport.py` and implement
-`fetch_to_local()`, then rerun `/vault-bridge:setup`.
+Iterate over domains that now have a transport bound (transport is not None).
+For each, ask for a sample archive path:
 
-## Step 6.6 — capability probe
-
-For each configured `file_system_type`, ask for a sample archive path via
-AskUserQuestion (free text, file must exist):
-
-> "To verify the image pipeline works end-to-end, provide a sample archive
-> path for `{domain_label}` (e.g., `/path/to/a/photo.jpg` or
-> `/path/to/a/document.pdf`). This file will be fetched, compressed, and
-> written to the vault as a probe. It will not be kept."
+> "To verify the connection works for '{domain.label}', provide a sample
+> archive file path (e.g. `/path/to/a/photo.jpg`). It will be fetched,
+> compressed, and written to the vault as a probe — not kept."
 
 Also ask once:
-
 > "Do you have a sample PDF, DOCX, or PPTX on your archive to test image
 > extraction?"
 >
@@ -325,7 +347,6 @@ from pathlib import Path
 sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
 import setup_probe
 
-# vision_callback is replaced by Claude's inline Read + describe
 def vision_callback(jpeg_path):
     return '$VISION_SENTENCE'
 
@@ -339,6 +360,8 @@ result = setup_probe.run_probe(
 print(json.dumps(result))
 "
 ```
+
+Skip domains with `transport=None` (no transport configured yet).
 
 If probe `ok: False`, print failing check details and present via AskUserQuestion:
 
@@ -362,38 +385,33 @@ If yes:
    obsidian create vault="$VAULT_NAME" name="vault-bridge-note" path="_Templates" content="$TEMPLATE_CONTENT" silent overwrite
    ```
 
-## Step 7 — install the Obsidian template (optional) — see above
-
-(Already listed as Step 7 in the original. Renumbering here for clarity.)
-
 ## Step 8 — verify and report
 
-Verify the vault-hosted config is readable:
+Verify the config is readable:
 
-```
-python3 -c "
+```python
 import sys, json
 from pathlib import Path
 sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
-import effective_config as ec
-cfg = ec.load_effective_config(Path.cwd())
+from config import load_config
+cfg = load_config(Path.cwd())
 print(json.dumps(cfg.to_dict(), indent=2))
-"
 ```
 
 Report:
 
-> "vault-bridge is configured. Config written to vault `_meta/vault-bridge/`.
+> "vault-bridge is configured. Config written to `.vault-bridge/config.json`.
 >
 > - Vault: {vault_name}
 > - Domains: {N}
 >   {for each domain:}
->   - {label} ({name}/) — {archive_root} — {len(seed_routing_patterns)} seed rules
-> - Transport helper: `.vault-bridge/transport.py`
+>   - {label} ({name}/) — {archive_root}
+>     - Transport: {domain.transport or '(not configured — run /vault-bridge:build-transport)'}
+>     - {len(routing_patterns)} routing rules
 > - Capability probe: {probe_ok} ({N_passed}/{N_total} checks passed)
 >   {if probe had failures:}
 >   - Failing checks: {list failed check names}
->   - Tip: fix transport.py and rerun `/vault-bridge:setup` to re-run the probe
+>   - Tip: run `/vault-bridge:build-transport --domain {domain}` to rebuild a transport
 >
 > You can run vault-bridge commands from any directory.
 > Next: `/vault-bridge:retro-scan <project-folder-path>` to scan your first project.

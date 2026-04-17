@@ -14,6 +14,7 @@ The argument `$1` is the source folder path. Optional flags:
 - `--dry-run` — list detected events and the estimated API call count, write nothing
 - `--date-from YYYY-MM-DD` — skip events older than this date
 - `--date-to YYYY-MM-DD` — skip events newer than this date
+- `--new-transport` — force-invoke the transport-builder regardless of existing state
 
 ## Step 0 — ensure setup has been run and transport is healthy
 
@@ -21,7 +22,18 @@ Before anything else, verify vault-bridge is configured for the current
 working directory and that Obsidian is reachable:
 
 ```bash
-python3 ${CLAUDE_PLUGIN_ROOT}/scripts/local_config.py --is-setup "$(pwd)"
+python3 -c "
+import sys
+from pathlib import Path
+sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
+from config import load_config, SetupNeeded
+try:
+    load_config(Path.cwd())
+    print('config: ok')
+except SetupNeeded as e:
+    print(f'SETUP_NEEDED: {e}', file=__import__('sys').stderr)
+    import sys; sys.exit(1)
+"
 ```
 
 If this fails, vault-bridge has not been set up here. **Run
@@ -32,53 +44,62 @@ setup creates.
 
 ### Step 0b — transport health check
 
-```bash
-python3 -c "
+```python
 import sys
 from pathlib import Path
 sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
-import transport_loader
+from config import load_config
+import domain_router, transport_loader
+
+cfg = load_config(Path.cwd())
+resolution = domain_router.resolve_domain("$1", cfg.to_dict())
+domain_idx = next(
+    (i for i, d in enumerate(cfg.domains) if d.name == resolution.domain_name),
+    None,
+)
+transport_name = cfg.domains[domain_idx].transport if domain_idx is not None else None
+```
+
+If `transport_name is None` OR `--new-transport` flag was passed, offer via
+AskUserQuestion:
+
+> "No transport is configured for this domain. What would you like to do?"
+> Options:
+> - "Build a transport now (recommended)" → invoke the `transport-builder` skill
+> - "Abort the scan" → exit 1
+
+If user chooses to build, invoke the skill then retry the check.
+
+If `transport_name` is not None and `--new-transport` was NOT passed:
+
+```python
 try:
-    transport_loader.load_transport(Path.cwd())
-    print('transport: ok')
+    transport_loader.load_transport(Path.cwd(), transport_name)
+    print(f'transport: ok ({transport_name})')
 except transport_loader.TransportMissing as e:
     print(f'TRANSPORT_MISSING: {e}')
-    import sys; sys.exit(1)
+    # Offer to build
 except transport_loader.TransportInvalid as e:
     print(f'TRANSPORT_INVALID: {e}')
-    import sys; sys.exit(1)
-"
+    # Offer to build
 ```
 
-If exit code is non-zero, print the typed error message and:
-> "Transport helper missing or invalid. Run `/vault-bridge:setup` to
-> scaffold and probe the transport helper before running scans."
+If transport is missing or invalid, present via AskUserQuestion:
+> "Transport '{transport_name}' is missing or invalid. What would you like to do?"
+> Options:
+> - "Rebuild the transport now" → invoke the `transport-builder` skill with `--slug {transport_name} --domain {domain_name}`
+> - "Abort the scan" → exit 1
 
-Then exit 1. Do not proceed with the scan.
-
-Load the vault_name from project settings:
-
-```bash
-python3 -c "
-import sys, json
-from pathlib import Path
-sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
-import local_config
-cfg = local_config.load_local_config(Path.cwd())
-print(cfg.get('vault_name', '') if cfg else '')
-"
-```
-
-Check vault reachability (skip if vault_name is empty — legacy install
-without vault_name in project.json falls back to global config):
+Load the vault_name from the v4 config:
 
 ```bash
 VAULT_NAME=$(python3 -c "
-import sys, json; from pathlib import Path
+import sys, json
+from pathlib import Path
 sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
-import local_config
-cfg = local_config.load_local_config(Path.cwd())
-print(cfg.get('vault_name', '') if cfg else '')
+from config import load_config
+cfg = load_config(Path.cwd())
+print(cfg.vault_name)
 ")
 if [ -n "$VAULT_NAME" ]; then
   obsidian vaults | grep -q "$VAULT_NAME" || {
@@ -90,46 +111,33 @@ fi
 
 ## Step 1 — load config and resolve domain
 
-Load the effective configuration (vault-hosted preferred, legacy fallback):
+Load the v4 config:
 
-```
-python3 -c "
+```python
 import sys, json
 from pathlib import Path
 sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
-import effective_config as ec
-cfg = ec.load_effective_config(Path.cwd())
-print(json.dumps(cfg.to_dict()))
-"
+from config import load_config, effective_for
+import domain_router
+
+cfg = load_config(Path.cwd())
 ```
 
-If this fails (SetupNeeded) → try `parse_config.py CLAUDE.md` as fallback.
-If both fail → run `/vault-bridge:setup` first, then restart this scan.
+If this raises SetupNeeded → run `/vault-bridge:setup` first, then restart this scan.
 
 ### Step 1b — resolve which domain this scan belongs to
 
-If `--domain DOMAIN_NAME` was passed, use that domain directly:
-```
-python3 -c "
-import sys, json
-sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
-import setup_config
-config = setup_config.load_config()
-domain = setup_config.get_domain_by_name(config, 'DOMAIN_NAME')
-print(json.dumps(domain))
-"
+If `--domain DOMAIN_NAME` was passed:
+```python
+effective = effective_for(cfg, 'DOMAIN_NAME')
 ```
 
 Otherwise, auto-detect via `domain_router.resolve_domain()`:
-```
-python3 -c "
-import sys, json
-sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
-import setup_config, domain_router
-config = setup_config.load_config()
-r = domain_router.resolve_domain('$1', config)
-print(json.dumps({'domain_name': r.domain_name, 'confidence': r.confidence, 'candidates': r.candidates, 'reason': r.reason}))
-"
+```python
+r = domain_router.resolve_domain('$1', cfg.to_dict())
+# resolve returns DomainResolution with domain_name, confidence, candidates, reason
+effective = effective_for(cfg, r.domain_name)
+print(json.dumps(effective.to_dict()))
 ```
 
 Based on the confidence:
@@ -141,7 +149,7 @@ Based on the confidence:
   tell them to run `/vault-bridge:setup` to add a domain and STOP.
 
 After domain is resolved, extract these values from the domain dict:
-- `domain.file_system_type` — determines which tools to call (nas-mcp → mcp__nas__* tools; local-path → Read/Glob)
+- `domain.transport` — the slug of the transport module to use
 - `domain.archive_root` — the base path for the archive
 - `domain.routing_patterns` — the list of substring-match → vault-subfolder rules
 - `domain.content_overrides` — rules that fire based on filename content
@@ -149,11 +157,6 @@ After domain is resolved, extract these values from the domain dict:
 - `domain.skip_patterns` — files/folders to never process
 - `domain.default_tags` — tags to apply to every note in this domain
 - `domain.style.summary_word_count` — the target word count range for summary paragraphs
-
-**File system access:**
-- If `file_system_type == "nas-mcp"`: use `mcp__nas__list_files(path)` to list and `mcp__nas__read_file(path)` to read.
-- If `file_system_type == "local-path"`: use `Glob` to list and `Read` to read.
-- If `file_system_type == "external-mount"`: same as local-path.
 
 ## Step 2 — acquire the scan lock
 
@@ -181,15 +184,149 @@ Keep the index available (conceptually — re-load it in each event's decision
 step via a fresh Python call if you need to). You will use it to detect
 already-scanned events and renames.
 
+## Step 3.5 — detect project-folder rename
+
+Before walking the source folder, check whether the **project folder itself**
+was renamed in the archive (e.g. `2408 Sample Project` → `2408 Sample Project
+Final`). This catches the case where file-level fingerprints match but the
+path basename differs — which would otherwise trigger hundreds of "rename
+detected" events with a stale vault folder and stale `project:` frontmatter.
+
+### 3.5a — sample fingerprints and detect
+
+Pick up to 20 files from the top levels of `$1` and fingerprint them, then
+run the detector:
+
+```bash
+python3 -c "
+import os, sys, json
+from pathlib import Path
+sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
+import fingerprint, project_rename as pr
+
+source = os.environ['VB_SRC_FOLDER']
+workdir = Path(os.getcwd())
+
+# Collect up to 20 sample files, skipping hidden + temp files
+sample: list = []
+for root, dirs, files in os.walk(source):
+    dirs[:] = [d for d in dirs if not d.startswith('.')]
+    for f in files:
+        if f.startswith('.') or f.endswith('.tmp'):
+            continue
+        p = Path(root) / f
+        try:
+            fp = fingerprint.fingerprint_file(p)
+        except Exception:
+            continue
+        sample.append((str(p), fp))
+        if len(sample) >= 20:
+            break
+    if len(sample) >= 20:
+        break
+
+det = pr.detect_project_rename(workdir, source, sample)
+if det is None:
+    print(json.dumps({'rename': None}))
+else:
+    print(json.dumps({
+        'rename': {
+            'old_name': det.old_name,
+            'new_name': det.new_name,
+            'match_count': det.match_count,
+            'total_checked': det.total_checked,
+            'confidence': det.confidence,
+        }
+    }))
+" VB_SRC_FOLDER="$1"
+```
+
+Capture the JSON as `$RENAME_JSON`.
+
+### 3.5b — confirm with the user and apply (if detected)
+
+If `$RENAME_JSON.rename` is null, skip this step entirely.
+
+Otherwise, present via AskUserQuestion:
+
+> "The archive project folder appears to have been renamed: **{old_name}**
+> → **{new_name}** ({match_count}/{total_checked} files matched at
+> {confidence:.0%} confidence). Rename the vault folder to match?"
+>
+> Options:
+> - "Yes — rename the vault folder and update all affected notes"
+> - "No — keep the vault folder as `{old_name}` for this scan"
+> - "Abort the scan"
+
+If user chooses "Yes":
+
+1. List affected notes from the index:
+   ```bash
+   python3 -c "
+   import os, sys, json
+   from pathlib import Path
+   sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
+   import project_rename as pr
+   notes = pr.list_notes_in_project(Path(os.getcwd()), os.environ['VB_OLD'])
+   print(json.dumps(notes))
+   " VB_OLD="$OLD_NAME"
+   ```
+
+2. For each note, read it via `obsidian read`, rewrite the `project:`
+   frontmatter value to `$NEW_NAME`, then use `obsidian create` with the
+   new path (`$NEW_NAME/{subfolder}/{filename}`) + `silent overwrite`.
+   After the new note is written, delete the old one with
+   `obsidian delete vault="$VAULT_NAME" path="$OLD_NOTE_PATH"`.
+
+3. Rewrite the scan index so future lookups see the new path:
+   ```bash
+   python3 -c "
+   import os, sys
+   from pathlib import Path
+   sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
+   import project_rename as pr
+   n = pr.rewrite_index_project(Path(os.getcwd()), os.environ['VB_OLD'], os.environ['VB_NEW'])
+   print(f'index entries updated: {n}')
+   " VB_OLD="$OLD_NAME" VB_NEW="$NEW_NAME"
+   ```
+
+4. Log the rename via memory_log:
+   ```bash
+   python3 ${CLAUDE_PLUGIN_ROOT}/scripts/memory_log.py append \
+     --workdir "$(pwd)" \
+     --event project-renamed \
+     --summary "project '$OLD_NAME' renamed to '$NEW_NAME' ($NOTES_COUNT notes updated)"
+   ```
+
+5. Record `project_rename` in the Step 9 memory report stats:
+   `{old_name, new_name, notes_updated, index_entries_updated, confidence}`.
+
+If the user chooses "No", proceed with the scan but the vault folder stays
+as `$OLD_NAME` and the new events will be written under that old name. The
+vault's `project:` frontmatter will stay stale until the user runs
+`/vault-bridge:reconcile` or re-runs retro-scan and accepts the rename.
+
+If "Abort", release the lock and exit 1.
+
 ## Step 4 — walk the source folder
 
-Use the `file_system.access_pattern` from the config to list files recursively
-under `$1`. The access pattern tells you which tools to call:
-- `nas-mcp` → use `mcp__nas__list_files` recursively
-- `local-path` → use the Glob tool with `**/*`
-- `external-mount` → use Glob with the mount path
+Use the transport's `list_archive` to enumerate files:
 
-Apply `skip_patterns` to filter out ignored files/folders.
+```python
+import sys
+from pathlib import Path
+sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
+from transport_loader import list_archive
+
+paths = list(list_archive(
+    Path.cwd(),
+    transport_name,           # resolved in Step 0b
+    "$1",                     # the source folder argument
+    skip_patterns,            # from effective config
+))
+```
+
+`list_archive` applies skip_patterns internally and yields absolute paths.
 
 ## Step 4.5 — discover and classify new subfolders
 
@@ -204,9 +341,14 @@ python3 -c "
 import sys, json
 from pathlib import Path
 sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
-import effective_config, discover_structure as ds
+from config import load_config, effective_for
+import domain_router, discover_structure as ds
 
-effective = effective_config.load_effective_config(Path.cwd())
+workdir = Path.cwd()
+cfg = load_config(workdir)
+import sys as _sys
+r = domain_router.resolve_domain('$1', cfg.to_dict())
+effective = effective_for(cfg, r.domain_name)
 discovered = ds.walk_top_level_subfolders(
     '$1',
     skip_patterns=list(effective.skip_patterns),
@@ -296,9 +438,14 @@ python3 -c "
 import sys, json
 from pathlib import Path
 sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
-import effective_config
-cfg = effective_config.load_effective_config(Path.cwd())
-print(json.dumps(cfg.to_dict()))
+from config import load_config, effective_for
+import domain_router
+
+workdir = Path.cwd()
+cfg = load_config(workdir)
+r = domain_router.resolve_domain('$1', cfg.to_dict())
+effective = effective_for(cfg, r.domain_name)
+print(json.dumps(effective.to_dict()))
 "
 ```
 

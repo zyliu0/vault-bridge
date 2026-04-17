@@ -5,26 +5,23 @@ allowed-tools: Bash, Read
 
 Validate the user's vault-bridge configuration and report the result.
 
-## Step 1 — try loading the v2 config
+## Step 1 — load config
 
-```
-python3 -c "
+```python
 import sys, json
+from pathlib import Path
 sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
-import setup_config
-config = setup_config.load_config()
-print(json.dumps(config))
-"
+from config import load_config, effective_for, SetupNeeded
+
+try:
+    cfg = load_config(Path.cwd())
+except SetupNeeded as e:
+    print(f'No valid config found: {e}')
+    print('Run /vault-bridge:setup to configure.')
+    import sys; sys.exit(1)
 ```
 
-If exit 0 → parse the JSON output and go to Step 2.
-
-If exit 2 (SetupNeeded) → try the advanced config path:
-```
-python3 ${CLAUDE_PLUGIN_ROOT}/scripts/parse_config.py CLAUDE.md
-```
-
-If THAT also fails → print the stderr verbatim plus:
+If this fails → print the error verbatim plus:
 "No valid config found. Run /vault-bridge:setup to configure."
 
 ## Step 2 — report the result
@@ -32,27 +29,27 @@ If THAT also fails → print the stderr verbatim plus:
 Show a per-domain summary:
 
 ```
-✓ vault-bridge config is valid.
+vault-bridge config is valid (schema v4).
 
-Vault: {vault_name}
-Domains: {N}
+Vault:       {cfg.vault_name}
+Vault path:  {cfg.vault_path or "(not set)"}
+Domains:     {len(cfg.domains)}
+Active:      {cfg.active_domain or "(none — multi-domain, resolved per scan)"}
 
   [1] {domain.name} ({domain.label})
     archive:   {domain.archive_root}
-    fs_type:   {domain.file_system_type}
-    patterns:  {len(routing_patterns)} path-based rules
-    overrides: {len(content_overrides)} content overrides
+    transport: {domain.transport or "(not configured — run /vault-bridge:build-transport)"}
+    patterns:  {len(domain.routing_patterns)} path-based rules
+    overrides: {len(domain.content_overrides)} content overrides
     fallback:  {domain.fallback}
     tags:      {domain.default_tags}
 
   [2] ...
 ```
 
-Then: "Your vault-bridge configuration is ready. Run
+Then: "Your vault-bridge configuration is ready (v4). Run
 `/vault-bridge:retro-scan <folder-path>` to scan a project folder."
 
-If any domain has `file_system_type: nas-mcp`, verify the NAS is reachable:
-```bash
-mcp__nas__list_files path="{domain.archive_root}" limit=1
-```
-Report if the NAS is unreachable.
+For any domain missing a transport, tell the user:
+"Domain '{domain.name}' has no transport configured. Run
+`/vault-bridge:build-transport --domain {domain.name}` to set one up."

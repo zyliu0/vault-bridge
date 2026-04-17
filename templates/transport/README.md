@@ -1,52 +1,58 @@
-# vault-bridge transport helper
+# vault-bridge transport modules
 
-The transport helper is a single Python file at
-`<workdir>/.vault-bridge/transport.py` that defines how vault-bridge
-fetches archive files to the local machine before image processing.
+Transport modules live in `<workdir>/.vault-bridge/transports/<slug>.py`.
+Each module connects vault-bridge to a specific archive (local folder, NAS,
+SFTP server, S3 bucket, etc.).
+
+## Building a transport
+
+Use the `/vault-bridge:build-transport` command to interactively build a
+transport for your archive. The `transport-builder` skill interviews you
+about your connection type, generates a complete module, validates it, and
+registers it automatically.
+
+```
+/vault-bridge:build-transport --domain arch-projects
+```
 
 ## Interface contract
 
-The file must define one function:
+Every transport module must implement these two functions. See the full
+contract at `skills/transport-builder/contract.md`.
 
 ```python
 def fetch_to_local(archive_path: str) -> Path:
+    """Fetch a single file from the archive, return a local Path."""
+    ...
+
+def list_archive(
+    archive_root: str,
+    skip_patterns: Optional[List[str]] = None,
+) -> Iterator[str]:
+    """Yield absolute archive paths under archive_root."""
     ...
 ```
 
-- **`archive_path`**: The full archive-side path to the file (as stored in
-  `source_path` frontmatter). This is an opaque string — your implementation
-  decides how to interpret it.
-- **Returns**: A `pathlib.Path` pointing to a local copy of the file. The
-  file must exist at that path when the function returns.
-- **Raises `FileNotFoundError`**: if the archive path cannot be found or
-  fetched. vault-bridge will report a friendly error and move on.
-- **Raises any other exception**: vault-bridge wraps it in `TransportFailed`
-  and logs it. The scan continues with that file skipped.
+An optional `health_check() -> Dict[str, Any]` is also supported.
 
 ## Location
 
 ```
-<workdir>/.vault-bridge/transport.py
+<workdir>/.vault-bridge/transports/<slug>.py
 ```
 
-This file is scoped to the **workdir** (the project folder where you run
-vault-bridge), not to the vault. If you have multiple projects with different
-archive locations, each project folder gets its own transport helper.
+Each workdir can have multiple transport modules (one per domain, or shared
+across domains). A domain is bound to a transport via `domain.transport` in
+`config.json`.
 
-## Shipped templates
+## Reference patterns
 
-Three templates are in `templates/transport/`:
+Prose examples for local-path, SFTP, S3, rsync-SSH, and others are in
+`skills/transport-builder/reference-patterns.md`. These are starting points —
+the transport-builder adapts them to your specific setup.
 
-| Template | Use case |
-|----------|----------|
-| `local.py.tmpl` | Archive on local disk or already-mounted drive |
-| `external-mount.py.tmpl` | External drive (checks `os.path.ismount` before access) |
-| `nas-mcp.py.tmpl` | NAS or SFTP — requires you to implement fetch logic |
+## Legacy migration
 
-`/vault-bridge:setup` scaffolds the correct template (or a multi-branch
-helper for multi-domain projects) based on your configured `file_system_type`.
-
-## Re-running the probe
-
-After editing `transport.py`, re-run `/vault-bridge:setup` to execute the
-6-step capability probe and verify the new implementation works end-to-end.
+If you have an old `<workdir>/.vault-bridge/transport.py` from vault-bridge v5,
+it is automatically moved to `transports/legacy.py` on the next command run.
+You can then rebuild it using `/vault-bridge:build-transport`.

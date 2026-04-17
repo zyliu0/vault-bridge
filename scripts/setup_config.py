@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 """vault-bridge multi-domain config — backward-compatibility façade.
 
-As of Phase 1 (v2.0 restructure):
-- Template definitions have moved to  scripts/domain_templates.py
-- Config I/O and merge logic live in  scripts/effective_config.py
+As of v6.0.0 (schema v4):
+- Template definitions live in  scripts/domain_templates.py
+- Config I/O and merge logic live in  scripts/config.py (v4 schema)
+- Migration from legacy formats lives in  scripts/import_legacy.py
 
-This module re-exports every public name that existed in v1.3.0 so that
-command .md files and any other call sites continue to work without edits.
-Do NOT add new business logic here — put it in domain_templates.py or
-effective_config.py instead.
+VALID_FS_TYPES was removed in v6.0.0. Transport is now an open slug
+(Domain.transport) rather than a fixed enum.
+
+This module still re-exports the full v2 API so that existing callers of
+setup_config.save_config() etc. keep working (deprecated — use config.py).
 """
 import sys
 from pathlib import Path
@@ -21,13 +23,17 @@ sys.path.insert(0, str(_HERE))
 # Re-export from domain_templates
 # ---------------------------------------------------------------------------
 from domain_templates import (          # noqa: F401, E402
-    VALID_FS_TYPES,
     DOMAIN_TEMPLATES,
     get_domain_template,
 )
 
+# VALID_FS_TYPES compatibility stub — the set is now empty (no valid FS types).
+# Kept so that legacy import sites don't crash with ImportError.
+VALID_FS_TYPES: frozenset = frozenset()  # noqa: F401
+
 # ---------------------------------------------------------------------------
-# Re-export from effective_config (config I/O + shim API)
+# Re-export from effective_config (config I/O + shim API) — deprecated
+# Will be removed in Phase 6 (dead-code deletion).
 # ---------------------------------------------------------------------------
 from effective_config import (          # noqa: F401, E402
     SetupNeeded,

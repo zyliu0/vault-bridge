@@ -27,7 +27,18 @@ Before anything else, verify vault-bridge is configured for the current
 working directory:
 
 ```bash
-python3 ${CLAUDE_PLUGIN_ROOT}/scripts/local_config.py --is-setup "$(pwd)"
+python3 -c "
+import sys
+from pathlib import Path
+sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
+from config import load_config, SetupNeeded
+try:
+    load_config(Path.cwd())
+    print('config: ok')
+except SetupNeeded as e:
+    print(f'SETUP_NEEDED: {e}', file=__import__('sys').stderr)
+    import sys; sys.exit(1)
+"
 ```
 
 If this fails, vault-bridge has not been set up here. **Run
@@ -35,30 +46,38 @@ If this fails, vault-bridge has not been set up here. **Run
 
 ## Step 1 — load config and check vault reachability
 
-Load the vault_name and active_domain from project settings:
+Load the v3 config and resolve the active domain:
 
-```bash
-python3 -c "
+```python
 import sys, json
 from pathlib import Path
 sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
-import local_config
-cfg = local_config.load_local_config(Path.cwd())
-print(json.dumps(cfg) if cfg else '{}')
-"
+from config import load_config, effective_for
+
+cfg = load_config(Path.cwd())
+vault_name = cfg.vault_name
+
+# Resolve domain for research (no source_path for domain_router)
+domain_name = cfg.active_domain
+if domain_name is None and len(cfg.domains) > 1:
+    # Ask user via AskUserQuestion: "Which domain for this research?"
+    # domain_name = <user's answer>
+    pass
+elif domain_name is None and len(cfg.domains) == 1:
+    domain_name = cfg.domains[0].name
+effective = effective_for(cfg, domain_name)
 ```
 
-Capture `vault_name` and `active_domain` from the config.
-
-Check vault reachability (skip if vault_name is empty):
+Check vault reachability:
 
 ```bash
 VAULT_NAME=$(python3 -c "
-import sys, json; from pathlib import Path
+import sys
+from pathlib import Path
 sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
-import local_config
-cfg = local_config.load_local_config(Path.cwd())
-print(cfg.get('vault_name', '') if cfg else '')
+from config import load_config
+cfg = load_config(Path.cwd())
+print(cfg.vault_name)
 ")
 if [ -n "$VAULT_NAME" ]; then
   obsidian vaults | grep -q "$VAULT_NAME" || {

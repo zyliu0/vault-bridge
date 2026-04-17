@@ -12,7 +12,7 @@ SCRIPTS = Path(__file__).resolve().parents[2] / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
 import discover_structure as ds  # noqa: E402
-from effective_config import EffectiveConfig  # noqa: E402
+from config import EffectiveConfig  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -29,7 +29,7 @@ def _make_effective(
         vault_name="TestVault",
         domain_name="arch-projects",
         archive_root="/archive",
-        file_system_type="local-path",
+        transport_name="local",
         routing_patterns=routing_patterns or [],
         skip_patterns=skip_patterns or [],
         fallback=fallback,

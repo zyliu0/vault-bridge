@@ -16,7 +16,7 @@ sys.path.insert(0, str(SCRIPTS))
 import local_config as lc  # noqa: E402
 import category_decisions as cd  # noqa: E402
 from discover_structure import DiscoveredFolder  # noqa: E402
-from effective_config import EffectiveConfig  # noqa: E402
+from config import EffectiveConfig  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -48,7 +48,7 @@ def _make_effective(
         vault_name="TestVault",
         domain_name="arch-projects",
         archive_root="/archive",
-        file_system_type="local-path",
+        transport_name="local",
         routing_patterns=routing_patterns or [],
         skip_patterns=skip_patterns or [],
         fallback=fallback,
@@ -240,6 +240,7 @@ def test_apply_preserves_existing_project_fields(tmp_path):
     cfg = _load_settings(workdir)
     assert cfg.get("vault_name") == "MyVault"
     assert cfg.get("archive_root") == "/nas/arch/"
+    # file_system_type is preserved as-is in the local config (local_config shim)
     assert cfg.get("file_system_type") == "nas-mcp"
 
 
@@ -480,14 +481,12 @@ def test_cli_plan_heartbeat_success(tmp_path, monkeypatch, capsys):
     for i in range(4):
         (archive_root / "Interior" / f"file{i}.pdf").touch()
 
-    # Mock effective_config.load_effective_config to return a controlled EffectiveConfig
-    mock_effective = _make_effective(routing_patterns=[], skip_patterns=[])
-    # Override archive_root to the temp dir
+    # Build a mock EffectiveConfig pointing at the real archive_root
     mock_effective = EffectiveConfig(
         vault_name="TestVault",
         domain_name="arch-projects",
         archive_root=str(archive_root),
-        file_system_type="local-path",
+        transport_name="local",
         routing_patterns=[],
         skip_patterns=[],
         fallback="Inbox",
@@ -499,9 +498,16 @@ def test_cli_plan_heartbeat_success(tmp_path, monkeypatch, capsys):
         "--workdir", str(workdir),
     ])
 
-    with patch("effective_config.load_effective_config", return_value=mock_effective):
-        with pytest.raises(SystemExit) as exc:
-            runpy.run_path(str(SCRIPTS / "category_decisions.py"), run_name="__main__")
+    # Patch the config module functions used by the CLI since v5
+    import config as config_mod
+    mock_cfg = MagicMock()
+    mock_cfg.active_domain = "arch-projects"
+    mock_cfg.domains = [MagicMock()]
+    mock_cfg.domains[0].name = "arch-projects"
+    with patch.object(config_mod, "load_config", return_value=mock_cfg):
+        with patch.object(config_mod, "effective_for", return_value=mock_effective):
+            with pytest.raises(SystemExit) as exc:
+                runpy.run_path(str(SCRIPTS / "category_decisions.py"), run_name="__main__")
 
     assert exc.value.code == 0
     captured = capsys.readouterr()

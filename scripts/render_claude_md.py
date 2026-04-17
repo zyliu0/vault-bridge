@@ -25,9 +25,13 @@ from typing import List, Optional
 _HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(_HERE))
 
-import local_config  # noqa: E402
-import effective_config as ec  # noqa: E402
-from effective_config import BUILTIN_FABRICATION_STOPWORDS, EffectiveConfig  # noqa: E402
+import local_config  # noqa: E402 — kept for settings_path backward compat
+import effective_config as ec  # noqa: E402 — will be removed in follow-up PR
+from config import (  # noqa: E402
+    BUILTIN_FABRICATION_STOPWORDS,
+    EffectiveConfig,
+    local_dir as _config_local_dir,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -35,11 +39,11 @@ from effective_config import BUILTIN_FABRICATION_STOPWORDS, EffectiveConfig  # n
 # ---------------------------------------------------------------------------
 
 def _claude_md_path(workdir) -> Path:
-    return local_config.local_dir(workdir) / "CLAUDE.md"
+    return _config_local_dir(workdir) / "CLAUDE.md"
 
 
 def _sidecar_path(workdir) -> Path:
-    return local_config.local_dir(workdir) / "CLAUDE.md.generated"
+    return _config_local_dir(workdir) / "CLAUDE.md.generated"
 
 
 # ---------------------------------------------------------------------------
@@ -108,7 +112,7 @@ def _render_body(
     lines.append(f"- **Vault:** {effective.vault_name}")
     lines.append(f"- **Domain:** {effective.domain_name}")
     lines.append(f"- **Archive root:** `{effective.archive_root}`")
-    lines.append(f"- **File system:** {effective.file_system_type}")
+    lines.append(f"- **Transport:** {effective.transport_name or '(not configured)'}")
     lines.append(f"- **Fallback subfolder:** `{effective.fallback}`")
     lines.append("")
 
@@ -247,7 +251,7 @@ def write(
       - If hash doesn't match body → user edited → write sidecar.
     """
     # Ensure directory exists
-    local_config.local_dir(workdir).mkdir(exist_ok=True, parents=True)
+    _config_local_dir(workdir).mkdir(exist_ok=True, parents=True)
 
     main_path = _claude_md_path(workdir)
     new_content = render(effective, observed_subfolders)
@@ -307,30 +311,48 @@ def main() -> int:
     args = parser.parse_args()
 
     workdir = Path(args.workdir).resolve()
-    settings_path = local_config.settings_path(workdir)
+    # v5: check for v3 config.json; fall back to legacy settings.json check
+    from config import load_config, effective_for, SetupNeeded as _SetupNeeded
+    config_json = _config_local_dir(workdir) / "config.json"
+    settings_json = _config_local_dir(workdir) / "settings.json"
 
-    if not settings_path.exists():
+    if not config_json.exists() and not settings_json.exists():
         sys.stderr.write(
-            f"render_claude_md: no .vault-bridge/settings.json found in {workdir}. "
+            f"render_claude_md: no .vault-bridge/config.json found in {workdir}. "
             "Run /vault-bridge:setup first.\n"
         )
         return 2
 
+    # Try v3 config first; fall back to legacy effective_config
     try:
-        effective = ec.load_effective_config(workdir)
-    except ec.SetupNeeded as e:
-        sys.stderr.write(f"render_claude_md: {e}\n")
-        return 2
+        cfg = load_config(workdir)
+        effective = effective_for(cfg, cfg.active_domain or (cfg.domains[0].name if cfg.domains else None))
+    except _SetupNeeded:
+        # Fall back to legacy effective_config (pre-v5 setup)
+        try:
+            effective = ec.load_effective_config(workdir)
+        except ec.SetupNeeded as e:
+            sys.stderr.write(f"render_claude_md: {e}\n")
+            return 2
 
     # Load observed_subfolders from settings if present
     observed_subfolders: Optional[List[str]] = None
+    # v5: try config.json discovered_structure first, then legacy settings.json
     try:
-        settings_data = json.loads(settings_path.read_text())
-        ds = settings_data.get("discovered_structure", {})
+        cfg_for_ds = load_config(workdir)
+        ds = cfg_for_ds.discovered_structure or {}
         if ds:
             observed_subfolders = ds.get("observed_subfolders")
-    except (json.JSONDecodeError, OSError):
-        pass
+    except Exception:
+        # Fall back to legacy settings.json
+        try:
+            _settings_path = _config_local_dir(workdir) / "settings.json"
+            settings_data = json.loads(_settings_path.read_text())
+            ds = settings_data.get("discovered_structure", {})
+            if ds:
+                observed_subfolders = ds.get("observed_subfolders")
+        except (json.JSONDecodeError, OSError):
+            pass
 
     if args.dry_run:
         print(render(effective, observed_subfolders))

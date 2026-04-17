@@ -24,7 +24,7 @@ sys.path.insert(0, str(_HERE))
 
 import compress_images
 import extract_embedded_images
-import local_config
+import local_config  # noqa: F401 — kept for backward compat; new code uses config module
 import memory_report
 import transport_loader
 import vault_binary
@@ -393,7 +393,15 @@ def _build_result(
     }
     report_path_str = ""
     try:
-        if local_config.is_setup(workdir):
+        # Check if configured: try new v3 config first, fall back to old is_setup
+        _is_configured = False
+        try:
+            from config import load_config, SetupNeeded
+            load_config(workdir)
+            _is_configured = True
+        except Exception:
+            _is_configured = local_config.is_setup(workdir)
+        if _is_configured:
             report_path = memory_report.write_report(workdir, "probe", stats)
             report_path_str = str(report_path)
     except Exception:

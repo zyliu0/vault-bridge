@@ -12,16 +12,24 @@ silently, writes new vault notes for any new or modified files.
 ## Step 0 — ensure setup has been run and transport is healthy
 
 Heartbeat is the autonomous path, so it NEVER prompts the user. Check that
-the working directory has a `.vault-bridge/` folder:
+the working directory has a valid v3 config:
 
 ```bash
-python3 ${CLAUDE_PLUGIN_ROOT}/scripts/local_config.py --is-setup "$(pwd)"
+python3 -c "
+import sys
+from pathlib import Path
+sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
+from config import load_config, SetupNeeded
+try:
+    load_config(Path.cwd())
+    print('config: ok')
+except SetupNeeded:
+    import sys; sys.exit(1)
+" || {
+  echo "vault-bridge not configured, heartbeat skipping — run /vault-bridge:setup from this working directory" >> ~/.vault-bridge/heartbeat.log
+  exit 0
+}
 ```
-
-If this fails, log "vault-bridge not configured, heartbeat
-skipping — run /vault-bridge:setup from this working directory" to
-`~/.vault-bridge/heartbeat.log` and EXIT 0. Do not attempt setup
-non-interactively; wait for the user to run it.
 
 ### Step 0b — transport health check (non-interactive)
 
@@ -48,11 +56,12 @@ Check vault reachability (non-interactive: skip if vault is unreachable):
 
 ```bash
 VAULT_NAME=$(python3 -c "
-import sys, json; from pathlib import Path
+import sys
+from pathlib import Path
 sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
-import local_config
-cfg = local_config.load_local_config(Path.cwd())
-print(cfg.get('vault_name', '') if cfg else '')
+from config import load_config
+cfg = load_config(Path.cwd())
+print(cfg.vault_name)
 ")
 if [ -n "$VAULT_NAME" ]; then
   obsidian vaults | grep -q "$VAULT_NAME" || {
@@ -64,25 +73,26 @@ fi
 
 ## Step 1 — load config
 
-Load the effective configuration (vault-hosted preferred, legacy fallback):
+Load the v3 config:
 
-```
-python3 -c "
+```python
 import sys, json
 from pathlib import Path
 sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
-import effective_config as ec
-cfg = ec.load_effective_config(Path.cwd())
-print(json.dumps(cfg.to_dict()))
-"
+from config import load_config, effective_for, SetupNeeded
+import domain_router
+
+try:
+    cfg = load_config(Path.cwd())
+except SetupNeeded:
+    # Log and exit silently — cron job should not alarm
+    with open(Path.home() / '.vault-bridge/heartbeat.log', 'a') as f:
+        f.write('vault-bridge not configured, heartbeat skipping\n')
+    import sys; sys.exit(0)
 ```
 
-If this fails → log "vault-bridge not configured, heartbeat skipping"
-to `~/.vault-bridge/heartbeat.log` and EXIT 0 (not an error — a cron job
-that can't run because of missing config should not alarm).
-
-Heartbeat scans ALL domains. For each domain in `config.domains`:
-- Use `domain.file_system_type` to choose tools
+Heartbeat scans ALL domains. For each domain in `cfg.domains`:
+- Use `domain.transport` (slug) via `transport_loader.load_transport(Path.cwd(), domain.transport)` to access files; skip domain if transport is None
 - Use `domain.archive_root` as the base path to scan
 - Use `domain.routing_patterns`, `domain.skip_patterns`, `domain.style`
 
@@ -109,8 +119,10 @@ Register cleanup to release the lock on any exit.
 
 ## Step 3 — walk the file system and build a manifest
 
-Using `file_system.access_pattern` and applying `skip_patterns`, list every
-file under `file_system.root_path` recursively. For each file, collect
+For each domain, load its transport via
+`transport_loader.load_transport(Path.cwd(), domain.transport)` and use
+`transport.list_archive(domain.archive_root, domain.skip_patterns)` to
+enumerate every file. For each file, collect
 `(path, size, mtime_unix_int)`.
 
 ## Step 4 — diff against the previous manifest
@@ -159,6 +171,86 @@ import vault_scan; vault_scan.prune_old_manifests(os.getcwd(), keep_n=2)
 "
 ```
 
+## Step 4.5 — escalation check for large deltas
+
+Heartbeat is optimized for small deltas. Large changes — a new project
+dropped into the archive, a bulk re-organization — are better handled by
+an interactive retro-scan that can run structure discovery and
+project-rename detection with user input.
+
+**Thresholds** (hardcoded defaults; treat these as escalation signals, not
+as errors):
+- `DELTA_THRESHOLD = 50` — if `len(new_files) + len(modified) > 50`,
+  escalate.
+- `NEW_FOLDER_THRESHOLD = 20` — if any single top-level archive subfolder
+  is brand new (did not exist in the previous manifest) AND contains more
+  than 20 delta files, escalate.
+
+If either threshold fires, STOP processing the delta. Write an escalation
+marker to `.vault-bridge/reports/` so the user sees it on next interactive
+session, log a line to `~/.vault-bridge/heartbeat.log`, and exit 0.
+
+```bash
+python3 -c "
+import os, sys, json
+from datetime import datetime
+from pathlib import Path
+sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
+from local_config import reports_dir
+
+workdir = Path(os.getcwd())
+reports = reports_dir(workdir)
+ts = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
+marker = reports / f'{ts}_escalation.json'
+marker.write_text(json.dumps({
+    'reason': os.environ['VB_REASON'],
+    'delta_count': int(os.environ.get('VB_DELTA', '0')),
+    'new_files_sample': json.loads(os.environ.get('VB_SAMPLE', '[]'))[:10],
+    'recommended_action': os.environ['VB_NEXT'],
+    'timestamp': ts,
+}, indent=2))
+print(marker)
+" VB_REASON="delta-exceeds-threshold" VB_DELTA="$DELTA_COUNT" VB_SAMPLE="$NEW_FILES_JSON" VB_NEXT="run /vault-bridge:retro-scan $AFFECTED_PATH"
+```
+
+Log a single line to `~/.vault-bridge/heartbeat.log`:
+
+```
+{timestamp} vault-bridge heartbeat: escalated — {DELTA_COUNT} delta files
+  exceeds threshold; run /vault-bridge:retro-scan {AFFECTED_PATH} for
+  interactive processing. Marker: {MARKER_PATH}
+```
+
+After writing the marker + log, jump straight to Step 8 (memory report)
+with `counts.escalated = true` and `counts.notes_written = 0`. Skip the
+per-file processing (Step 5) and the non-interactive structure discovery
+(Step 3.5) entirely — retro-scan will redo that with user input.
+
+## Step 4.6 — autonomous project-rename detection (non-destructive)
+
+Even under the threshold, heartbeat can notice when an archive project
+folder was renamed. Because heartbeat never prompts the user, it does
+NOT rename the vault folder — it only **logs** the detection so the user
+sees it next time they run an interactive command.
+
+For each top-level archive subfolder touched by the delta, sample up to
+10 files and call `project_rename.detect_project_rename`. If a rename is
+detected, log to `~/.vault-bridge/heartbeat.log`:
+
+```
+{timestamp} vault-bridge heartbeat: project-rename detected —
+  '{old_name}' -> '{new_name}' ({confidence:.0%}). Run
+  /vault-bridge:reconcile {new_name} to apply.
+```
+
+Also add to the Step 8 memory report under `counts.renames_detected` and
+include a `rename_detections` list with `{old_name, new_name, confidence}`
+per entry. Heartbeat still processes the delta normally — the detection
+is informational, not blocking. The note writes will carry the new
+project name (from the current source path basename), so fresh notes end
+up under the new vault folder while older notes stay in the old folder
+until reconcile is run.
+
 ## Step 3.5 — non-interactive structure discovery
 
 After building the manifest (Step 3), walk the archive root to discover
@@ -171,23 +263,26 @@ python3 -c "
 import os, sys, json
 from pathlib import Path
 sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
-import effective_config as ec
+from config import load_config, effective_for
 import discover_structure as ds
 import category_decisions as cd
 
 workdir = Path(os.getcwd())
-effective = ec.load_effective_config(workdir)
-
-discovered = ds.walk_top_level_subfolders(
-    effective.archive_root,
-    skip_patterns=list(effective.skip_patterns),
-)
-decisions = cd.plan_decisions_for_heartbeat(discovered, effective)
-stats = {
-    'unknown_subfolders': len(decisions),
-    'subfolder_names': [d.subfolder_name for d in decisions],
-}
-print(json.dumps(stats))
+cfg = load_config(workdir)
+# For heartbeat: scan each domain independently
+for domain in cfg.domains:
+    effective = effective_for(cfg, domain.name)
+    discovered = ds.walk_top_level_subfolders(
+        effective.archive_root,
+        skip_patterns=list(effective.skip_patterns),
+    )
+    decisions = cd.plan_decisions_for_heartbeat(discovered, effective)
+    stats = {
+        'domain': domain.name,
+        'unknown_subfolders': len(decisions),
+        'subfolder_names': [d.subfolder_name for d in decisions],
+    }
+    print(json.dumps(stats))
 "
 ```
 

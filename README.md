@@ -34,7 +34,7 @@ your-vault/                           ← REAL notes only
 
 <working-folder>/                      ← plugin state (never in vault)
 └── .vault-bridge/
-    ├── settings.json                 ← active domain + overrides
+    ├── config.json                   ← v3 config (domains, routing, style)
     ├── CLAUDE.md                     ← auto-generated operating rules
     ├── memory.md                     ← rolling log of scans + decisions
     └── reports/                      ← per-scan + health reports
@@ -65,7 +65,7 @@ note that honestly says so.
 ## Commands
 
 - **`/vault-bridge:setup`** — interactive first-time configuration. Asks for
-  your archive path and preset, saves config to `~/.vault-bridge/config.json`,
+  your archive path and preset, saves config to `<workdir>/.vault-bridge/config.json`,
   installs an Obsidian note template.
 
 - **`/vault-bridge:validate-config`** — check your setup before the first scan.
@@ -83,9 +83,10 @@ note that honestly says so.
   the report to `<workdir>/.vault-bridge/reports/` — never into the vault.
   Never modifies notes.
 
-- **`/vault-bridge:revise <project-path>`** — upgrade existing vault notes
-  to the vault-bridge schema. Audits frontmatter, fixes fields, optionally
-  re-reads sources and moves misrouted notes.
+- **`/vault-bridge:reconcile <project-path>`** — reconcile existing vault
+  notes with the current schema, routing rules, and archive state. Audits
+  frontmatter, fixes fields, detects project-folder renames in the archive,
+  and optionally re-reads sources and moves misrouted notes.
 
 - **`/vault-bridge:viz`** — generate a canvas, excalidraw, or marp deck from
   a description. No archive scan needed — writes the artifact directly into
@@ -94,6 +95,8 @@ note that honestly says so.
 - **`/vault-bridge:research`** — research a topic, write a grounded report with cited sources.
 
 - **Image pipeline** — transports archive images, extracts embedded ones from containers (PDF/DOCX/PPTX), LLM-describes, writes to vault as binary attachments with wiki-embed references (`![[filename.jpg]]`).
+
+- **Auto-checks GitHub for updates** — on relevant prompts, non-blocking, cached 12h (disable via `VAULT_BRIDGE_UPDATE_CHECK=off`).
 
 ## Prerequisites
 
@@ -154,8 +157,8 @@ claude --plugin-dir .               # load into the current session
 ## Setup — 5 minutes
 
 You can run vault-bridge from **any directory** — you don't need to open
-your Obsidian vault in Claude Code. The plugin stores its config globally
-at `~/.vault-bridge/config.json`, so it works from wherever you are.
+your Obsidian vault in Claude Code. The plugin stores its config at
+`<workdir>/.vault-bridge/config.json` (project-scoped, one per working directory).
 
 ### Step 1 — run setup
 
@@ -200,7 +203,7 @@ who weren't involved, file an issue. (The fabrication firewall is aggressive
 but not perfect; feedback improves it.)
 
 If everything looks right, scan the rest of your archive one project at
-a time. The scan index at `~/.vault-bridge/index.tsv` makes re-runs
+a time. The scan index at `.vault-bridge/index.tsv` makes re-runs
 idempotent, so you can stop and resume.
 
 ### Step 4 — set up heartbeat (optional)
@@ -212,14 +215,6 @@ manual intervention, set up a cron job:
 # Every 4 hours, scan for new/modified files and write vault notes
 0 */4 * * * claude -p "Run /vault-bridge:heartbeat-scan" >> ~/.vault-bridge/heartbeat.log 2>&1
 ```
-
-### Advanced: custom routing via vault CLAUDE.md
-
-If you chose the "custom" preset and need your own routing patterns,
-add a `## vault-bridge: configuration` block to a `CLAUDE.md` file in
-your Obsidian vault with a YAML config. See the plugin's own `CLAUDE.md`
-for the three preset profiles you can adapt. This is only needed for
-custom routing — the three built-in presets work without it.
 
 ## LibreDWG setup for DWG reads on macOS
 
@@ -296,22 +291,29 @@ your archive                         vault-bridge                    your vault
 vault-bridge/
 ├── .claude-plugin/
 │   └── plugin.json              # manifest (name, version, author, license)
-├── commands/                    # six slash commands
+├── commands/                    # slash commands
 │   ├── setup.md                 # interactive first-time configuration
 │   ├── validate-config.md       # check config before first scan
 │   ├── retro-scan.md            # full retroactive archive scan
 │   ├── heartbeat-scan.md        # autonomous delta scan
 │   ├── vault-health.md          # read-only vault audit
-│   └── revise.md                # upgrade old notes to vault-bridge schema
+│   ├── reconcile.md             # reconcile old notes with current schema + routing + archive state
+│   ├── viz.md                   # canvas/excalidraw/marp artifact generator
+│   ├── research.md              # grounded open-web research report
+│   ├── build-transport.md       # LLM-authored archive transport module
+│   └── self-update.md           # force-refresh the upstream version check
 ├── hooks/
-│   ├── hooks.json               # auto-runs health check on every prompt
+│   ├── hooks.json               # auto-runs health check + update check on every prompt
 │   └── scripts/
-│       └── health-check.sh      # validates .vault-bridge.json, auto-repairs
+│       ├── health-check.sh      # validates .vault-bridge.json, auto-repairs
+│       └── update-check.sh      # GitHub upstream version check (non-blocking, cached)
 ├── scripts/                     # helper Python (all test-covered)
+│   ├── config.py                # v4 config schema: load, save, effective_for
+│   ├── import_legacy.py         # one-shot migration from pre-v5 config formats
 │   ├── schema.py                # single source of truth for frontmatter contract
 │   ├── parse_config.py          # vault CLAUDE.md config parser + validator
-│   ├── setup_config.py          # multi-domain config store (~/.vault-bridge/)
-│   ├── local_config.py          # project-level .vault-bridge.json manager
+│   ├── setup_config.py          # backward-compat re-export facade
+│   ├── local_config.py          # project-level .vault-bridge state helpers
 │   ├── domain_router.py         # domain resolution and event routing
 │   ├── user_prompt.py           # structured prompt builder for AskUserQuestion
 │   ├── state.py                 # shared state directory resolution
@@ -320,7 +322,15 @@ vault-bridge/
 │   ├── extract_event_date.py    # filename/mtime date parsing with conflict rule
 │   ├── compress_images.py       # Pillow pipeline with de-dup naming
 │   ├── fingerprint.py           # folder + file fingerprints for rename detection
+│   ├── project_rename.py        # archive→vault project-folder rename detection
+│   ├── transport_loader.py      # loads named transport module from workdir
+│   ├── transport_registry.py    # lists/validates user-authored transports
+│   ├── transport_migrate.py     # legacy transport.py → transports/ migration
+│   ├── update_cache.py          # upstream version cache (TTL, atomic writes)
+│   ├── update_check.py          # GitHub version check orchestrator
 │   └── vault_scan.py            # lockfile + index + heartbeat manifests
+├── skills/
+│   └── transport-builder/       # interview + generator for archive transports
 ├── templates/
 │   └── vault-bridge-note.md     # Obsidian Templater template for manual notes
 ├── tests/

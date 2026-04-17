@@ -30,6 +30,7 @@ import local_config  # noqa: E402
 import memory_log    # noqa: E402
 from memory_log import MemoryEntry  # noqa: E402
 from discover_structure import DiscoveredFolder, is_new_subfolder  # noqa: E402
+from config import load_config, effective_for  # noqa: E402 — v5 config API
 
 
 # ---------------------------------------------------------------------------
@@ -51,6 +52,7 @@ class CategoryDecision:
 def apply_decisions(
     workdir,
     decisions: List[CategoryDecision],
+    domain_name: Optional[str] = None,
 ) -> dict:
     """Persist a list of CategoryDecision objects into project settings and memory log.
 
@@ -63,16 +65,42 @@ def apply_decisions(
     Args:
         workdir: Path to the project working directory.
         decisions: List of CategoryDecision objects to apply.
+        domain_name: Domain slug for v4 config. Falls back to active_domain in
+                     legacy settings.json when None.
 
     Returns:
         dict with keys: added, skipped_to_fallback, added_to_skip_list
     """
-    workdir = Path(workdir)
-    cfg = local_config.load_local_config(workdir) or {}
+    from config import load_config, save_config, SetupNeeded  # noqa: E402
 
-    # Extract mutable lists from config
-    routing_patterns: list = list(cfg.get("routing_patterns") or [])
-    skip_patterns: list = list(cfg.get("skip_patterns") or [])
+    workdir = Path(workdir)
+
+    # Prefer v4 config API; fall back to legacy local_config shim
+    _use_v4 = False
+    _v4_cfg = None
+    _v4_domain = None
+    try:
+        _v4_cfg = load_config(workdir)
+        _dn = domain_name or _v4_cfg.active_domain or (
+            _v4_cfg.domains[0].name if _v4_cfg.domains else None
+        )
+        if _dn:
+            for d in _v4_cfg.domains:
+                if d.name == _dn:
+                    _v4_domain = d
+                    break
+        if _v4_domain is not None:
+            _use_v4 = True
+    except (SetupNeeded, Exception):
+        pass
+
+    if _use_v4:
+        routing_patterns: list = list(_v4_domain.routing_patterns or [])
+        skip_patterns: list = list(_v4_domain.skip_patterns or [])
+    else:
+        cfg = local_config.load_local_config(workdir) or {}
+        routing_patterns = list(cfg.get("routing_patterns") or [])
+        skip_patterns = list(cfg.get("skip_patterns") or [])
 
     stats = {"added": 0, "skipped_to_fallback": 0, "added_to_skip_list": 0}
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -132,20 +160,25 @@ def apply_decisions(
                 ),
             )
 
-    # Persist changes back via save_local_config, preserving all existing fields
-    local_config.save_local_config(
-        workdir,
-        active_domain=cfg.get("active_domain", ""),
-        vault_name=cfg.get("vault_name"),
-        archive_root=cfg.get("archive_root"),
-        file_system_type=cfg.get("file_system_type"),
-        routing_patterns=routing_patterns,
-        content_overrides=cfg.get("content_overrides"),
-        skip_patterns=skip_patterns,
-        fallback=cfg.get("fallback"),
-        project_style=cfg.get("project_style"),
-        overrides=cfg.get("overrides"),
-    )
+    # Persist changes
+    if _use_v4:
+        _v4_domain.routing_patterns = routing_patterns
+        _v4_domain.skip_patterns = skip_patterns
+        save_config(workdir, _v4_cfg)
+    else:
+        local_config.save_local_config(
+            workdir,
+            active_domain=cfg.get("active_domain", ""),
+            vault_name=cfg.get("vault_name"),
+            archive_root=cfg.get("archive_root"),
+            file_system_type=cfg.get("file_system_type"),
+            routing_patterns=routing_patterns,
+            content_overrides=cfg.get("content_overrides"),
+            skip_patterns=skip_patterns,
+            fallback=cfg.get("fallback"),
+            project_style=cfg.get("project_style"),
+            overrides=cfg.get("overrides"),
+        )
 
     return stats
 
@@ -211,10 +244,16 @@ def _cli_plan_heartbeat(args) -> int:
 
     # Load effective config to discover routing rules
     try:
-        import effective_config
-        effective = effective_config.load_effective_config(workdir)
+        cfg = load_config(workdir)
+        # For heartbeat/CLI: use active_domain or the only domain
+        active = cfg.active_domain
+        if active is None and len(cfg.domains) == 1:
+            active = cfg.domains[0].name
+        elif active is None:
+            active = cfg.domains[0].name if cfg.domains else ""
+        effective = effective_for(cfg, active)
     except Exception as e:
-        sys.stderr.write(f"category_decisions: cannot load effective config: {e}\n")
+        sys.stderr.write(f"category_decisions: cannot load config: {e}\n")
         return 2
 
     import discover_structure as ds

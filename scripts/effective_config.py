@@ -38,16 +38,17 @@ _HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(_HERE))
 
 from state import state_dir as _state_dir          # noqa: E402
-from domain_templates import DOMAIN_TEMPLATES, VALID_FS_TYPES, get_domain_template  # noqa: E402
+from domain_templates import DOMAIN_TEMPLATES, get_domain_template  # noqa: E402
 
-# vault_config_io is imported lazily inside load_effective_config to avoid
-# circular imports at module load time (vault_config_io re-exports VaultUnreachable
-# from this module in some configurations).  We do a top-level import here
-# but guard it so tests can monkeypatch it.
-try:
-    import vault_config_io as _vci
-except ImportError:
-    _vci = None  # type: ignore
+# VALID_FS_TYPES removed in v6.0.0 (schema v4). Kept as empty set for
+# any legacy code paths that may reference it; will be removed when
+# effective_config.py is retired.
+VALID_FS_TYPES: frozenset = frozenset()
+
+# vault_config_io was removed in v5.0.0 (config architecture refactor).
+# _vci = None means the vault-hosted config path is permanently disabled;
+# the legacy global config path remains for backward compatibility.
+_vci = None  # type: ignore
 
 
 # ---------------------------------------------------------------------------
@@ -89,11 +90,16 @@ class EffectiveConfig:
 
     Produced by load_effective_config(). All consumers should use this
     instead of raw config dicts.
+
+    v4 note: file_system_type is superseded by transport_name. This class
+    keeps file_system_type as a legacy alias (Optional[str]) pointing to
+    transport_name for back-compat with old consumers that haven't been
+    updated yet.
     """
     vault_name: str
     domain_name: str
     archive_root: str
-    file_system_type: str
+    transport_name: Optional[str] = None
     routing_patterns: List[Dict[str, str]] = field(default_factory=list)
     content_overrides: List[Dict[str, str]] = field(default_factory=list)
     skip_patterns: List[str] = field(default_factory=list)
@@ -102,18 +108,24 @@ class EffectiveConfig:
     style: Dict[str, Any] = field(default_factory=dict)
     fabrication_stopwords: List[str] = field(default_factory=list)
 
+    @property
+    def file_system_type(self) -> Optional[str]:
+        """Legacy alias for transport_name. Deprecated in v6.0.0."""
+        return self.transport_name
+
     def to_dict(self) -> dict:
         """Return a flat dict that domain_router.route_event() can consume.
 
         Preserves the shape that existing consumers expect — routing_patterns,
         content_overrides, fallback, skip_patterns, default_tags, style, plus
         the identity fields.
+        transport_name replaces file_system_type.
         """
         return {
             "name": self.domain_name,
             "vault_name": self.vault_name,
             "archive_root": self.archive_root,
-            "file_system_type": self.file_system_type,
+            "transport_name": self.transport_name,
             "routing_patterns": list(self.routing_patterns),
             "content_overrides": list(self.content_overrides),
             "skip_patterns": list(self.skip_patterns),
@@ -480,7 +492,7 @@ def load_effective_config(
         vault_name=vault_name,
         domain_name=active_domain_name,
         archive_root=domain_def.get("archive_root", ""),
-        file_system_type=domain_def.get("file_system_type", ""),
+        transport_name=domain_def.get("transport", domain_def.get("file_system_type", None)),
         routing_patterns=merged_routing,
         content_overrides=merged_content_overrides,
         skip_patterns=merged_skip,
@@ -539,12 +551,8 @@ def save_config(vault_name: str, domains: list) -> Path:
     if len(names) != len(set(names)):
         raise ValueError(f"domains contains duplicate names: {names}")
 
-    for d in domains:
-        if d.get("file_system_type") and d["file_system_type"] not in VALID_FS_TYPES:
-            raise ValueError(
-                f"Domain '{d.get('name')}' has invalid file_system_type: "
-                f"'{d['file_system_type']}'. Valid: {sorted(VALID_FS_TYPES)}"
-            )
+    # file_system_type validation removed in v6.0.0 (schema v4).
+    # Transport is now an open slug in Domain.transport, not a fixed enum.
 
     config = {
         "config_version": 2,

@@ -14,22 +14,25 @@ the vault.
 
 ## Step 1 — load config
 
-Try the simple config first:
-```
-python3 -c "
+Load the v3 config:
+```python
 import sys, json
+from pathlib import Path
 sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
-import setup_config
-config = setup_config.load_config()
-print(json.dumps(config))
-"
+from config import load_config, effective_for, SetupNeeded
+
+try:
+    cfg = load_config(Path.cwd())
+    print(json.dumps(cfg.to_dict()))
+except SetupNeeded as e:
+    print(f'SETUP_NEEDED: {e}')
+    import sys; sys.exit(1)
 ```
 
-If that fails, try `parse_config.py CLAUDE.md` as fallback. If both fail,
-tell the user to run `/vault-bridge:setup` first and STOP.
+If this fails, tell the user to run `/vault-bridge:setup` first and STOP.
 
-Capture `config.vault_name` and `config.file_system_type` — needed to check
-`source_path` existence and locate vault notes.
+Capture `cfg.vault_name` and — for each domain — `domain.transport`
+needed to check `source_path` existence and locate vault notes.
 
 ## Step 2 — find all plugin-generated notes in scope
 

@@ -1,13 +1,14 @@
 ---
-description: Upgrade existing vault notes to the vault-bridge schema
+description: Reconcile existing vault notes with the current schema, routing rules, and archive state
 allowed-tools: Read, Bash, Glob, Grep, AskUserQuestion
-argument-hint: "[project-folder-path] [--dry-run] [--re-read] [--move] [--migrate-v2]"
+argument-hint: "[project-folder-path] [--dry-run] [--re-read] [--move] [--migrate-v2] [--classify]"
 ---
 
-You are upgrading existing vault notes in a project folder to match the
-vault-bridge frontmatter schema. These notes were written before vault-bridge
-existed and may have missing fields, wrong enum values, no source tracking,
-and potentially fabricated content.
+You are reconciling existing vault notes in a project folder so they match
+the current vault-bridge frontmatter schema, current routing rules, and the
+current archive state. Notes may have been written before vault-bridge
+existed, under an older schema, or become stale because files or folders
+moved in the archive. Reconcile brings them back into alignment.
 
 The argument `$1` is a vault project folder path (e.g. `2408 Sample Project/`).
 
@@ -28,11 +29,22 @@ Before anything else, verify vault-bridge is configured for the current
 working directory and that Obsidian is reachable:
 
 ```bash
-python3 ${CLAUDE_PLUGIN_ROOT}/scripts/local_config.py --is-setup "$(pwd)"
+python3 -c "
+import sys
+from pathlib import Path
+sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
+from config import load_config, SetupNeeded
+try:
+    load_config(Path.cwd())
+    print('config: ok')
+except SetupNeeded as e:
+    print(f'SETUP_NEEDED: {e}', file=__import__('sys').stderr)
+    import sys; sys.exit(1)
+"
 ```
 
 If this fails, **run `/vault-bridge:setup` first, then resume
-this revise run.** Revise needs both the domain list (to compute
+this reconcile run.** Reconcile needs both the domain list (to compute
 tags and routing) and the local `.vault-bridge/reports/` folder (for the
 memory report).
 
@@ -55,7 +67,7 @@ except (transport_loader.TransportMissing, transport_loader.TransportInvalid) as
 
 If exit code is non-zero, print the typed error message and:
 > "Transport helper missing or invalid. Run `/vault-bridge:setup` to
-> scaffold and probe the transport helper before running revise."
+> scaffold and probe the transport helper before running reconcile."
 
 Then exit 1. Do not proceed.
 
@@ -63,11 +75,12 @@ Check vault reachability:
 
 ```bash
 VAULT_NAME=$(python3 -c "
-import sys, json; from pathlib import Path
+import sys
+from pathlib import Path
 sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
-import local_config
-cfg = local_config.load_local_config(Path.cwd())
-print(cfg.get('vault_name', '') if cfg else '')
+from config import load_config
+cfg = load_config(Path.cwd())
+print(cfg.vault_name)
 ")
 if [ -n "$VAULT_NAME" ]; then
   obsidian vaults | grep -q "$VAULT_NAME" || {
@@ -79,28 +92,96 @@ fi
 
 ## Step 1 — load config
 
-Load the effective configuration (vault-hosted preferred, legacy fallback):
+Load the v3 config and resolve the domain:
 
-```
-python3 -c "
+```python
 import sys, json
 from pathlib import Path
 sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
-import effective_config as ec
-cfg = ec.load_effective_config(Path.cwd())
-print(json.dumps(cfg.to_dict()))
-"
+from config import load_config, effective_for
+import domain_router
+
+cfg = load_config(Path.cwd())
+r = domain_router.resolve_domain('$1', cfg.to_dict())
+effective = effective_for(cfg, r.domain_name)
+print(json.dumps(effective.to_dict()))
 ```
 
-If this fails, try parse_config.py as a fallback. If both fail, run
-`/vault-bridge:setup` first and then restart this command.
+If this raises SetupNeeded → run `/vault-bridge:setup` first and then restart this command.
 
 Determine which domain the project folder belongs to using
 `domain_router.resolve_domain()`. If ambiguous, ask the user via
 AskUserQuestion with structured options.
 
-Use `domain.file_system_type` to decide which tools read the NAS/file system.
+Use `domain.transport` (the transport slug) to load the transport via `transport_loader.load_transport(Path.cwd(), domain.transport)` and call `transport.fetch_to_local(source_path)` to read archive files.
 Use `domain.routing_patterns` for Phase 3 routing checks.
+
+## Step 1.5 — detect project-folder rename
+
+If the archive project folder was renamed since the last scan (e.g.
+`2408 Sample Project` → `2408 Sample Project Final`), the vault folder
+and every note's `project:` frontmatter are stale. Reconcile is the right
+place to fix this because the user is already reviewing the project.
+
+Resolve the archive project folder that corresponds to the vault project
+folder `$1`. The frontmatter `source_path` on any existing note in `$1`
+tells you the archive path; take its parent (or grandparent, depending on
+depth) until you hit the archive project root.
+
+Sample up to 20 files from the archive root and detect:
+
+```bash
+python3 -c "
+import os, sys, json
+from pathlib import Path
+sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
+import fingerprint, project_rename as pr
+
+source = os.environ['VB_SRC_FOLDER']
+workdir = Path(os.getcwd())
+
+sample: list = []
+for root, dirs, files in os.walk(source):
+    dirs[:] = [d for d in dirs if not d.startswith('.')]
+    for f in files:
+        if f.startswith('.') or f.endswith('.tmp'):
+            continue
+        p = Path(root) / f
+        try:
+            fp = fingerprint.fingerprint_file(p)
+        except Exception:
+            continue
+        sample.append((str(p), fp))
+        if len(sample) >= 20:
+            break
+    if len(sample) >= 20:
+        break
+
+det = pr.detect_project_rename(workdir, source, sample)
+print(json.dumps({'rename': None if det is None else {
+    'old_name': det.old_name,
+    'new_name': det.new_name,
+    'match_count': det.match_count,
+    'total_checked': det.total_checked,
+    'confidence': det.confidence,
+}}))
+" VB_SRC_FOLDER="$ARCHIVE_PROJECT_ROOT"
+```
+
+If a rename is detected, present via AskUserQuestion (same options as
+retro-scan Step 3.5b):
+
+> "Archive project folder appears renamed: **{old_name}** → **{new_name}**
+> ({match_count}/{total_checked} files matched, {confidence:.0%}). Rename
+> the vault folder and update all affected notes?"
+
+If confirmed, follow the same procedure as retro-scan Step 3.5b: enumerate
+affected notes via `project_rename.list_notes_in_project`, rewrite each
+note's `project:` frontmatter + vault path, delete the old note, then call
+`project_rename.rewrite_index_project` to update the scan index. Log the
+rename and include `project_rename` stats in the Step 4 memory report.
+
+If `--dry-run` is set, only report what WOULD change — do not apply.
 
 ### v1-to-v2 migration (--migrate-v2 only)
 
@@ -207,7 +288,7 @@ track reads, so ALL old notes get this flag unless `--re-read` is used.
 Print a summary table:
 
 ```
-vault-bridge revise audit — {project-name}
+vault-bridge reconcile audit — {project-name}
 ═══════════════════════════════════════════
 
 Notes found:           {N}
@@ -399,11 +480,13 @@ python3 -c "
 import os, sys, json
 from pathlib import Path
 sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
-import effective_config as ec
-import discover_structure as ds
+from config import load_config, effective_for
+import domain_router, discover_structure as ds
 
 workdir = Path(os.getcwd())
-effective = ec.load_effective_config(workdir)
+cfg = load_config(workdir)
+r = domain_router.resolve_domain('$1', cfg.to_dict())
+effective = effective_for(cfg, r.domain_name)
 discovered = ds.walk_top_level_subfolders(
     effective.archive_root,
     skip_patterns=list(effective.skip_patterns),
@@ -447,7 +530,7 @@ If there are no prompts (everything already classified), print:
 Print a completion summary:
 
 ```
-vault-bridge revise complete — {project-name}
+vault-bridge reconcile complete — {project-name}
 ═══════════════════════════════════════════════
 
 Notes upgraded:        {N} / {total}
@@ -472,11 +555,11 @@ Next steps:
 
 ## Step 4 — write a memory report
 
-Write a per-revise report into the working directory's
+Write a per-reconcile report into the working directory's
 `.vault-bridge/reports/` folder:
 
 ```bash
-python3 ${CLAUDE_PLUGIN_ROOT}/scripts/memory_report.py revise \
+python3 ${CLAUDE_PLUGIN_ROOT}/scripts/memory_report.py reconcile \
   --workdir "$(pwd)" \
   --stats-json "$STATS_JSON"
 ```
@@ -488,7 +571,7 @@ index_entries_added, flagged_unverified), `notes_written` (list of vault
 paths that were rewritten), `warnings`, `errors`, and optional `notes`.
 
 Write the report even on dry-runs and on failure — the user relies on
-this to know what this revise run actually did.
+this to know what this reconcile run actually did.
 
 ## Step 5 — append scan-end to memory log
 
@@ -496,7 +579,7 @@ this to know what this revise run actually did.
 python3 ${CLAUDE_PLUGIN_ROOT}/scripts/memory_log.py append \
   --workdir "$(pwd)" \
   --event scan-end \
-  --summary "revise finished: $NOTES_UPGRADED notes upgraded"
+  --summary "reconcile finished: $NOTES_UPGRADED notes upgraded"
 ```
 
 ## Step 6 — regenerate CLAUDE.md

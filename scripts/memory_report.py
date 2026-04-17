@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 """Per-scan memory reports written to `.vault-bridge/reports/`.
 
-Every scan command (retro-scan, heartbeat-scan, revise) is expected to call
-this script once it finishes (success, no-op, or failure) to leave a
+Every scan command (retro-scan, heartbeat-scan, reconcile) is expected to
+call this script once it finishes (success, no-op, or failure) to leave a
 durable breadcrumb in the working directory's `.vault-bridge/reports/`
 folder. The reports are a compact "what did this run do" record for the
 user and for future scans to pick up history without parsing the global
 heartbeat log.
+
+The legacy `revise` scan_type is accepted as an alias for `reconcile` so
+old reports still render cleanly.
 
 Filename pattern:
     {YYYY-MM-DD}_{HH-MM-SS}_{scan_type}.md
@@ -25,7 +28,16 @@ sys.path.insert(0, str(_HERE))
 import local_config  # noqa: E402
 
 
-VALID_SCAN_TYPES = {"retro", "heartbeat", "revise", "vault-health", "viz", "research", "probe"}
+VALID_SCAN_TYPES = {
+    "retro",
+    "heartbeat",
+    "reconcile",
+    "revise",  # legacy alias for reconcile
+    "vault-health",
+    "viz",
+    "research",
+    "probe",
+}
 
 
 def _render(scan_type: str, stats: dict, timestamp: datetime) -> str:

@@ -2,7 +2,7 @@
 
 TDD: tests written BEFORE the implementation.
 
-Cases:
+Cases (original):
 1. Missing .vault-bridge/transport.py → TransportMissing
 2. File exists but no fetch_to_local attribute → TransportInvalid
 3. fetch_to_local attribute is not callable → TransportInvalid
@@ -11,8 +11,22 @@ Cases:
 6. fetch_to_local raises FileNotFoundError → TransportFailed with __cause__
 7. fetch_to_local raises other exception → TransportFailed
 8. load_transport returns module with callable fetch_to_local
+
+New cases (Phase 1 refactor):
+N1. load_transport(workdir, "home-nas-smb") loads transports/home-nas-smb.py
+N2. load_transport(workdir, "missing") → raises TransportMissing
+N3. load_transport(workdir, "broken") with module missing list_archive →
+    raises TransportInvalid("missing list_archive")
+N4. Caching keyed by (workdir, transport_name, mtime) — two calls with same
+    mtime use cache; touching the file invalidates
+N5. list_archive(workdir, "home-nas-smb", "/some/root", ["*.tmp"]) calls the
+    module's function and returns its iterator
+N6. fetch_to_local(workdir, "home-nas-smb", "/path/to/file") — new three-arg form
+N7. Legacy shim: if only <workdir>/.vault-bridge/transport.py exists (no
+    transports/ dir), load_transport(workdir) single-arg still works
 """
 import importlib.util
+import os
 import sys
 import time
 from pathlib import Path
@@ -31,12 +45,25 @@ import transport_loader  # noqa: E402
 # ---------------------------------------------------------------------------
 
 def _write_valid_transport(path: Path) -> None:
-    """Write a minimal valid transport.py at path."""
+    """Write a minimal valid transport.py at path (legacy-style, no list_archive)."""
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         "from pathlib import Path\n"
         "def fetch_to_local(archive_path: str) -> Path:\n"
         "    return Path(archive_path)\n"
+    )
+
+
+def _write_full_valid_transport(path: Path) -> None:
+    """Write a valid transport with BOTH fetch_to_local and list_archive."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "from pathlib import Path\n"
+        "from typing import Iterator, List, Optional\n"
+        "def fetch_to_local(archive_path: str) -> Path:\n"
+        "    return Path(archive_path)\n"
+        "def list_archive(archive_root: str, skip_patterns=None) -> Iterator[str]:\n"
+        "    return iter([])\n"
     )
 
 
@@ -201,3 +228,143 @@ def test_fetch_to_local_returns_path_on_success(tmp_path):
     )
     result = transport_loader.fetch_to_local(tmp_path, str(archive_file))
     assert result == archive_file
+
+
+# ===========================================================================
+# New Phase 1 tests — named-transport API
+# ===========================================================================
+
+def _make_transports_dir(workdir: Path) -> Path:
+    d = workdir / ".vault-bridge" / "transports"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+# N1 — load named transport
+def test_load_named_transport_loads_from_transports_dir(tmp_path):
+    """load_transport(workdir, 'home-nas-smb') loads transports/home-nas-smb.py."""
+    d = _make_transports_dir(tmp_path)
+    _write_full_valid_transport(d / "home-nas-smb.py")
+
+    mod = transport_loader.load_transport(tmp_path, "home-nas-smb")
+    assert callable(mod.fetch_to_local)
+    assert callable(mod.list_archive)
+
+
+# N2 — missing named transport → TransportMissing
+def test_load_named_transport_missing_raises_transport_missing(tmp_path):
+    """load_transport(workdir, 'missing') → TransportMissing."""
+    _make_transports_dir(tmp_path)
+    with pytest.raises(transport_loader.TransportMissing):
+        transport_loader.load_transport(tmp_path, "missing")
+
+
+# N3 — module missing list_archive → TransportInvalid
+def test_load_named_transport_missing_list_archive_raises_invalid(tmp_path):
+    """Module with fetch_to_local but no list_archive → TransportInvalid."""
+    d = _make_transports_dir(tmp_path)
+    _write_valid_transport(d / "broken.py")  # only has fetch_to_local
+
+    with pytest.raises(transport_loader.TransportInvalid) as exc_info:
+        transport_loader.load_transport(tmp_path, "broken")
+    assert "list_archive" in str(exc_info.value)
+
+
+# N4 — caching keyed by (workdir, transport_name, mtime)
+def test_named_transport_cache_by_name_and_mtime(tmp_path):
+    """Two calls with same mtime use cache; touching the file invalidates."""
+    d = _make_transports_dir(tmp_path)
+    tp = d / "home-nas-smb.py"
+    _write_full_valid_transport(tp)
+
+    # Clear any stale cache entries
+    transport_loader._CACHE.clear()
+
+    call_count = [0]
+    real_module_from_spec = importlib.util.module_from_spec
+
+    def counting_module_from_spec(spec):
+        call_count[0] += 1
+        return real_module_from_spec(spec)
+
+    with mock.patch("importlib.util.module_from_spec", side_effect=counting_module_from_spec):
+        transport_loader.load_transport(tmp_path, "home-nas-smb")
+        transport_loader.load_transport(tmp_path, "home-nas-smb")
+
+    assert call_count[0] == 1, "Expected cache hit on second call"
+
+    # Touch the file to change mtime
+    current_mtime = tp.stat().st_mtime
+    os.utime(str(tp), (current_mtime + 2, current_mtime + 2))
+
+    with mock.patch("importlib.util.module_from_spec", side_effect=counting_module_from_spec):
+        transport_loader.load_transport(tmp_path, "home-nas-smb")
+
+    assert call_count[0] == 2, "Expected fresh load after mtime change"
+
+
+# N5 — list_archive wrapper
+def test_list_archive_wrapper_calls_module_function(tmp_path):
+    """list_archive(workdir, 'slug', root, skip) calls the module's list_archive."""
+    d = _make_transports_dir(tmp_path)
+
+    # Create a real directory to list
+    archive_root = tmp_path / "archive"
+    archive_root.mkdir()
+    (archive_root / "file1.txt").write_text("a")
+    (archive_root / "file2.tmp").write_text("b")
+
+    tp = d / "home-nas-smb.py"
+    tp.write_text(
+        "from pathlib import Path\n"
+        "from typing import Iterator, List, Optional\n"
+        "import fnmatch\n"
+        "def fetch_to_local(archive_path: str) -> Path:\n"
+        "    return Path(archive_path)\n"
+        "def list_archive(archive_root: str, skip_patterns=None) -> Iterator[str]:\n"
+        "    patterns = list(skip_patterns or [])\n"
+        "    for entry in Path(archive_root).rglob('*'):\n"
+        "        if entry.is_file():\n"
+        "            if any(fnmatch.fnmatch(entry.name, p) for p in patterns):\n"
+        "                continue\n"
+        "            yield str(entry)\n"
+    )
+
+    result = list(transport_loader.list_archive(tmp_path, "home-nas-smb", str(archive_root), ["*.tmp"]))
+    # Should include file1.txt but NOT file2.tmp
+    names = [Path(p).name for p in result]
+    assert "file1.txt" in names
+    assert "file2.tmp" not in names
+
+
+# N6 — fetch_to_local three-arg form
+def test_fetch_to_local_three_arg_form(tmp_path):
+    """fetch_to_local(workdir, transport_name, archive_path) — new three-arg form."""
+    d = _make_transports_dir(tmp_path)
+    archive_file = tmp_path / "photo.jpg"
+    archive_file.write_bytes(b"fake")
+
+    tp = d / "local.py"
+    tp.write_text(
+        "from pathlib import Path\n"
+        "from typing import Iterator, List, Optional\n"
+        f"def fetch_to_local(archive_path: str) -> Path:\n"
+        f"    return Path('{archive_file}')\n"
+        "def list_archive(archive_root: str, skip_patterns=None) -> Iterator[str]:\n"
+        "    return iter([])\n"
+    )
+
+    result = transport_loader.fetch_to_local(tmp_path, "local", str(archive_file))
+    assert result == archive_file
+
+
+# N7 — legacy shim: old transport.py still works with single-arg load_transport
+def test_legacy_shim_single_arg_load_transport(tmp_path):
+    """Legacy <workdir>/.vault-bridge/transport.py still works with load_transport(workdir)."""
+    # Only old-style transport.py exists, no transports/ dir
+    transport_path = tmp_path / ".vault-bridge" / "transport.py"
+    _write_valid_transport(transport_path)  # old-style: only has fetch_to_local
+
+    # Single-arg form should still work (back-compat)
+    mod = transport_loader.load_transport(tmp_path)
+    assert callable(mod.fetch_to_local)

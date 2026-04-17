@@ -2,11 +2,12 @@
 """vault-bridge built-in domain templates.
 
 Narrowed from setup_config.py (Phase 1 of v2.0 restructure).
-This module owns only the templates dict, the valid FS-type set,
-and the template getter. All config I/O lives in effective_config.py.
-"""
+This module owns only the templates dict and the template getter.
+All config I/O lives in config.py (v4 schema).
 
-VALID_FS_TYPES = {"nas-mcp", "local-path", "external-mount"}
+Note: VALID_FS_TYPES was removed in v6.0.0 (schema v4).
+Transport type is now an open slug in Domain.transport, not a fixed enum.
+"""
 
 _DEFAULT_STYLE = {
     "note_filename_pattern": "YYYY-MM-DD topic.md",
