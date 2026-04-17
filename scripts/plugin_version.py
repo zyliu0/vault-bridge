@@ -11,6 +11,7 @@ import subprocess
 import time
 from pathlib import Path
 from typing import Optional
+import sys
 
 _VERSION_FILE = Path.home() / ".vault-bridge" / "plugin-version.json"
 
@@ -30,6 +31,7 @@ def get_git_sha(root: Optional[Path] = None) -> str:
             text=True,
         ).strip()
     except Exception:
+        print(f"WARNING: git SHA lookup failed: {e}", file=sys.stderr)
         return "unknown"
 
 
@@ -40,7 +42,8 @@ def get_installed_version() -> Optional[str]:
     try:
         data = json.loads(_VERSION_FILE.read_text())
         return data.get("version")
-    except Exception:
+    except Exception as e:
+        print(f"WARNING: version file read failed: {e}", file=sys.stderr)
         return None
 
 
@@ -51,7 +54,8 @@ def get_templates_installed() -> dict[str, str]:
     try:
         data = json.loads(_VERSION_FILE.read_text())
         return data.get("templates_installed", {})
-    except Exception:
+    except Exception as e:
+        print(f"WARNING: templates_installed read failed: {e}", file=sys.stderr)
         return {}
 
 
@@ -62,8 +66,8 @@ def save_version(version: str, templates_installed: Optional[dict[str, str]] = N
     if _VERSION_FILE.exists():
         try:
             existing = json.loads(_VERSION_FILE.read_text())
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"WARNING: version file load failed: {e}", file=sys.stderr)
     record = {
         "version": version,
         "last_update": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -109,7 +113,8 @@ def check_for_updates(plugin_root: Optional[Path] = None) -> tuple[bool, Optiona
 
         update_available = (recorded_sha_from_version != current_sha)
         return (update_available, installed, current_sha)
-    except Exception:
+    except Exception as e:
+        print(f"WARNING: update check failed: {e}", file=sys.stderr)
         return (False, installed, current_sha)
 
 

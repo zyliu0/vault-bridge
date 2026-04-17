@@ -404,8 +404,9 @@ def _build_result(
         if _is_configured:
             report_path = memory_report.write_report(workdir, "probe", stats)
             report_path_str = str(report_path)
-    except Exception:
-        pass
+    except Exception as e:
+        import sys
+        print(f"WARNING: could not write probe report: {e}", file=sys.stderr)
 
     return {
         "ok": overall_ok,

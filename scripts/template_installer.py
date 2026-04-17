@@ -13,6 +13,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+from template_bank import list_templates
+
 _TEMPLATES_DIR = Path(__file__).resolve().parent.parent / "templates"
 
 
@@ -77,7 +79,6 @@ def install_all_templates(
 ) -> InstallResult:
     """Install all templates from the template bank."""
     templates_dir = plugin_root or (_TEMPLATES_DIR.parent.parent)
-    from template_bank import list_templates
     templates = list_templates(templates_dir)
     paths = [t.relative_path for t in templates]
     return install_templates(paths, plugin_root, vault_name, dry_run)
