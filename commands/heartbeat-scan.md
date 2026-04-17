@@ -9,7 +9,26 @@ You are running an autonomous delta scan for vault-bridge. Unlike retro-scan
 since the last heartbeat. Triggered by cron, runs
 silently, writes new vault notes for any new or modified files.
 
-## Step 0 — ensure setup has been run and transport is healthy
+## Step 0 — check for plugin updates
+
+Run a non-blocking update check:
+
+```bash
+python3 -c "
+import sys
+from pathlib import Path
+sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
+from plugin_version import format_update_notice
+notice = format_update_notice()
+if notice:
+    print(f'NOTE: {notice}', file=sys.stderr)
+"
+```
+
+This prints a suggestion if new templates or a plugin update are available.
+It never blocks — heartbeat-scan proceeds regardless.
+
+## Step 1 — ensure setup has been run and transport is healthy
 
 Heartbeat is the autonomous path, so it NEVER prompts the user. Check that
 the working directory has a valid v3 config:

@@ -1,6 +1,6 @@
 """Filename computation for research report artifacts.
 
-Reuses viz_naming.compute_viz_filename with viz_type="marp" to produce
+Reuses visualization_naming.compute_visualization_filename with visualization_type="marp" to produce
 a .md file with the standard vault-bridge filename convention:
     stem:  "{YYYY-MM-DD} {topic}"
     ext:   ".md"
@@ -14,7 +14,7 @@ from typing import Optional, Tuple
 _HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(_HERE))
 
-from viz_naming import compute_viz_filename  # noqa: E402
+from visualization_naming import compute_visualization_filename  # noqa: E402
 
 
 def compute_research_filename(
@@ -27,8 +27,8 @@ def compute_research_filename(
     ----------
     topic:
         Research topic string (e.g. "OpenAI research trends 2026").
-        CJK-only topics fall back to a slug of "viz" (inherited from
-        viz_naming) — the note is still useful via its date prefix.
+        CJK-only topics fall back to a slug of "visualization" (inherited from
+        visualization_naming) — the note is still useful via its date prefix.
     date:
         ISO date string YYYY-MM-DD. Defaults to today.
 
@@ -38,4 +38,4 @@ def compute_research_filename(
         stem      = "{date} {topic-slug}"  (space-separated)
         extension = ".md"
     """
-    return compute_viz_filename(topic, "marp", date=date)
+    return compute_visualization_filename(topic, "marp", date=date)

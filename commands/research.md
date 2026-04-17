@@ -21,7 +21,25 @@ MUST be a direct paraphrase of text that was literally fetched and read.
 Do NOT synthesize, infer, or add context not present in the source markdown.
 If a claim cannot be pinned to a sentence in the fetched content, drop it.
 
-## Step 0 — ensure setup has been run
+## Step 0 — check for plugin updates
+
+Run a non-blocking update check:
+
+```bash
+python3 -c "
+import sys
+from pathlib import Path
+sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
+from plugin_version import format_update_notice
+notice = format_update_notice()
+if notice:
+    print(f'NOTE: {notice}', file=sys.stderr)
+"
+```
+
+If updates are available, inform the user they can run `/vault-bridge:self-update` after research.
+
+## Step 1 — ensure setup has been run
 
 Before anything else, verify vault-bridge is configured for the current
 working directory:
@@ -44,7 +62,7 @@ except SetupNeeded as e:
 If this fails, vault-bridge has not been set up here. **Run
 `/vault-bridge:setup` first, then resume this command.**
 
-## Step 1 — load config and check vault reachability
+## Step 2 — load config and check vault reachability
 
 Load the v3 config and resolve the active domain:
 
@@ -96,7 +114,7 @@ command -v defuddle >/dev/null || {
 }
 ```
 
-## Step 2 — parse args
+## Step 3 — parse args
 
 Extract values from the command-line string `$1`:
 

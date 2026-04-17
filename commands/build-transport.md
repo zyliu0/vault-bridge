@@ -16,6 +16,22 @@ existing one. Invokes the `transport-builder` skill interactively.
 
 ---
 
+## Step 0 — check for plugin updates
+
+Run a non-blocking update check:
+
+```bash
+python3 -c "
+import sys
+from pathlib import Path
+sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
+from plugin_version import format_update_notice
+notice = format_update_notice()
+if notice:
+    print(f'NOTE: {notice}', file=sys.stderr)
+"
+```
+
 ## Parse arguments
 
 Extract `--domain` and `--slug` from the argument string, if present.

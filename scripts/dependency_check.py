@@ -53,17 +53,17 @@ RECOMMENDED_SKILLS = [
     },
     {
         "name": "obsidian-visual-skills:obsidian-canvas-creator",
-        "purpose": "Generate Obsidian JSON Canvas files for viz command",
+        "purpose": "Generate Obsidian JSON Canvas files for visualization command",
         "source": "obsidian-visual-skills marketplace",
     },
     {
         "name": "obsidian-visual-skills:excalidraw-diagram",
-        "purpose": "Generate Excalidraw diagrams as Obsidian markdown for viz command",
+        "purpose": "Generate Excalidraw diagrams as Obsidian markdown for visualization command",
         "source": "obsidian-visual-skills marketplace",
     },
     {
         "name": "marp-slide",
-        "purpose": "Generate Marp presentation decks for viz command",
+        "purpose": "Generate Marp presentation decks for visualization command",
         "source": "marp-slide marketplace",
     },
     {

@@ -4,14 +4,14 @@ allowed-tools: Read, Bash, AskUserQuestion
 argument-hint: "<description> [--type canvas|excalidraw|marp] [--project <vault-folder>]"
 ---
 
-You are running the vault-bridge viz command. Your job is to generate a
+You are running the vault-bridge visualization command. Your job is to generate a
 visual artifact — an Obsidian canvas, an Excalidraw diagram, or a Marp
 presentation deck — from a plain-text description and write it into the
 Obsidian vault.
 
 The argument `$1` is the full command-line string, which may include:
 - A description (required, everything before flags)
-- `--type canvas|excalidraw|marp` — explicitly set the viz type
+- `--type canvas|excalidraw|marp` — explicitly set the visualization type
 - `--project <vault-folder>` — place the artifact in a specific vault folder
 
 ## Step 0 — ensure setup has been run
@@ -39,7 +39,7 @@ If this fails, vault-bridge has not been set up here. **Run
 
 ## Step 1 — load config and check vault reachability
 
-Load the v3 config and resolve the domain for this viz:
+Load the v3 config and resolve the domain for this visualization:
 
 ```python
 import sys, json
@@ -50,10 +50,10 @@ from config import load_config, effective_for
 cfg = load_config(Path.cwd())
 vault_name = cfg.vault_name
 
-# Resolve domain for viz (no source_path)
+# Resolve domain for visualization (no source_path)
 domain_name = cfg.active_domain
 if domain_name is None and len(cfg.domains) > 1:
-    # Ask user via AskUserQuestion: "Which domain for this viz?"
+    # Ask user via AskUserQuestion: "Which domain for this visualization?"
     # domain_name = <user's answer>
     pass
 elif domain_name is None and len(cfg.domains) == 1:
@@ -86,14 +86,14 @@ Extract values from the command-line string `$1`:
 
 - `description` — all text before any `--` flag. This is the description of
   the visual artifact to generate.
-- `--type` — if present, the explicitly requested viz type: `canvas`,
+- `--type` — if present, the explicitly requested visualization type: `canvas`,
   `excalidraw`, or `marp`.
 - `--project` — if present, the vault folder path to place the artifact in
   (e.g. `2408 Sample Project/SD`).
 
-## Step 3 — resolve viz_type
+## Step 3 — resolve visualization_type
 
-Determine the viz type using this priority order:
+Determine the visualization type using this priority order:
 
 1. **Explicit `--type` flag** — if the user passed `--type canvas`,
    `--type excalidraw`, or `--type marp`, use that directly.
@@ -134,20 +134,20 @@ Determine the vault folder path for the artifact using this priority:
    If it succeeds, use that as the vault path.
 
 3. **`_Viz/` fallback** — if neither of the above resolved, use `_Viz` as the
-   vault path (a vault-level folder for standalone viz artifacts).
+   vault path (a vault-level folder for standalone visualization artifacts).
 
 Print the chosen vault path: `"Placing artifact in: {vault_path}"`
 
 ## Step 5 — compute filename
 
-Compute the artifact filename using the viz_naming script:
+Compute the artifact filename using the visualization_naming script:
 
 ```bash
 python3 -c "
 import sys
 sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
-from viz_naming import compute_viz_filename
-stem, ext = compute_viz_filename('$DESCRIPTION', '$VIZ_TYPE')
+from visualization_naming import compute_visualization_filename
+stem, ext = compute_visualization_filename('$DESCRIPTION', '$VISUALIZATION_TYPE')
 print(stem)
 print(ext)
 "
@@ -236,7 +236,7 @@ Where:
 - `$ARTIFACT_CONTENT` — the full generated content
 
 If the obsidian CLI errors with "Obsidian is not running", STOP and tell
-the user: "Obsidian must be running for vault-bridge to write viz artifacts.
+the user: "Obsidian must be running for vault-bridge to write visualization artifacts.
 Please open Obsidian and retry."
 
 ## Step 9 — validate
@@ -260,13 +260,13 @@ Set `VALIDATION_OK` to `true` or `false` based on the result.
 Record the run in the working directory's `.vault-bridge/reports/` folder:
 
 ```bash
-python3 ${CLAUDE_PLUGIN_ROOT}/scripts/memory_report.py viz \
+python3 ${CLAUDE_PLUGIN_ROOT}/scripts/memory_report.py visualization \
   --workdir "$(pwd)" \
   --stats-json "$STATS_JSON"
 ```
 
 Where `$STATS_JSON` is a JSON object containing:
-- `viz_type` — `canvas`, `excalidraw`, or `marp`
+- `visualization_type` — `canvas`, `excalidraw`, or `marp`
 - `source_description` — the original description string
 - `vault_path` — the vault folder path used
 - `filename` — the full filename including extension (`$STEM$EXT`)
@@ -282,7 +282,7 @@ Where `$STATS_JSON` is a JSON object containing:
 python3 ${CLAUDE_PLUGIN_ROOT}/scripts/memory_log.py append \
   --workdir "$(pwd)" \
   --event scan-end \
-  --summary "viz written: $STEM$EXT"
+  --summary "visualization written: $STEM$EXT"
 ```
 
 ## Step 12 — regenerate CLAUDE.md
@@ -296,9 +296,9 @@ python3 ${CLAUDE_PLUGIN_ROOT}/scripts/render_claude_md.py --workdir "$(pwd)"
 Print a one-paragraph summary:
 
 ```
-vault-bridge viz complete.
+vault-bridge visualization complete.
 
-  Type:        {viz_type}
+  Type:        {visualization_type}
   File:        {STEM}{EXT}
   Location:    {vault_path}/
   Description: {source_description}

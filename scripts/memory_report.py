@@ -34,7 +34,7 @@ VALID_SCAN_TYPES = {
     "reconcile",
     "revise",  # legacy alias for reconcile
     "vault-health",
-    "viz",
+    "visualization",
     "research",
     "probe",
 }
@@ -58,8 +58,8 @@ def _render(scan_type: str, stats: dict, timestamp: datetime) -> str:
         lines.append(f"- **Domain:** {stats['domain']}")
     if "dry_run" in stats:
         lines.append(f"- **Dry run:** {bool(stats['dry_run'])}")
-    if "viz_type" in stats:
-        lines.append(f"- **Viz type:** {stats['viz_type']}")
+    if "visualization_type" in stats:
+        lines.append(f"- **Visualization type:** {stats['visualization_type']}")
     if "source_description" in stats:
         lines.append(f"- **Description:** {stats['source_description']}")
     if "vault_path" in stats:

@@ -10,14 +10,33 @@ and writes a single config file:
 
 No config is written to `~/` or into the Obsidian vault. Everything lives in
 the working directory's `.vault-bridge/` folder. Works from any directory.
-Obsidian must be running for the capability probe (Step 6.6).
+Obsidian must be running for the capability probe (Step 7.6).
 
 NOTE: Users with multiple working directories for the same vault should run
 `/vault-bridge:setup` in each working directory. The migration path runs once
 per workdir. Future versions may share config across workdirs — currently not
 implemented.
 
-## Step 0 — detect existing config or legacy import
+## Step 0 — check for plugin updates
+
+Run a non-blocking update check:
+
+```bash
+python3 -c "
+import sys
+from pathlib import Path
+sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
+from plugin_version import format_update_notice
+notice = format_update_notice()
+if notice:
+    print(f'NOTE: {notice}', file=sys.stderr)
+"
+```
+
+If updates are available, tell the user:
+> " vault-bridge has template updates available. Run `/vault-bridge:self-update` after setup to install them."
+
+## Step 1 — detect existing config or legacy import
 
 ### 0a — check for existing v4 config
 
@@ -66,7 +85,7 @@ cfg = add_domain(cfg, new_domain)
 path = apply_and_save(Path.cwd(), cfg)
 print(f"Domain added. Config saved to: {path}")
 ```
-Then jump to **Step 6.5** to build the transport for the new domain only.
+Then jump to **Step 7.5** to build the transport for the new domain only.
 
 **B — Edit an existing domain:**
 List current domains by number. Ask which one to edit:
@@ -165,13 +184,13 @@ else:
     print("Nothing found to import.")
 ```
 
-If import succeeds (config is not None), **jump directly to Step 6.5**
+If import succeeds (config is not None), **jump directly to Step 7.5**
 (transport builder per domain). The rest of the interactive setup questions are
 not needed.
 
 If No → fall through to Step 1.
 
-## Step 1 — check dependencies
+## Step 2 — check dependencies
 
 Run the dependency check:
 
@@ -187,7 +206,7 @@ This checks:
   for vault-bridge to function
 
 **If the script exits 0:** all required deps present. Show the user any
-optional skill recommendations from the report, then continue to Step 2.
+optional skill recommendations from the report, then continue to Step 3.
 
 **If the script exits 2:** required deps missing. Print the report verbatim
 (it includes install hints for each missing item). Then STOP and tell the
@@ -197,7 +216,7 @@ vault-bridge cannot install other Claude Code plugins or skills automatically.
 The user must install them via `claude plugin marketplace add ...` and
 `claude plugin install ...`.
 
-## Step 2 — ask which Obsidian vault to use
+## Step 3 — ask which Obsidian vault to use
 
 Present via AskUserQuestion:
 
@@ -211,7 +230,7 @@ Verify the vault name:
 obsidian vault="$VAULT_NAME" search query="test" limit=1
 ```
 
-## Step 3 — ask how many domains
+## Step 4 — ask how many domains
 
 Before asking, briefly explain the vault-bridge data model so the user
 understands what they are configuring:
@@ -233,12 +252,12 @@ understands what they are configuring:
 > - **Multi-domain** — different archives for different types of work
 >   (e.g., architecture projects, photography, content creation)
 
-## Step 4 — configure each domain (loop)
+## Step 5 — configure each domain (loop)
 
 A **domain** is a top-level grouping of related archives — for example
 "Architecture Projects", "Photography", or "Content Creation". Each domain
 has its own archive folder, routing rules, and writes notes into its own
-vault subfolder. If the user picked "Simple" in Step 3 there is one
+vault subfolder. If the user picked "Simple" in Step 4 there is one
 domain; if "Multi-domain", we'll loop through as many as they want.
 
 For each domain:
@@ -283,10 +302,10 @@ appear in vault subfolders and frontmatter.
 
 Verify the path exists.
 
-### 4c. (No auto-detection — transport is configured in Step 6.5)
+### 4c. (No auto-detection — transport is configured in Step 7.5)
 
 The transport type (how to reach the archive) is no longer guessed here.
-`Domain.transport` starts as `None` and is bound during Step 6.5.
+`Domain.transport` starts as `None` and is bound during Step 7.5.
 
 ### 4d. Ask which domain template to start from
 
@@ -321,7 +340,7 @@ print(json.dumps(t))
 
 ### 4e. Build the domain dict
 
-Combine user input with the template. `transport=None` — will be set in Step 6.5.
+Combine user input with the template. `transport=None` — will be set in Step 7.5.
 
 ```python
 from config import Domain
@@ -330,7 +349,7 @@ domain = Domain(
     label=user_label,
     template_seed=template_name,
     archive_root=user_path,
-    transport=None,          # bound during Step 6.5 per domain
+    transport=None,          # bound during Step 7.5 per domain
     default_tags=list(template.get("default_tags", [])),
     fallback=template.get("fallback", "Inbox"),
     style=dict(template.get("style", {})),
@@ -350,7 +369,7 @@ If "multi-domain" was chosen in step 3, present via AskUserQuestion:
 
 If yes → loop back to 4a. If no → continue.
 
-## Step 5 — write config.json
+## Step 6 — write config.json
 
 Write the v4 config to `<workdir>/.vault-bridge/config.json`:
 
@@ -373,7 +392,7 @@ config = Config(
         'note_filename_pattern': 'YYYY-MM-DD topic.md',
     },
     active_domain=None,  # save_config auto-fills for single-domain setups
-    domains=configured_domains,  # list of Domain objects from Step 4
+    domains=configured_domains,  # list of Domain objects from Step 5
     project_overrides=ProjectOverrides(),
     discovered_structure={'last_walked_at': None, 'observed_subfolders': []},
 )
@@ -385,7 +404,7 @@ For single-domain setups, `save_config` automatically sets `active_domain`
 to the domain's name. For multi-domain setups, `active_domain` remains null
 and scan commands resolve the domain per-invocation via `domain_router`.
 
-## Step 6.5 — build transport per domain
+## Step 7.5 — build transport per domain
 
 For each configured domain, offer to build a transport using the
 `transport-builder` skill. AskUserQuestion per domain:
@@ -429,7 +448,7 @@ Present the valid ones as options. User picks one. Bind it via
 Leave `domain.transport = None`. User can build later with
 `/vault-bridge:build-transport --domain {domain.name}`.
 
-## Step 6.6 — capability probe per transport
+## Step 7.6 — capability probe per transport
 
 Iterate over domains that now have a transport bound (transport is not None).
 For each, ask for a sample archive path:
@@ -483,12 +502,12 @@ Skip domains with `transport=None` (no transport configured yet).
 
 If probe `ok: False`, print failing check details and present via AskUserQuestion:
 
-> - "Fix transport and retry probe" → loop back to Step 6.6
-> - "Skip probe and finish setup anyway (not recommended)" → proceed to Step 7
+> - "Fix transport and retry probe" → loop back to Step 7.6
+> - "Skip probe and finish setup anyway (not recommended)" → proceed to Step 8
 
-If probe `ok: True`, proceed to Step 7.
+If probe `ok: True`, proceed to Step 8.
 
-## Step 7 — install the Obsidian template (optional)
+## Step 8 — install the Obsidian template (optional)
 
 Present via AskUserQuestion:
 
@@ -503,7 +522,7 @@ If yes:
    obsidian create vault="$VAULT_NAME" name="vault-bridge-note" path="_Templates" content="$TEMPLATE_CONTENT" silent overwrite
    ```
 
-## Step 8 — verify and report
+## Step 9 — verify and report
 
 Verify the config is readable:
 

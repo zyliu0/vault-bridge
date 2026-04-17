@@ -16,7 +16,34 @@ The argument `$1` is the source folder path. Optional flags:
 - `--date-to YYYY-MM-DD` — skip events newer than this date
 - `--new-transport` — force-invoke the transport-builder regardless of existing state
 
-## Step 0 — ensure setup has been run and transport is healthy
+## Step 0 — check for plugin updates
+
+Run a non-blocking update check:
+
+```bash
+python3 -c "
+import sys
+from pathlib import Path
+sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
+from plugin_version import format_update_notice
+notice = format_update_notice()
+if notice:
+    print(f'NOTE: {notice}', file=sys.stderr)
+"
+```
+
+This prints a suggestion if new templates or a plugin update are available.
+If updates are available and the user has not run `/vault-bridge:self-update`,
+prompt them now via AskUserQuestion:
+
+> "vault-bridge has template updates available. Would you like to run `/vault-bridge:self-update` first?"
+>
+> - "Yes, update templates now"
+> - "No, continue with current templates"
+
+If the user chooses "Yes", interrupt this command and run `/vault-bridge:self-update` first.
+
+## Step 1 — ensure setup has been run and transport is healthy
 
 Before anything else, verify vault-bridge is configured for the current
 working directory and that Obsidian is reachable:

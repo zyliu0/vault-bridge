@@ -88,7 +88,7 @@ note that honestly says so.
   frontmatter, fixes fields, detects project-folder renames in the archive,
   and optionally re-reads sources and moves misrouted notes.
 
-- **`/vault-bridge:viz`** — generate a canvas, excalidraw, or marp deck from
+- **`/vault-bridge:visualization`** — generate a canvas, excalidraw, or marp deck from
   a description. No archive scan needed — writes the artifact directly into
   the vault.
 
@@ -298,7 +298,7 @@ vault-bridge/
 │   ├── heartbeat-scan.md        # autonomous delta scan
 │   ├── vault-health.md          # read-only vault audit
 │   ├── reconcile.md             # reconcile old notes with current schema + routing + archive state
-│   ├── viz.md                   # canvas/excalidraw/marp artifact generator
+│   ├── visualization.md         # canvas/excalidraw/marp artifact generator
 │   ├── research.md              # grounded open-web research report
 │   ├── build-transport.md       # LLM-authored archive transport module
 │   └── self-update.md           # force-refresh the upstream version check

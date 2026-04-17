@@ -12,6 +12,22 @@ Argument `$1` is a vault project folder to audit. `--all` switches to
 auditing every note with `plugin: vault-bridge` across all projects in
 the vault.
 
+## Step 0 — check for plugin updates
+
+Run a non-blocking update check:
+
+```bash
+python3 -c "
+import sys
+from pathlib import Path
+sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
+from plugin_version import format_update_notice
+notice = format_update_notice()
+if notice:
+    print(f'NOTE: {notice}', file=sys.stderr)
+"
+```
+
 ## Step 1 — load config
 
 Load the v3 config:

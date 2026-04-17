@@ -106,31 +106,31 @@ def test_cli_writes_report_with_stats_json(workdir):
 
 
 # ---------------------------------------------------------------------------
-# viz scan type — new tests (Phase 1d)
+# visualization scan type — new tests (Phase 1d)
 # ---------------------------------------------------------------------------
 
-def test_viz_in_valid_scan_types():
-    """'viz' must be a member of VALID_SCAN_TYPES."""
-    assert "viz" in mr.VALID_SCAN_TYPES
+def test_visualization_in_valid_scan_types():
+    """'visualization' must be a member of VALID_SCAN_TYPES."""
+    assert "visualization" in mr.VALID_SCAN_TYPES
 
 
-def test_write_report_viz_filename_pattern(workdir):
-    """write_report with scan_type='viz' produces a *_viz.md filename."""
+def test_write_report_visualization_filename_pattern(workdir):
+    """write_report with scan_type='visualization' produces a *_visualization.md filename."""
     stats = {"counts": {"files_written": 1}}
-    path = mr.write_report(workdir, "viz", stats)
+    path = mr.write_report(workdir, "visualization", stats)
     assert path.exists()
-    assert path.name.endswith("_viz.md")
+    assert path.name.endswith("_visualization.md")
     assert path.parent == workdir / ".vault-bridge" / "reports"
 
 
-def test_write_report_viz_renders_viz_stats(workdir):
-    """viz-specific stats keys appear in the rendered body."""
+def test_write_report_visualization_renders_stats(workdir):
+    """visualization-specific stats keys appear in the rendered body."""
     stats = {
-        "viz_type": "canvas",
+        "visualization_type": "canvas",
         "source_description": "Kickoff",
         "vault_path": "2408 Sample/",
     }
-    path = mr.write_report(workdir, "viz", stats)
+    path = mr.write_report(workdir, "visualization", stats)
     content = path.read_text()
     assert "canvas" in content
     assert "Kickoff" in content

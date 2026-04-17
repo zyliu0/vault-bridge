@@ -4,6 +4,24 @@ allowed-tools: Read, Bash, Glob, Grep, AskUserQuestion
 argument-hint: "[project-folder-path] [--dry-run] [--re-read] [--move] [--migrate-v2] [--classify]"
 ---
 
+## Step 0 — check for plugin updates
+
+Run a non-blocking update check:
+
+```bash
+python3 -c "
+import sys
+from pathlib import Path
+sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
+from plugin_version import format_update_notice
+notice = format_update_notice()
+if notice:
+    print(f'NOTE: {notice}', file=sys.stderr)
+"
+```
+
+If updates are available, inform the user that they can run `/vault-bridge:self-update` after reconcile.
+
 You are reconciling existing vault notes in a project folder so they match
 the current vault-bridge frontmatter schema, current routing rules, and the
 current archive state. Notes may have been written before vault-bridge

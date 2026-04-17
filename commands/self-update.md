@@ -1,34 +1,125 @@
 ---
-description: Force-refresh the upstream version check for vault-bridge and companion plugins.
-allowed-tools: Bash
+description: Check for vault-bridge updates and install new or changed templates.
+allowed-tools: Read, Bash, AskUserQuestion
 ---
 
-Force an immediate update check against GitHub for vault-bridge and its companion
-plugins, bypassing the cache TTL. Prints any available update notices and reports
-the result.
+You are running the vault-bridge self-update command. Your job is to check
+for plugin updates and, if any are found, offer to install new or changed
+templates from the plugin template bank into the vault's
+`_Templates/vault-bridge/` folder.
 
-## Step 1 — run the update check with --force
+## Step 0 — check plugin version
+
+Run the version check:
 
 ```bash
-python3 "${CLAUDE_PLUGIN_ROOT}/scripts/update_check.py" \
-  --plugin-root "${CLAUDE_PLUGIN_ROOT}" \
-  --force
+python3 -c "
+import sys
+from pathlib import Path
+sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
+from plugin_version import (
+    get_installed_version, get_git_sha,
+    get_templates_installed, is_first_run, check_for_updates,
+    format_update_notice
+)
+from template_bank import list_templates, get_template_diff, format_diff_summary
+
+plugin_root = Path('${CLAUDE_PLUGIN_ROOT}')
+installed_version = get_installed_version()
+current_sha = get_git_sha(plugin_root)
+templates_installed = get_templates_installed()
+first_run = is_first_run()
+
+print(f'installed_version={installed_version}')
+print(f'current_sha={current_sha}')
+print(f'first_run={first_run}')
+print(f'templates_installed_count={len(templates_installed)}')
+
+diff = get_template_diff(templates_installed)
+print(f'added={len(diff.added)}')
+print(f'modified={len(diff.modified)}')
+print(f'deleted={len(diff.deleted)}')
+print('---')
+print(format_diff_summary(diff))
+"
 ```
 
-Capture stderr output (the notices are printed to stderr). If the command exits
-non-zero for any reason, note the error but do not fail.
+Read the output to determine:
+- If `first_run=true` → this is a first installation, offer to install all templates
+- If `added + modified + deleted > 0` → template changes detected
+- If all zero → no template changes, but version may still differ
 
-## Step 2 — relay the result to the user
+## Step 1 — ask whether to update templates
 
-If there were update notices, display each one clearly.
+Present an AskUserQuestion to the user:
 
-If `vault-bridge: update available` appeared in the output:
-- Remind the user to run `git pull` inside the plugin root (shown in the notice)
-  and then restart Claude Code.
+> "vault-bridge has detected template changes. What would you like to do?"
+>
+> Options:
+> - "Update all templates" — install all new and updated templates
+> - "Review individually" — choose which templates to update one by one
+> - "Skip templates" — keep installed templates as-is
 
-If `vault-bridge: upstream changed` appeared for a companion plugin:
-- Suggest running `/vault-bridge:setup` or `claude plugin update <name>` as
-  appropriate.
+## Step 2 — if "Update all"
 
-If there were no notices, tell the user:
-"All tracked plugins are up to date (or no change detected since last check)."
+Run the installer for all changed templates:
+
+```bash
+python3 -c "
+import sys, json
+from pathlib import Path
+sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
+from template_bank import list_templates, get_template_diff
+from template_installer import install_templates
+from plugin_version import save_version, get_git_sha
+
+plugin_root = Path('${CLAUDE_PLUGIN_ROOT}')
+templates_installed = {}
+
+# Install all added + modified
+diff = get_template_diff({})  # fresh diff against bank
+templates_to_install = [t.relative_path for t in diff.added + diff.modified]
+
+if templates_to_install:
+    result = install_templates(templates_to_install, plugin_root, dry_run=False)
+    for p in result.installed:
+        templates_installed[p] = 'installed'
+    for e in result.errors:
+        print(f'ERROR: {e}', file=sys.stderr)
+
+# Save new version
+new_version = get_git_sha(plugin_root)
+save_version(new_version, templates_installed)
+print(f'Installed {len(result.installed)} template(s), {len(result.errors)} error(s)')
+"
+```
+
+## Step 3 — if "Review individually"
+
+Present a multi-select AskUserQuestion listing all changed templates:
+
+> "Select which templates to install:"
+>
+> Options (one per changed template):
+> - "+ {relative_path}" (for added templates)
+> - "~ {relative_path}" (for modified templates)
+> - "- {relative_path}" (for deleted templates)
+
+Install only the selected templates using the same installer script above,
+filtering to only the user-selected paths.
+
+## Step 4 — report result
+
+Print a summary:
+
+```
+vault-bridge self-update complete.
+
+  Templates installed: {N}
+  Templates skipped:    {M}
+  Errors:               {E}
+
+  Plugin version: {sha}
+```
+
+If there were errors, list them individually.

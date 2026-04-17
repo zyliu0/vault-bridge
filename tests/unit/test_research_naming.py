@@ -42,7 +42,7 @@ def test_cjk_only_topic_returns_non_empty_stem():
     assert ext == ".md"
     # stem must be non-empty and start with date
     assert stem.startswith("2026-04-16")
-    # slug portion must be non-empty (fallback e.g. "viz" or "research")
+    # slug portion must be non-empty (fallback e.g. "visualization" or "research")
     slug_part = stem.split(" ", 1)[1] if " " in stem else ""
     assert len(slug_part) > 0
 
