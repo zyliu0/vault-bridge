@@ -20,7 +20,7 @@ if str(_HERE) not in sys.path:
 from config import Config, Domain, config_path  # noqa: E402
 
 _UPDATABLE_DOMAIN_FIELDS = frozenset(
-    {"label", "archive_root", "template_seed", "default_tags", "fallback"}
+    {"label", "archive_root", "template_seed", "default_tags", "fallback", "calendar_sync"}
 )
 _UPDATABLE_GLOBAL_FIELDS = frozenset(
     {"vault_name", "fabrication_stopwords", "global_style"}

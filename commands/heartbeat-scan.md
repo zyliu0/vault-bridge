@@ -335,6 +335,66 @@ For each delta file, follow the same per-event pipeline as retro-scan:
 The file_type enum applies as in retro-scan: folder, pdf, docx, pptx, xlsx,
 jpg, png, psd, ai, dxf, dwg, rvt, 3dm, mov, mp4, image-folder.
 
+## Step 5b — calendar sync (opt-in)
+
+After the per-event loop (Step 5.1–5.10) completes for all delta files,
+for each note that was newly written, check whether calendar sync applies
+and create a Google Calendar event.
+
+This step is non-blocking: if calendar sync fails, warn and continue.
+Heartbeat must never exit non-zero due to calendar issues.
+
+**For each newly-written note:**
+
+1. Check if `domain.calendar_sync` is True. If False, skip entirely.
+
+2. Check `calendar_event_id` in the note's frontmatter:
+   ```
+   obsidian read vault="$VAULT_NAME" path="$PROJECT/$SUBFOLDER/$NOTE_NAME.md" | grep -i calendar_event_id
+   ```
+   If already set, skip — already synced (deduplication by frontmatter).
+
+3. Build the calendar event payload using `calendar_sync.py` helpers:
+   ```python
+   import sys
+   sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
+   import calendar_sync as cs
+
+   summary = NOTE_NAME  # e.g. "2024-09-09 client review"
+   event_date = EVENT_DATE  # YYYY-MM-DD, already computed in Step 5.1
+   start_dt, end_dt = cs.format_all_day_event(event_date)
+   description = cs.build_event_description(
+       note_path="$PROJECT/$SUBFOLDER/$NOTE_NAME.md",
+       source_path="$SOURCE_PATH",
+   )
+   ```
+
+4. Call the Google Calendar MCP to create the event:
+   ```
+   mcp__claude_ai_Google_Calendar__create_event(
+       summary=summary,
+       start_time=start_dt,
+       end_time=end_dt,
+       description=description,
+       calendar_id="primary"
+   )
+   ```
+
+5. On success, store the returned `event_id` in the note's frontmatter:
+   ```
+   obsidian property:set vault="$VAULT_NAME" path="$PROJECT/$SUBFOLDER/$NOTE_NAME.md" key="calendar_event_id" value="$EVENT_ID"
+   ```
+   Add `calendar_event_id` to the note's frontmatter template so future
+   heartbeat runs skip this note.
+
+6. On any failure (MCP unavailable, auth error, network error):
+   - Add a warning to the stats: `"calendar-sync-skipped: {note_name}: {reason}"`
+   - Do NOT block, retry, or fail the scan
+   - Log to `~/.vault-bridge/heartbeat.log`: `"heartbeat: calendar sync skipped for {note_name}: {reason}"`
+
+**Counts update:** Add `calendar_events_created: N` to the Step 8 stats JSON,
+where N is the number of events successfully created this run.
+
 ## Highlights, callouts, and canvas — same rules as retro-scan
 
 **Highlights** (`==text==`) — mark key facts (dates, amounts, decisions,
@@ -395,7 +455,7 @@ python3 ${CLAUDE_PLUGIN_ROOT}/scripts/memory_report.py heartbeat \
 
 Where `$STATS_JSON` includes: `started`, `finished`, `duration_sec`,
 `counts` (object: scanned, new, modified, removed, notes_written,
-domains_scanned, ambiguous_skipped), `notes_written` (list),
+domains_scanned, ambiguous_skipped, calendar_events_created), `notes_written` (list),
 `warnings`, `errors`, and optional `notes`. Write the report even when
 the scan was a no-op (nothing changed) or skipped due to the scan lock —
 silence is worse than an empty-stats report because the user can't tell

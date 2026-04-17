@@ -95,6 +95,7 @@ class Domain:
     routing_patterns: List[Dict[str, str]] = field(default_factory=list)
     content_overrides: List[Dict[str, str]] = field(default_factory=list)
     skip_patterns: List[str] = field(default_factory=list)
+    calendar_sync: bool = False
 
     @classmethod
     def from_dict(cls, d: dict) -> "Domain":
@@ -110,6 +111,7 @@ class Domain:
             routing_patterns=list(d.get("routing_patterns", [])),
             content_overrides=list(d.get("content_overrides", [])),
             skip_patterns=list(d.get("skip_patterns", [])),
+            calendar_sync=bool(d.get("calendar_sync", False)),
         )
 
     def to_dict(self) -> dict:
@@ -125,6 +127,7 @@ class Domain:
             "routing_patterns": list(self.routing_patterns),
             "content_overrides": list(self.content_overrides),
             "skip_patterns": list(self.skip_patterns),
+            "calendar_sync": self.calendar_sync,
         }
 
 

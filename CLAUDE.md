@@ -83,6 +83,7 @@ vault-bridge supports multiple domains in a single vault. Each domain has:
 - `fallback` — subfolder when no pattern matches
 - `default_tags` — tags applied to every note in this domain
 - `style` — writing voice, word count, filename pattern
+- `calendar_sync` — if `true`, heartbeat-scan creates a Google Calendar all-day event for each new note (opt-in per domain)
 
 Config is stored at `<workdir>/.vault-bridge/config.json`. Run `/vault-bridge:setup`
 to configure. The setup wizard asks structured questions — no YAML editing
