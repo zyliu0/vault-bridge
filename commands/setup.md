@@ -109,11 +109,23 @@ obsidian vault="$VAULT_NAME" search query="test" limit=1
 
 ## Step 3 — ask how many domains
 
-Present via AskUserQuestion with options:
+Before asking, briefly explain the vault-bridge data model so the user
+understands what they are configuring:
 
-> "How do you want to organize your archive?"
+> "Here's how vault-bridge organizes your work:
 >
-> - **Simple** — one archive folder, one domain
+> - **Domain** — a top-level category of work, like 'Architecture Projects'
+>   or 'Photography'. Each domain has its own archive folder and its own
+>   top-level section in your vault.
+> - **Project** — a folder inside a domain, like '2408 Sample Project' or
+>   '2024 Client Shoot'. It maps directly to a folder in your archive.
+> - **Event** — a single diary note inside a project, representing one
+>   meaningful milestone: a site visit, a deliverable, a shoot day. One
+>   event = one note.
+>
+> How do you want to organize your archive?"
+>
+> - **Simple** — one archive folder, one domain (most people start here)
 > - **Multi-domain** — different archives for different types of work
 >   (e.g., architecture projects, photography, content creation)
 
@@ -132,17 +144,18 @@ For each domain:
 Present via AskUserQuestion (free text needed here). Phrase the prompt so
 the user knows what's being asked and where they are in the loop:
 
-> **First domain**: "What would you like to call the first grouping of
->   archives? A domain is a category of work — examples: 'Architecture
->   Projects', 'Photography', 'Content Creation'."
+> **First domain**: "What would you like to call the first domain?
+>   A domain is a top-level category of work — all its projects share
+>   the same archive folder and will appear under one vault section.
+>   Examples: 'Architecture Projects', 'Photography', 'Content Creation'."
 >
 > **Simple mode (only one domain)**: "What would you like to call this
->   archive? This is a short, human-readable label — examples:
->   'Architecture Projects', 'My Photos', 'Research Notes'."
+>   archive? This is a short, human-readable label for your one domain.
+>   Examples: 'Architecture Projects', 'My Photos', 'Research Notes'."
 >
 > **Nth domain (N ≥ 2)**: "What would you like to call the next domain?
->   Examples so far: {already_configured_labels}. Examples of new ones:
->   'Photography', 'Writing', 'Research'."
+>   Domains already configured: {already_configured_labels}.
+>   Examples of new ones: 'Photography', 'Writing', 'Research'."
 
 The answer is the human-readable **label** (spaces and capitals allowed).
 Auto-generate the internal `name` slug by lowercasing, replacing spaces
@@ -153,12 +166,16 @@ appear in vault subfolders and frontmatter.
 
 ### 4b. Ask where the archive lives
 
-> "Where is the archive for {domain_label}?"
+> "Where is the archive root for '{domain_label}'?
+>
+> This is the folder that contains your project folders — not a single
+> project, but the parent directory that holds all of them. Each
+> sub-folder in here will become a project in vault-bridge.
 >
 > Examples:
-> - `/volume1/projects/` (NAS)
-> - `~/Documents/Archive/` (local)
-> - `/Volumes/Projects/` (external drive)
+> - `/volume1/projects/` — a NAS share where each sub-folder is a project
+> - `~/Documents/Architecture/` — local folder with one sub-folder per job
+> - `/Volumes/Photos/ClientWork/` — an external drive"
 
 Verify the path exists.
 
@@ -171,7 +188,12 @@ The transport type (how to reach the archive) is no longer guessed here.
 
 Present via AskUserQuestion with options:
 
-> "What kind of files does '{domain_label}' contain?"
+> "What kind of files does '{domain_label}' contain?
+>
+> Choose the template that best matches your work. This sets the default
+> sub-folder routing inside each project (e.g., an architecture project
+> gets SD/DD/CD/CA folders; a photography project gets Selects/Raw/Edited).
+> You can customize these routing rules at any time after setup."
 >
 > - **Architecture / design** — phase folders (SD/DD/CD), drawings, renderings
 > - **Photography** — _Selects, _Contact, edit/raw subfolders
