@@ -325,6 +325,10 @@ For each delta file, follow the same per-event pipeline as retro-scan:
    detected from the delta side), update the index and skip note write
 4. Route to the vault subfolder via `routing.patterns`
 5. Read the file content (Template A) or mark metadata-only (Template B)
+5b. For Template B notes: inject proactive wikilinks before writing.
+   Run `link_strategy.find_linking_candidates()` and append `## Related notes`
+   wikilinks via `link_strategy.build_related_notes_section()`.
+   This is non-interactive — if no candidates found, write Template B as-is.
 6. Apply the fabrication firewall stop-word list
 7. Build frontmatter with the required fields in canonical order:
    `schema_version: 2`, `plugin: vault-bridge`, `domain`, `project`,
@@ -474,7 +478,7 @@ python3 ${CLAUDE_PLUGIN_ROOT}/scripts/memory_report.py heartbeat \
 
 Where `$STATS_JSON` includes: `started`, `finished`, `duration_sec`,
 `counts` (object: scanned, new, modified, removed, notes_written,
-domains_scanned, ambiguous_skipped, calendar_events_created), `notes_written` (list),
+domains_scanned, ambiguous_skipped, orphaned_notes_avoided, calendar_events_created), `notes_written` (list),
 `warnings`, `errors`, and optional `notes`. Write the report even when
 the scan was a no-op (nothing changed) or skipped due to the scan lock —
 silence is worse than an empty-stats report because the user can't tell

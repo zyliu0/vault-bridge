@@ -1,16 +1,17 @@
 ---
 description: Audit the vault for issues introduced by scanning
 allowed-tools: Read, Glob, Grep, Bash
-argument-hint: "[project-path] [--all]"
+argument-hint: "[project-path] [--all] [--fix]"
 ---
 
-You are running a vault health audit. This is a READ-ONLY command — it
-reads every vault-bridge note under the given project folder and reports
-issues. It NEVER modifies notes and NEVER writes anything to `_Attachments/`.
+You are running a vault health audit. This is a READ-ONLY command unless
+`--fix` is passed — it reads every vault-bridge note under the given project
+folder and reports issues.
 
 Argument `$1` is a vault project folder to audit. `--all` switches to
 auditing every note with `plugin: vault-bridge` across all projects in
-the vault.
+the vault. `--fix` attempts to fix orphaned notes (Check 1) by adding
+wikilinks via the link_strategy module.
 
 ## Step 0 — check for plugin updates
 
@@ -94,6 +95,15 @@ are present in the vault from previous plugin versions, exclude them from
 the orphan check — the current plugin no longer writes any of these into
 the vault (reports live in `<workdir>/.vault-bridge/reports/`). Flag them
 in the report under "Legacy plugin artifacts" so the user can delete them.
+
+**If `--fix` is set:** After Check 1 completes (orphan detection), run:
+```bash
+python3 ${CLAUDE_PLUGIN_ROOT}/scripts/link_strategy.py fix-orphans \
+  --workdir "$(pwd)" --vault "$VAULT_NAME" \
+  $([ -n "$1" ] && echo "--project $1")
+```
+This appends wikilinks to all orphaned notes found in Check 1 non-interactively.
+Add `orphans_fixed: N` to the report counts.
 
 ### Check 2 — Broken source_paths
 
@@ -189,6 +199,8 @@ Scanned {N} notes with `plugin: vault-bridge`.
 ## Orphan notes ({count})
 - `path/to/note.md` — no incoming wikilinks
 - ...
+
+(If `--fix` was set: {N} orphans fixed with wikilinks.)
 
 ## Broken source_paths ({count})
 - `path/to/note.md` → `/nas/path/that/no/longer/exists`

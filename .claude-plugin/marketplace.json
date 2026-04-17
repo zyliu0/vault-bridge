@@ -11,7 +11,7 @@
       "description": "Archive-to-Obsidian vault bridge with multi-domain support, retroactive scanning, heartbeat delta sync, and fabrication-safe diary notes.",
       "source": "./",
       "category": "productivity",
-      "version": "10.0.0",
+      "version": "11.0.0",
       "license": "MIT",
       "keywords": ["obsidian", "vault", "archive", "multi-domain", "photography", "social-media", "research"]
     }

@@ -690,6 +690,51 @@ No "the review". Just the literal metadata.
 **Reason not read** may be one of: `file type excluded`, `read limit reached (cache guard)`,
 `access pattern unavailable`, `extraction failed`, `not attempted`.
 
+### 6e-2. Proactive wikilinks for Template B notes
+
+After building the Template B body, BEFORE writing, check whether this note
+would be orphaned (no incoming wikilinks from other vault-bridge notes).
+If wikilinks can be found, inject them into the body to prevent orphan status.
+
+**This step fires for every Template B write**, regardless of whether the
+read limit was hit or the file type is intentionally metadata-only.
+
+Run:
+```bash
+python3 -c "
+import sys, json
+from pathlib import Path
+sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
+import link_strategy as ls
+
+orphan = {
+    'project': '${PROJECT}',
+    'domain': '${DOMAIN}',
+    'source_path': '${SOURCE_PATH}',
+    'file_type': '${FILE_TYPE}',
+    'event_date': '${EVENT_DATE}',
+    'vault_path': '${PROJECT}/${SUBFOLDER}/${NOTE_NAME}.md',
+}
+workdir = Path('${WORKDIR}')
+vault_name = '${VAULT_NAME}'
+
+# Find linking candidates
+candidates = ls.find_linking_candidates(orphan, workdir, vault_name, max_candidates=5)
+section = ls.build_related_notes_section(candidates, max_links=5)
+print(json.dumps({'section': section, 'candidate_count': len(candidates)}))
+"
+```
+
+If `section` is non-empty, inject it into the Template B body:
+```
+BODY_WITH_LINKS = TEMPLATE_B_BODY + "\n\n" + SECTION + "\n"
+```
+
+If `section` is empty, use `TEMPLATE_B_BODY` unchanged.
+
+Log: if `candidate_count > 0`, record `orphaned_notes_avoided: N` in the
+scan summary (Step 9).
+
 ### 6f. Highlights and callouts (Template A only)
 
 When writing Template A note bodies, use Obsidian formatting to surface
@@ -932,6 +977,7 @@ Collect the scan summary fields in memory for the Step 9 report:
 - Events processed / skipped / failed counts
 - Total `read_file` calls made and bytes read
 - Template A vs Template B counts
+- orphaned_notes_avoided: notes that would have been orphaned but got wikilinks proactively
 - Any renames detected
 - Any self-check findings
 
@@ -959,7 +1005,7 @@ python3 ${CLAUDE_PLUGIN_ROOT}/scripts/memory_report.py retro \
 Where `$STATS_JSON` is a JSON object with (all optional but include what
 you know): `started`, `finished`, `duration_sec`, `workdir`, `source`,
 `domain`, `dry_run`, `counts` (object: events, written, skipped, failed,
-template_a, template_b, renames, new_subfolders_discovered, categories_added,
+template_a, template_b, orphaned_notes_avoided, renames, new_subfolders_discovered, categories_added,
 skipped_subfolders, routed_to_fallback), `notes_written` (list of vault paths),
 `warnings` (list of strings), `errors` (list of strings), and optional
 freeform `notes` (string).

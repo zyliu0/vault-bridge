@@ -1,7 +1,7 @@
 ---
 description: Reconcile existing vault notes with the current schema, routing rules, and archive state
 allowed-tools: Read, Bash, Glob, Grep, AskUserQuestion
-argument-hint: "[project-folder-path] [--dry-run] [--re-read] [--move] [--migrate-v2] [--classify]"
+argument-hint: "[project-folder-path] [--dry-run] [--re-read] [--move] [--migrate-v2] [--classify] [--orphans]"
 ---
 
 ## Step 0 — check for plugin updates
@@ -542,6 +542,47 @@ If no: skip, note the discrepancy in the final report.
 
 If "skip all": stop asking for the rest of the notes. No more moves.
 
+## Phase 2g — Fix orphaned notes (only if --orphans flag is set)
+
+When `--orphans` is passed, after Phase 2f completes, scan all notes in the
+project that have no incoming wikilinks and fix them using the link_strategy
+module.
+
+**This phase is non-interactive** — wikilinks are created automatically based
+on project, date proximity, and path proximity rules. The user is NOT prompted.
+
+### 2g-1. Find orphaned notes
+
+Run:
+```bash
+python3 ${CLAUDE_PLUGIN_ROOT}/scripts/link_strategy.py find-orphans \
+  --workdir "$(pwd)" --vault "$VAULT_NAME" --project "$PROJECT_NAME"
+```
+
+Filter results to notes in this project.
+
+### 2g-2. For each orphan, apply wikilinks
+
+For each orphaned note:
+1. Call `find_linking_candidates()` to get candidate notes to link to
+2. Call `build_related_notes_section()` to build `## Related notes` wikilinks
+3. Call `append_related_notes()` to add wikilinks to the note
+
+If a note already has a `## Related notes` section, append additional wikilinks
+below the existing section (don't duplicate).
+
+### 2g-3. Counts
+
+Track:
+- `orphans_found: N` — total orphans detected
+- `orphans_fixed: N` — orphans that received ≥1 wikilink
+- `orphans_no_candidates: N` — orphans with no linkable candidates
+
+### 2g-4. Dry-run support
+
+If `--dry-run` is set, output the orphan list and what wikilinks would be
+added without modifying any notes.
+
 ## Phase 5 — Interactive structure discovery (only if --classify flag is set)
 
 Walk the archive root under the project folder and classify subfolders that
@@ -647,7 +688,7 @@ Where `$STATS_JSON` includes: `started`, `finished`, `duration_sec`,
 `source` (project folder), `domain`, `dry_run`, `counts` (object:
 notes_found, upgraded, already_valid, validation_failed, moved,
 index_entries_added, meta_only_rewritten, meta_only_kept, rescan_failed,
-flagged_unverified), `notes_written` (list of vault paths that were rewritten)
+flagged_unverified, orphans_found, orphans_fixed, orphans_no_candidates), `notes_written` (list of vault paths that were rewritten)
 
 Write the report even on dry-runs and on failure — the user relies on
 this to know what this reconcile run actually did.
