@@ -517,6 +517,28 @@ then STOP before processing. No file reads, no note writes, no index updates.
 
 For each detected event, in chronological order:
 
+### Hard read rate limit
+
+**CRITICAL — cache exhaustion guard:** During a single retro-scan session,
+reading more than **20 files** risks exhausting the context cache, causing
+subsequent reads to silently fail and produce Template B (metadata-only)
+notes for files that should have been read.
+
+Hardcoded rule:
+- Track `files_read_this_session` starting at `0`
+- For each file that would be read (PDF, DOCX, PPTX, XLSX, PSD, AI, DWG,
+  DXF, or representative files inside a folder): increment `files_read_this_session`
+- If `files_read_this_session == 20`, **stop reading new files**. All remaining
+  events for this scan session → Template B (metadata-only). Log:
+  `Read limit reached ({N} files). Remaining events will be metadata-only to avoid cache exhaustion.`
+- If `files_read_this_session > 20`, always use Template B — do not attempt
+  to read, do not increment the counter further
+
+This is a hard rule baked into the plugin. It cannot be overridden by the
+user mid-scan. The limit exists because the model shares context across
+the session — large file reads accumulate in cache even when individual
+files are small.
+
 ### 6a. Compute event_date
 
 Run:
@@ -640,6 +662,9 @@ NAS: `{source_path}`
 
 No prose. No framing. No "probably". No comparisons across files. No "the team".
 No "the review". Just the literal metadata.
+
+**Reason not read** may be one of: `file type excluded`, `read limit reached (cache guard)`,
+`access pattern unavailable`, `extraction failed`, `not attempted`.
 
 ### 6f. Highlights and callouts (Template A only)
 
