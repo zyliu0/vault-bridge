@@ -79,7 +79,7 @@ json.dump({'by_path': by_path, 'by_fp': by_fp}, open('/tmp/_vh_index.json', 'w')
 "
 ```
 
-## Step 4 — run the 5 checks on every note in scope
+## Step 4 — run the 6 checks on every note in scope
 
 For each note:
 
@@ -140,6 +140,24 @@ frontmatter field does NOT match the index's `source_path` column, that's
 a rename that was recorded in the index but the note was not updated.
 Flag it for manual review.
 
+### Check 6 — Missing or broken attachments
+
+For each note, read the `attachments` frontmatter field (a list of vault
+attachment filenames, e.g. `["2024-09-01--photo--a1b2c3d4.jpg"]`).
+
+Verify each file exists in the vault's `_Attachments/` folder:
+
+```bash
+obsidian read vault="$VAULT_NAME" path="_Attachments/<attachment-filename>"
+```
+
+If any attachment filename is listed in frontmatter but the file does not
+exist in `_Attachments/`, flag it:
+> `path/to/note.md` → `_Attachments/<filename>` missing
+
+Note: this check only validates that the attachment file exists in the
+vault. It does NOT verify the file is non-empty or uncorrupted.
+
 ## Step 5 — write the health report to the WORKING FOLDER (not the vault)
 
 **Do NOT write the report into the vault.** The vault is reserved for real
@@ -154,7 +172,7 @@ python3 ${CLAUDE_PLUGIN_ROOT}/scripts/memory_report.py vault-health \
 
 Where `$STATS_JSON` embeds the full report under the `notes` field and
 breaks the counts (orphan_notes, broken_source_paths, schema_drift,
-duplicate_events, stale_renames) into the `counts` object. The memory
+duplicate_events, stale_renames, missing_attachments) into the `counts` object. The memory
 report helper writes
 `<workdir>/.vault-bridge/reports/{YYYY-MM-DD}_{HH-MM-SS}_vault-health.md`.
 
@@ -190,6 +208,10 @@ Scanned {N} notes with `plugin: vault-bridge`.
 
 ## Stale rename candidates ({count})
 - Note `path/to/note.md` has source_path `/nas/old` but index says `/nas/new`
+
+## Missing or broken attachments ({count})
+- `path/to/note.md` → `_Attachments/<filename>` missing
+- ...
 
 ---
 
