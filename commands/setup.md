@@ -17,9 +17,113 @@ NOTE: Users with multiple working directories for the same vault should run
 per workdir. Future versions may share config across workdirs — currently not
 implemented.
 
-## Step 0 — detect and offer to import legacy config
+## Step 0 — detect existing config or legacy import
 
-Check for legacy config before running the dependency check:
+### 0a — check for existing v4 config
+
+Check whether a v4 config already exists in the current working directory:
+
+```python
+import sys
+from pathlib import Path
+sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
+from config import config_path, load_config, SetupNeeded
+
+cfg_p = config_path(Path.cwd())
+has_v4_config = cfg_p.exists()
+```
+
+If `has_v4_config` is True, load and summarize it:
+
+```python
+from setup_edit import summarize_config
+cfg = load_config(Path.cwd())
+summary = summarize_config(cfg)
+print(summary)
+```
+
+Present via AskUserQuestion:
+
+> "vault-bridge is already configured in this directory. What would you like to do?
+>
+> {summary}"
+>
+> - **A — Add a new domain** — keeps all existing domains, adds one more
+> - **B — Edit an existing domain** — change label, archive path, template, or fallback
+> - **C — Edit global settings** — vault name, writing style, fabrication stopwords
+> - **D — Full reset** — erase everything and run the full setup wizard from scratch
+> - **E — Cancel** — exit without making any changes
+
+**Route by choice:**
+
+**E — Cancel:** Print "Setup cancelled. No changes made." and stop.
+
+**A — Add a new domain:**
+Run steps **4a through 4e** once for one new domain, then call:
+```python
+from setup_edit import add_domain, apply_and_save
+cfg = add_domain(cfg, new_domain)
+path = apply_and_save(Path.cwd(), cfg)
+print(f"Domain added. Config saved to: {path}")
+```
+Then jump to **Step 6.5** to build the transport for the new domain only.
+
+**B — Edit an existing domain:**
+List current domains by number. Ask which one to edit:
+> "Which domain would you like to edit?
+> {numbered list from summary}"
+
+Then ask which field:
+> "What would you like to change?
+> - Label (current: {label})
+> - Archive root (current: {archive_root})
+> - Template (current: {template_seed})
+> - Fallback subfolder (current: {fallback})
+> - Default tags (current: {default_tags})"
+
+Collect the new value and apply:
+```python
+from setup_edit import update_domain, apply_and_save
+cfg = update_domain(cfg, domain_name, **{field: new_value})
+path = apply_and_save(Path.cwd(), cfg)
+print(f"Domain updated. Config saved to: {path}")
+```
+Print a confirmation and stop (no transport rebuild needed for field edits).
+
+**C — Edit global settings:**
+Show current values and ask what to change:
+> "Global settings:
+> - Vault name: {vault_name}
+> - Writing voice: {global_style.get('writing_voice')}
+> - Fabrication stopwords: {fabrication_stopwords}
+>
+> Which setting would you like to change?"
+
+Collect the new value and apply:
+```python
+from setup_edit import update_global, apply_and_save
+cfg = update_global(cfg, **{field: new_value})
+path = apply_and_save(Path.cwd(), cfg)
+print(f"Global settings updated. Config saved to: {path}")
+```
+Print a confirmation and stop.
+
+**D — Full reset:**
+Warn the user:
+> "This will erase the config for {len(cfg.domains)} domain(s): {domain_labels}.
+> Any transport modules in `.vault-bridge/transports/` will NOT be deleted.
+> Are you sure?"
+> - Yes, reset
+> - Cancel
+
+If Cancel → print "Reset cancelled." and stop.
+If Yes → delete `cfg_p` and fall through to **Step 1** (full wizard).
+
+---
+
+### 0b — check for legacy config (only if no v4 config exists)
+
+If `has_v4_config` is False, check for legacy config before running the dependency check:
 
 ```python
 import sys, os
