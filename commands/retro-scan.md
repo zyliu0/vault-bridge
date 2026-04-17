@@ -481,15 +481,33 @@ continuing to Step 5.
 
 ## Step 5 — detect events
 
-The unit of scanning is an EVENT, not a file. Event detection rules:
+The unit of scanning is an EVENT, not a file. The fundamental rules:
 
-- **Date-stamped folder** (name matches YYMMDD or YYYY-MM-DD prefix) → always 1 event
-- **Standalone PDF, DOCX, PPTX, XLSX** not inside a date-stamped folder → 1 event
-- **Folder of >3 images with similar creation dates** → 1 event (one note, sampled 10 images)
-- **Single image ≥500KB** standalone → 1 event
-- **Single image <500KB** → skip (not an event, not embedded)
+> **A folder in the archive = one event. Images and files are attachments
+> within an event, never separate events.**
+>
+> **Related folders may be combined into a single event.** If multiple folders
+> share the same date prefix, project, or purpose, they can be merged into one
+> note instead of generating separate notes for each.
+>
+> **Standalone files without a parent folder are not independent events.** If
+> a file is related to an existing event or folder, link it to that event or
+> group it in. Only create a standalone event for an orphan file if it truly
+> stands alone with no connections.
+
+Event detection rules:
+
+- **Any folder** → 1 event (the folder itself). Images inside are embedded
+  as attachments via the image pipeline (sampled up to 10 if >10).
+- **Related folders** (same date prefix, sequential naming, shared purpose)
+  → consider combining into 1 event. Use judgment: if the user would
+  naturally think of them as one work session, merge them.
+- **Standalone PDF, DOCX, PPTX, XLSX** not inside a date-stamped folder →
+  1 event
+- **Standalone image file** (jpg, png, etc.) with no parent folder context →
+  SKIP — images without a containing folder have no event context to write
+  about. Link into an existing related event if one exists nearby.
 - **Standalone DWG, RVT, 3dm, SketchUp file** → 1 metadata-only event
-- **`训练图集` / `素材` / reference-material folders** → 1 summary note each
 - **`_embedded_files` folders** → SKIP
 
 If `--dry-run`, print the list of detected events and their estimated counts,
