@@ -245,6 +245,74 @@ with `counts.escalated = true` and `counts.notes_written = 0`. Skip the
 per-file processing (Step 5) and the non-interactive structure discovery
 (Step 3.5) entirely — retro-scan will redo that with user input.
 
+## Step 4.3 — auto-detect and apply project moves (non-interactive)
+
+For each top-level archive subfolder touched by the delta, run move detection.
+Heartbeat applies moves automatically when confidence is high enough, otherwise
+logs them as pending for the user to resolve interactively.
+
+```bash
+python3 -c "
+import os, sys, json
+from pathlib import Path
+sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
+import project_move as pm
+
+workdir = Path(os.getcwd())
+vault_name = os.environ['VB_VAULT']
+folder = Path(os.environ['VB_FOLDER'])
+
+move = pm.detect_project_move(workdir, folder)
+if move is None:
+    print(json.dumps({'move': None}))
+elif move.confidence >= 0.8 and move.match_count >= 5:
+    # Auto-apply
+    count = pm.apply_project_move(move, workdir)
+    updated = pm.repair_vault_backlinks(move, vault_name, workdir)
+    print(json.dumps({'move': 'applied', 'rows_updated': count, 'notes_updated': len(updated)}))
+else:
+    # Log as pending
+    print(json.dumps({'move': 'pending', 'project_name': move.project_name,
+                       'old_parent': move.old_archive_parent,
+                       'new_parent': move.new_archive_parent,
+                       'confidence': move.confidence}))
+" VB_VAULT="$VAULT_NAME" VB_FOLDER="$ARCHIVE_FOLDER"
+```
+
+Rules:
+- `confidence >= 0.8 AND match_count >= 5`: auto-apply, log to heartbeat.log
+- Below threshold: log as `moves_pending` in memory report, skip project this run
+
+## Step 4.4 — detect duplicate projects (report only, NEVER auto-resolve)
+
+Heartbeat detects duplicates but NEVER auto-resolves them — merging project
+folders requires user confirmation.
+
+```bash
+python3 -c "
+import os, sys, json
+from pathlib import Path
+sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
+import project_duplicate as pd
+
+workdir = Path(os.getcwd())
+for domain_name in os.environ['VB_DOMAINS'].split(','):
+    groups = pd.detect_duplicates(workdir, domain_name.strip())
+    if groups:
+        print(json.dumps([{
+            'canonical_name': g.canonical_name,
+            'alias_names': g.alias_names,
+            'fingerprint_overlap': g.fingerprint_overlap,
+            'confidence': g.confidence,
+            'domain': domain_name.strip(),
+        } for g in groups]))
+" VB_DOMAINS="$DOMAIN_NAMES_CSV"
+```
+
+Write `duplicates_pending: [...]` into the Step 8 memory report.
+Log a line to `~/.vault-bridge/heartbeat.log` for each group found:
+`"{timestamp} vault-bridge heartbeat: duplicate projects detected — '{canonical}' and '{aliases}'. Run /vault-bridge:reconcile --resolve-duplicates to merge."`
+
 ## Step 4.6 — autonomous project-rename detection (non-destructive)
 
 Even under the threshold, heartbeat can notice when an archive project
@@ -324,10 +392,42 @@ For each delta file, follow the same per-event pipeline as retro-scan:
 3. Check the scan index — if the fingerprint is already known (rename
    detected from the delta side), update the index and skip note write
 4. Route to the vault subfolder via `routing.patterns`
-5. Read the file content (Template A) or mark metadata-only (Template B)
-5b. For Template B notes: inject proactive wikilinks before writing.
-   Run `link_strategy.find_linking_candidates()` and append `## Related notes`
-   wikilinks via `link_strategy.build_related_notes_section()`.
+5. Process the file content via `scan_pipeline.process_file()`:
+
+   ```python
+   import sys, json
+   from pathlib import Path
+   sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
+   import scan_pipeline
+
+   result = scan_pipeline.process_file(
+       source_path='$SOURCE_PATH',
+       workdir=str(Path.cwd()),
+       vault_project_path='$PROJECT/$SUBFOLDER',
+       event_date='$EVENT_DATE',
+       dry_run=$DRY_RUN,   # True when --dry-run flag passed, False for real runs
+   )
+   ```
+
+   Use the returned `ScanResult` fields:
+   - `result.text` — note body source content
+   - `result.attachments` — wiki-embed strings for images
+   - `result.content_confidence` — `"high"` or `"low"` → Template A; `"none"` → Template B
+   - `result.skipped` — if True, log `result.skip_reason` and skip note creation entirely
+   - `result.sources_read` — use for `sources_read` frontmatter field
+   - `result.read_bytes` — use for `read_bytes` frontmatter field
+   - `result.warnings` / `result.errors` — log these for the heartbeat memory report
+
+   The `scan_pipeline` automatically enforces the 20-file text-read limit when
+   using `process_batch(max_reads=20)`. In heartbeat, call `process_file` in a
+   loop and track `reads_done += result.sources_read`; once `reads_done >= 20`,
+   stop text extraction (remaining files become Template B). Image extraction
+   for `render_pages=True` files (DXF, DWG, AI, PSD) is NOT blocked by the
+   read limit — only text extraction is limited.
+
+5b. For Template B notes (result.content_confidence == "none"): inject proactive
+   wikilinks before writing. Run `link_strategy.find_linking_candidates()` and
+   append `## Related notes` wikilinks via `link_strategy.build_related_notes_section()`.
    This is non-interactive — if no candidates found, write Template B as-is.
 6. Apply the fabrication firewall stop-word list
 7. Build frontmatter with the required fields in canonical order:
@@ -342,7 +442,8 @@ For each delta file, follow the same per-event pipeline as retro-scan:
    `rvt`, `3dm`, `mov`, `mp4`, `md`, `txt`, `html`, `csv`, `json`.
    The `event_date_source` enum is the same: `filename-prefix`,
    `parent-folder-prefix`, `mtime`.
-   The `content_confidence` enum is the same: `high` or `metadata-only`.
+   The `content_confidence` enum is the same: `high`, `low`, or `none`
+   (heartbeat uses the values from `ScanResult.content_confidence` directly).
 8. Write the note via obsidian CLI (never the Write tool directly):
    ```bash
    obsidian create vault="$VAULT_NAME" name="$NOTE_NAME" path="$PROJECT/$SUBFOLDER" content="$FULL_CONTENT" silent overwrite
@@ -357,6 +458,39 @@ For each delta file, follow the same per-event pipeline as retro-scan:
 
 The file_type enum applies as in retro-scan: folder, pdf, docx, pptx, xlsx,
 jpg, png, psd, ai, dxf, dwg, rvt, 3dm, mov, mp4, image-folder.
+
+## Step 5d — update project indexes (after new notes written)
+
+After the per-event loop completes, update the MOC index for each project
+touched in this heartbeat run.
+
+```bash
+python3 -c "
+import os, sys, json
+from pathlib import Path
+from datetime import date
+sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
+import project_index as pi
+
+events_json = json.loads(os.environ['VB_EVENTS_JSON'])
+events = [pi.ProjectIndexEvent(**e) for e in events_json]
+result = pi.update_index(
+    project_name=os.environ['VB_PROJECT'],
+    domain=os.environ['VB_DOMAIN'],
+    new_events=events,
+    workdir=os.getcwd(),
+    vault_name=os.environ['VB_VAULT'],
+    today=date.today(),
+)
+print(json.dumps(result))
+" VB_PROJECT=\"$PROJECT_NAME\" VB_DOMAIN=\"$DOMAIN_NAME\" \
+  VB_VAULT=\"$VAULT_NAME\" VB_EVENTS_JSON=\"$EVENTS_JSON\"
+```
+
+Rules:
+- If the read-rate budget is exhausted, log as `indexes_deferred` in memory report
+  and skip index updates for this run.
+- Index updates do NOT count toward the 20-file read limit (they don't read source files).
 
 ## Step 5b — calendar sync (opt-in)
 

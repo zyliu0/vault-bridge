@@ -195,6 +195,86 @@ affected note's `project:` frontmatter.
   without user input. New notes continue to be written under the new
   name; older notes stay under the old name until reconcile runs.
 
+## Project-folder move detection
+
+When an archive project folder is **moved** to a new parent path (e.g.
+`/old_nas/arch/2408 Sample` → `/new_nas/arch/2408 Sample`), the folder
+basename is unchanged so rename detection does not trigger — but every
+`source_path` in the scan index points to the old location.
+`scripts/project_move.py` detects this: if fingerprints from the new path
+match index entries pointing to a different parent, it reports a move.
+
+The distinction is strict: **move** = same name + different parent
+(handled by `project_move.py`); **rename** = different name (handled by
+`project_rename.py`). Both modules share fingerprint-cluster helpers
+extracted into `scripts/project_cluster.py`.
+
+`apply_project_move()` rewrites the affected `source_path` rows in the
+scan index. `repair_vault_backlinks()` updates any vault notes whose
+`source_path` frontmatter field pointed to the old location.
+
+- **retro-scan** (Step 1.5) and **reconcile** — interactive: confirm,
+  then apply index update and repair vault backlinks.
+- **heartbeat-scan** — auto-applies high-confidence moves (confidence ≥
+  0.8 and ≥5 fingerprint matches); logs lower-confidence candidates for
+  manual review. Never touches vault notes without user confirmation.
+
+## Project index notes
+
+vault-bridge maintains a **project index note** (Map of Content) at the
+root of each vault project folder, named `{project_name}.md`. This is a
+navigable overview that aggregates all event notes for the project.
+
+`scripts/project_index.py` generates and updates these notes. The index
+has fixed sections; only two are auto-derived — the rest require actual
+source content to populate and are never fabricated:
+
+- **Overview** — a `> [!abstract]` callout preserved verbatim across
+  updates; the user writes this by hand.
+- **Status** — inferred from event recency (`active`, `stalled`, `closed`,
+  `archived`). Updated automatically.
+- **Timeline** — auto-derived: links to all event notes in date order.
+  This is the only section vault-bridge writes prose for — it links, not
+  describes.
+- **Subfolders** — auto-derived: lists vault subfolders that contain
+  events.
+- **Parties**, **Budget**, **Key Decisions**, **Open Items**, **Related
+  Projects** — placeholder sections; vault-bridge never fills these in.
+  They exist so the user has a consistent place to record the information
+  manually.
+
+A companion `{project_name}.base` (Obsidian Bases file) is generated
+alongside the index note, providing a tabular event table filtered to the
+project. The fabrication firewall applies strictly: the index only links
+to notes that were actually written; it never summarizes or describes
+content it did not read.
+
+- **retro-scan** (Step 7) — generates or updates the index after new
+  events are written.
+- **heartbeat-scan** — updates indexes after new events.
+- **reconcile** — `--rebuild-indexes` force-regenerates all project
+  indexes from the current scan index.
+
+## Duplicate project detection
+
+When two vault project folders contain large numbers of files with
+identical fingerprints, they are likely the same real project indexed
+under two names (e.g. a partially-applied rename, or files copied between
+archive folders). `scripts/project_duplicate.py` detects this via
+fingerprint overlap across the scan index.
+
+`detect_duplicates()` returns `DuplicateGroup` objects identifying the
+canonical name and one or more alias names. `resolve_duplicate()` merges
+an alias into the canonical: moves vault notes, rewrites `project:`
+frontmatter, and removes the alias folder. Pass `dry_run=True` to preview
+without writing.
+
+- **retro-scan** (Step 1.6) — reports detected duplicate groups
+  interactively; user confirms before any merge.
+- **heartbeat-scan** — logs duplicate detections only; never auto-resolves.
+- **reconcile** — `--resolve-duplicates` runs interactive resolution for
+  all detected groups.
+
 ## Heartbeat escalation for large deltas
 
 Heartbeat is optimized for small deltas. When the delta exceeds a
@@ -348,6 +428,92 @@ RGBA/CMYK/P converted to RGB, EXIF orientation applied before resize.
 
 **Sampling:** ≤10 images in a folder → embed all; >10 → 10 deterministic
 samples via sorted-filename index walk (reproducible across runs).
+
+## File-type handling system
+
+vault-bridge uses a two-layer system for file-type support: a static
+registry that maps extensions to Python packages, and a generated runtime
+handler that all scan commands route through.
+
+**Package registry (`scripts/package_registry.py`):**
+
+`BUILTIN_REGISTRY` maps each file extension to one or more `PackageSpec`
+entries. Each spec records the `pip_name`, `import_name`, category slug,
+supported operations (`extract_text`, `extract_images`), and whether it is
+the `preferred` choice when multiple packages cover the same extension.
+
+| Category | Extensions | Package(s) |
+|---|---|---|
+| document-pdf | pdf | pdfplumber (preferred), PyPDF2 (fallback) |
+| document-office | docx, pptx, xlsx | python-docx, python-pptx, openpyxl |
+| image-raster | jpg, jpeg, png, webp, gif, bmp, tiff, tif | Pillow |
+| image-raster (HEIC) | heic, heif | pillow-heif |
+| text-plain | txt, md, rtf | stdlib (no install) |
+| document-office-legacy | doc, ppt | olefile |
+| spreadsheet-legacy | xls | xlrd |
+| cad-dxf | dxf | ezdxf[draw] |
+| cad-dwg | dwg | ezdxf[draw] |
+| vector-ai | ai | PyMuPDF |
+| raster-psd | psd | psd-tools |
+| cad-3dm | 3dm | rhino3dm |
+
+The Visual/CAD group (DXF, DWG, AI, PSD, 3DM) is opt-in — not installed
+by default. The `is_installed(spec)` helper checks importability at
+runtime so handlers can degrade gracefully.
+
+**Handler installer (`scripts/handler_installer.py`):**
+
+`install_builtin(ext, spec, handlers_dir)` runs pip and returns an
+`InstallResult`. `install_custom(ext, spec, handlers_dir)` does the same
+for packages found via PyPI search. After installation, the installer
+generates a handler stub from the matching pattern template in
+`scripts/handlers/patterns/` (one `.py.tmpl` file per category: `cad_dxf`,
+`cad_dwg`, `vector_ai`, `raster_psd`, `cad_3dm`, `document_office_legacy`,
+`spreadsheet_legacy`). The generic stub lives at
+`scripts/handlers/_stub_template.py.tmpl`.
+
+**Package search (`scripts/github_package_search.py`):**
+
+`search_for_extension(ext, max_results=5)` queries PyPI for Python
+packages that handle a given file extension. Used during setup to offer
+candidates for custom/unknown extensions.
+
+**Runtime handler (`scripts/file_type_handlers.py`):**
+
+`HandlerConfig` is a frozen dataclass with flags: `extract_text`,
+`extract_images`, `compress`, `run_vision`, and `render_pages`. The
+`render_pages` flag marks file types (DXF, DWG, AI, PSD) that produce
+page-render screenshots rather than embedded-image extraction.
+
+Public API:
+- `get_handler(path) -> HandlerConfig | None` — looks up the handler for a path's extension
+- `read_text(path) -> str` — extracts text using the registered package
+- `extract_images(path) -> list[Path]` — extracts or renders images
+- `handle(path) -> HandlerResult` — runs the full pipeline for one file
+
+`file_type_handlers.py` is regenerated from config by
+`scripts/generate_file_type_handlers.py`. Run `generate(workdir)` to
+rebuild it after adding or removing file-type packages.
+
+**Scan pipeline (`scripts/scan_pipeline.py`):**
+
+All scan commands (retro-scan, heartbeat-scan, reconcile) route files
+through `process_file(path, workdir, config)` and
+`process_batch(paths, workdir, config, max_reads=20)`. The 20-file read
+limit applies to text extraction; files with `render_pages=True`
+(Visual/CAD types) still receive page-render screenshots after the text
+limit is reached.
+
+**Setup wizard Step 6.5:**
+
+During `/vault-bridge:setup`, Step 6.5 asks which file-type categories to
+enable. Standard types (PDF, Office, raster images, plain text) are
+pre-selected. The Visual/CAD group is opt-in separately. For each
+selected category, the wizard installs the required package via pip and
+generates the handler stub. Custom extensions can be added via free-text
+entry; PyPI search is run automatically to find candidate packages. To
+change file-type settings after setup, choose **F — Edit file types**
+from the setup menu, which re-runs Step 6.5 without touching domain config.
 
 ## Update checking
 

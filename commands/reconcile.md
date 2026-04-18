@@ -1,7 +1,7 @@
 ---
 description: Reconcile existing vault notes with the current schema, routing rules, and archive state
 allowed-tools: Read, Bash, Glob, Grep, AskUserQuestion
-argument-hint: "[project-folder-path] [--dry-run] [--re-read] [--move] [--migrate-v2] [--classify] [--orphans]"
+argument-hint: "[project-folder-path] [--dry-run] [--re-read] [--move] [--migrate-v2] [--classify] [--orphans] [--rebuild-indexes] [--resolve-duplicates]"
 ---
 
 ## Step 0 — check for plugin updates
@@ -38,6 +38,10 @@ Flags:
 - `--move` — Phase 3: offer to move misrouted notes (interactive per note)
 - `--classify` — Phase 5: walk the archive root and interactively classify
   subfolders that have no routing rule (same prompts as retro-scan Step 4.5)
+- `--rebuild-indexes` — rebuild or create project index (MOC) notes for all
+  projects in the domain (see Step 2h)
+- `--resolve-duplicates` — interactively detect and merge duplicate project
+  folders (see Step 1.7)
 
 Default (no flags): Phase 1 audit + Phase 2 frontmatter upgrade.
 
@@ -134,7 +138,49 @@ AskUserQuestion with structured options.
 Use `domain.transport` (the transport slug) to load the transport via `transport_loader.load_transport(Path.cwd(), domain.transport)` and call `transport.fetch_to_local(source_path)` to read archive files.
 Use `domain.routing_patterns` for Phase 3 routing checks.
 
-## Step 1.5 — detect project-folder rename
+## Step 1.5 — detect project-folder move
+
+Before the rename check, detect whether the archive project folder was moved
+to a new parent directory (name unchanged, parent changed). Honours `--dry-run`.
+
+```bash
+python3 -c "
+import os, sys, json
+from pathlib import Path
+sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
+import project_move as pm
+
+source = os.environ['VB_SRC_FOLDER']
+workdir = Path(os.getcwd())
+move = pm.detect_project_move(workdir, Path(source))
+if move is None:
+    print(json.dumps({'move': None}))
+else:
+    print(json.dumps({'move': {
+        'project_name': move.project_name,
+        'old_archive_parent': move.old_archive_parent,
+        'new_archive_parent': move.new_archive_parent,
+        'match_count': move.match_count,
+        'total_checked': move.total_checked,
+        'confidence': move.confidence,
+    }}))
+" VB_SRC_FOLDER="$ARCHIVE_PROJECT_ROOT"
+```
+
+If a move is detected, present via AskUserQuestion:
+
+> "Project '**{project_name}**' appears to have moved from **{old_archive_parent}**
+> to **{new_archive_parent}** ({match_count}/{total_checked} files matched,
+> {confidence:.0%}). Update the scan index?"
+>
+> Options: "Yes — update index + repair vault backlinks" / "No — keep stale entries" / "Abort"
+
+If confirmed (and not `--dry-run`), call `project_move.apply_project_move` and
+`project_move.repair_vault_backlinks`. Log the move in the Step 4 memory report.
+
+If `--dry-run`, report what WOULD change.
+
+## Step 1.5b — detect project-folder rename
 
 If the archive project folder was renamed since the last scan (e.g.
 `2408 Sample Project` → `2408 Sample Project Final`), the vault folder
@@ -210,6 +256,58 @@ When `--migrate-v2` is set, for each note with `schema_version: 1`:
 3. Set `schema_version: 2`
 4. Run through `upgrade_frontmatter()` with the domain parameter
 5. Validate with the v2 schema
+
+## Step 1.7 — resolve duplicate projects (only when --resolve-duplicates passed)
+
+When `--resolve-duplicates` is set, detect and interactively resolve vault
+project folders that contain duplicate file fingerprints.
+
+```bash
+python3 -c "
+import os, sys, json
+from pathlib import Path
+sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
+import project_duplicate as pd
+
+workdir = Path(os.getcwd())
+domain = os.environ['VB_DOMAIN']
+groups = pd.detect_duplicates(workdir, domain)
+print(json.dumps([{
+    'canonical_name': g.canonical_name,
+    'alias_names': g.alias_names,
+    'fingerprint_overlap': g.fingerprint_overlap,
+    'confidence': g.confidence,
+} for g in groups]))
+" VB_DOMAIN="$DOMAIN_NAME"
+```
+
+For each detected DuplicateGroup, present via AskUserQuestion:
+
+> "Vault folders '**{canonical}**' and '**{aliases}**' appear to be the same
+> project ({N} shared files, {pct}% similarity). Merge?"
+>
+> - "Merge — move alias notes into '{canonical}' and update the index"
+> - "Show details — list a sample of the shared files"
+> - "Skip — keep both folders"
+
+If "Merge" and not `--dry-run`:
+```bash
+python3 -c "
+import os, sys, json
+from pathlib import Path
+sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
+import project_duplicate as pd
+
+workdir = Path(os.getcwd())
+group_data = json.loads(os.environ['VB_GROUP_JSON'])
+group = pd.DuplicateGroup(**group_data)
+result = pd.resolve_duplicate(group, workdir, os.environ['VB_VAULT'], dry_run=False)
+print(json.dumps(result))
+" VB_GROUP_JSON="$GROUP_DATA" VB_VAULT="$VAULT_NAME"
+```
+
+If `--dry-run`, call `resolve_duplicate(..., dry_run=True)` and show the plan.
+Record merge results in the Step 4 memory report.
 
 ## Step 2 — find all notes in the project folder
 
@@ -541,6 +639,55 @@ If yes:
 If no: skip, note the discrepancy in the final report.
 
 If "skip all": stop asking for the rest of the notes. No more moves.
+
+## Phase 2h — Rebuild project indexes (only when --rebuild-indexes or --migrate-v2 passed)
+
+When `--rebuild-indexes` or `--migrate-v2` is set, call `project_index.update_index`
+for every project in the domain to create or refresh the MOC index notes.
+
+```bash
+python3 -c "
+import os, sys, json
+from pathlib import Path
+from datetime import date
+sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
+import project_index as pi
+import vault_scan
+
+workdir = Path(os.getcwd())
+vault_name = os.environ['VB_VAULT']
+domain = os.environ['VB_DOMAIN']
+
+# Gather all events per project from the scan index
+by_path, _ = vault_scan.load_index(workdir)
+projects: dict = {}
+for src, (fp, note_path) in by_path.items():
+    parts = note_path.split('/')
+    if len(parts) >= 3 and parts[0] == domain:
+        proj = parts[1]
+        if proj not in projects:
+            projects[proj] = []
+        import re
+        fname = parts[-1]
+        date_m = re.match(r'^(\d{4}-\d{2}-\d{2})', fname)
+        ev = pi.ProjectIndexEvent(
+            event_date=date_m.group(1) if date_m else '',
+            note_filename=fname.replace('.md', ''),
+            subfolder=parts[2] if len(parts) > 3 else '',
+            content_confidence='',
+            summary_hint='',
+        )
+        projects[proj].append(ev)
+
+results = {}
+for proj, evs in projects.items():
+    r = pi.update_index(proj, domain, evs, str(workdir), vault_name, date.today())
+    results[proj] = r
+print(json.dumps(results))
+" VB_VAULT=\"$VAULT_NAME\" VB_DOMAIN=\"$DOMAIN_NAME\"
+```
+
+Track and report: `indexes_created: N`, `indexes_updated: N`, `indexes_skipped: N`.
 
 ## Phase 2g — Fix orphaned notes (only if --orphans flag is set)
 

@@ -171,6 +171,7 @@ class Config:
     domains: List[Domain]
     project_overrides: ProjectOverrides
     discovered_structure: Dict[str, Any]
+    file_type_config: Dict[str, Any] = field(default_factory=dict)
 
     @classmethod
     def from_dict(cls, d: dict) -> "Config":
@@ -178,6 +179,9 @@ class Config:
         po_raw = d.get("project_overrides", {})
         project_overrides = ProjectOverrides.from_dict(po_raw) if po_raw else ProjectOverrides()
         ds = d.get("discovered_structure", {"last_walked_at": None, "observed_subfolders": []})
+        # file_type_config: default to {} when missing or null (backwards-compatible)
+        raw_ftc = d.get("file_type_config")
+        file_type_config = dict(raw_ftc) if raw_ftc else {}
         return cls(
             schema_version=d.get("schema_version", 0),
             vault_name=d.get("vault_name", ""),
@@ -189,6 +193,7 @@ class Config:
             domains=domains,
             project_overrides=project_overrides,
             discovered_structure=dict(ds),
+            file_type_config=file_type_config,
         )
 
     def to_dict(self) -> dict:
@@ -203,6 +208,7 @@ class Config:
             "domains": [d.to_dict() for d in self.domains],
             "project_overrides": self.project_overrides.to_dict(),
             "discovered_structure": dict(self.discovered_structure),
+            "file_type_config": dict(self.file_type_config),
         }
 
     def transport_for(self, archive_path: str) -> Optional[str]:

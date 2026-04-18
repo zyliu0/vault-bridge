@@ -58,6 +58,76 @@ def _index_path(workdir) -> Path:
     return d / "index.tsv"
 
 
+# Public alias for _index_path — used by project_move, project_cluster, etc.
+def index_path(workdir) -> Path:
+    """Public alias for _index_path. Returns the path to index.tsv."""
+    return _index_path(workdir)
+
+
+# ---------------------------------------------------------------------------
+# Index prefix-rewrite helpers (used by project_move, project_duplicate)
+# ---------------------------------------------------------------------------
+
+def _rewrite_column(
+    workdir,
+    old_prefix: str,
+    new_prefix: str,
+    col: int,  # 0=source_path, 2=note_path
+) -> int:
+    """Atomically rewrite index.tsv replacing old_prefix with new_prefix in column ``col``.
+
+    Returns the number of rows changed.
+    """
+    index_file = _index_path(workdir)
+    if not index_file.exists():
+        return 0
+
+    raw = index_file.read_text()
+    if not raw.strip():
+        return 0
+
+    updated = 0
+    new_lines: List[str] = []
+    for line in raw.splitlines():
+        if not line.strip():
+            new_lines.append(line)
+            continue
+        parts = line.split("\t")
+        if len(parts) != 3:
+            new_lines.append(line)
+            continue
+        if parts[col].startswith(old_prefix):
+            parts[col] = new_prefix + parts[col][len(old_prefix):]
+            updated += 1
+        new_lines.append("\t".join(parts))
+
+    if updated == 0:
+        return 0
+
+    tmp = index_file.with_suffix(index_file.suffix + ".tmp")
+    tmp.write_text("\n".join(new_lines) + "\n")
+    tmp.replace(index_file)
+    return updated
+
+
+def rewrite_index_source_prefix(workdir, old_prefix: str, new_prefix: str) -> int:
+    """Atomically rewrite source_path column: replace old_prefix → new_prefix.
+
+    Only rows whose source_path *starts with* old_prefix are updated.
+    Returns the number of rows changed.
+    """
+    return _rewrite_column(workdir, old_prefix, new_prefix, col=0)
+
+
+def rewrite_index_note_prefix(workdir, old_prefix: str, new_prefix: str) -> int:
+    """Atomically rewrite note_path column: replace old_prefix → new_prefix.
+
+    Only rows whose note_path *starts with* old_prefix are updated.
+    Returns the number of rows changed.
+    """
+    return _rewrite_column(workdir, old_prefix, new_prefix, col=2)
+
+
 def _global_state_path() -> Path:
     """Return the global state path without creating it."""
     override = os.environ.get("VAULT_BRIDGE_STATE_DIR")

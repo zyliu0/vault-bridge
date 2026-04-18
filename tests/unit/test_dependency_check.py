@@ -123,3 +123,82 @@ def test_format_report_includes_install_hints_for_missing():
     }
     report = dc.format_report(fake)
     assert "obsidian.md/cli" in report or "Install" in report
+
+
+# ---------------------------------------------------------------------------
+# _load_file_type_config_packages
+# ---------------------------------------------------------------------------
+
+def test_load_file_type_config_packages_no_config(tmp_path):
+    result = dc._load_file_type_config_packages(tmp_path)
+    assert result == []
+
+
+def test_load_file_type_config_packages_with_installed_packages(tmp_path):
+    import json
+    cfg_dir = tmp_path / ".vault-bridge"
+    cfg_dir.mkdir()
+    payload = {
+        "schema_version": 4,
+        "file_type_config": {
+            "installed_packages": {"pdf": "handlers.document_pdf"}
+        }
+    }
+    (cfg_dir / "config.json").write_text(json.dumps(payload))
+    result = dc._load_file_type_config_packages(tmp_path)
+    assert isinstance(result, list)
+    assert len(result) >= 1
+
+
+def test_load_file_type_config_packages_empty_installed(tmp_path):
+    import json
+    cfg_dir = tmp_path / ".vault-bridge"
+    cfg_dir.mkdir()
+    payload = {
+        "schema_version": 4,
+        "file_type_config": {"installed_packages": {}}
+    }
+    (cfg_dir / "config.json").write_text(json.dumps(payload))
+    result = dc._load_file_type_config_packages(tmp_path)
+    assert result == []
+
+
+def test_load_file_type_config_packages_corrupt_json(tmp_path):
+    cfg_dir = tmp_path / ".vault-bridge"
+    cfg_dir.mkdir()
+    (cfg_dir / "config.json").write_text("not valid json {{{")
+    result = dc._load_file_type_config_packages(tmp_path)
+    assert result == []
+
+
+def test_check_python_packages_with_declared_missing(tmp_path):
+    import json
+    cfg_dir = tmp_path / ".vault-bridge"
+    cfg_dir.mkdir()
+    payload = {
+        "schema_version": 4,
+        "file_type_config": {
+            "installed_packages": {"pdf": "no_such_module_xyzzy_999"}
+        }
+    }
+    (cfg_dir / "config.json").write_text(json.dumps(payload))
+    result = dc.check_python_packages(workdir=tmp_path)
+    assert "declared_missing" in result
+    # The nonexistent module should be flagged
+    assert len(result["declared_missing"]) >= 1
+
+
+def test_check_python_packages_hint_for_declared_missing(tmp_path):
+    import json
+    cfg_dir = tmp_path / ".vault-bridge"
+    cfg_dir.mkdir()
+    payload = {
+        "schema_version": 4,
+        "file_type_config": {
+            "installed_packages": {"pdf": "no_such_module_xyzzy_999"}
+        }
+    }
+    (cfg_dir / "config.json").write_text(json.dumps(payload))
+    result = dc.check_python_packages(workdir=tmp_path)
+    assert result.get("install_hint") is not None
+    assert "setup" in result["install_hint"].lower() or "file" in result["install_hint"].lower()

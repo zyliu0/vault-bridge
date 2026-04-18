@@ -35,6 +35,11 @@ REQUIRED_PYTHON_PACKAGES = [
     ("pptx", "python-pptx"),
 ]
 
+# Hint shown when a declared package is missing (set by check_python_packages)
+_FILE_TYPE_REINSTALL_HINT = (
+    "Run /vault-bridge:setup -> file types to reinstall"
+)
+
 RECOMMENDED_SKILLS = [
     {
         "name": "obsidian-cli",
@@ -132,8 +137,46 @@ def check_obsidian_cli() -> dict:
     }
 
 
-def check_python_packages() -> dict:
-    """Check that required Python packages are importable."""
+def _load_file_type_config_packages(workdir=None) -> list:
+    """Load declared packages from file_type_config.installed_packages.
+
+    Returns a list of (import_name, pip_name) tuples for packages declared
+    in file_type_config but not yet checked by REQUIRED_PYTHON_PACKAGES.
+    Returns [] if config is absent or file_type_config is empty.
+    """
+    import json
+    from pathlib import Path
+
+    if workdir is None:
+        workdir = Path.cwd()
+    cfg_path = Path(workdir) / ".vault-bridge" / "config.json"
+    if not cfg_path.exists():
+        return []
+    try:
+        data = json.loads(cfg_path.read_text(encoding="utf-8"))
+        ftc = data.get("file_type_config") or {}
+        installed = ftc.get("installed_packages") or {}
+        if not isinstance(installed, dict):
+            return []
+        # installed_packages is {ext: module_path} — derive pip_names from the
+        # module path is not possible, so we return them for informational check.
+        # For each ext, we just need to know the module path is importable.
+        extra = []
+        for ext, mod_path in installed.items():
+            if mod_path:
+                extra.append((str(mod_path), str(mod_path)))
+        return extra
+    except Exception:
+        return []
+
+
+def check_python_packages(workdir=None) -> dict:
+    """Check that required Python packages are importable.
+
+    Also checks packages declared in file_type_config.installed_packages
+    when a config.json is present. Missing declared packages get a
+    reinstall hint pointing at /vault-bridge:setup file-types.
+    """
     packages = []
     missing = []
     for module_name, package_name in REQUIRED_PYTHON_PACKAGES:
@@ -144,14 +187,30 @@ def check_python_packages() -> dict:
             packages.append({"package": package_name, "available": False})
             missing.append(package_name)
 
+    # Check file_type_config declared packages
+    declared_missing = []
+    for module_name, pip_name in _load_file_type_config_packages(workdir):
+        try:
+            importlib.import_module(module_name)
+            packages.append({"package": pip_name, "available": True, "declared": True})
+        except (ImportError, ModuleNotFoundError):
+            packages.append({"package": pip_name, "available": False, "declared": True})
+            declared_missing.append(pip_name)
+
+    install_hint = None
+    if missing:
+        install_hint = f"Run: pip install {' '.join(missing)}"
+    if declared_missing:
+        extra_hint = _FILE_TYPE_REINSTALL_HINT
+        install_hint = f"{install_hint}; {extra_hint}" if install_hint else extra_hint
+
     return {
         "name": "Python packages",
         "required": True,
         "packages": packages,
         "missing": missing,
-        "install_hint": (
-            f"Run: pip install {' '.join(missing)}"
-        ) if missing else None,
+        "declared_missing": declared_missing,
+        "install_hint": install_hint,
     }
 
 

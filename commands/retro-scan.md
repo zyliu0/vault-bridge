@@ -211,6 +211,125 @@ Keep the index available (conceptually — re-load it in each event's decision
 step via a fresh Python call if you need to). You will use it to detect
 already-scanned events and renames.
 
+## Step 1.5 — detect project-folder move
+
+Before the rename check, detect whether the archive project folder was
+**moved** to a new parent directory (name unchanged, parent changed).
+
+### 1.5a — run move detection
+
+```bash
+python3 -c "
+import os, sys, json
+from pathlib import Path
+sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
+import project_move as pm
+
+source = os.environ['VB_SRC_FOLDER']
+workdir = Path(os.getcwd())
+move = pm.detect_project_move(workdir, Path(source))
+if move is None:
+    print(json.dumps({'move': None}))
+else:
+    pct = int(move.confidence * 100)
+    print(json.dumps({'move': {
+        'project_name': move.project_name,
+        'old_archive_parent': move.old_archive_parent,
+        'new_archive_parent': move.new_archive_parent,
+        'match_count': move.match_count,
+        'total_checked': move.total_checked,
+        'confidence': move.confidence,
+        'pct': pct,
+    }}))
+" VB_SRC_FOLDER="$1"
+```
+
+Capture as `$MOVE_JSON`.
+
+### 1.5b — confirm and apply (if detected)
+
+If `$MOVE_JSON.move` is null, skip this step.
+
+Otherwise, present via AskUserQuestion:
+
+> "Project '**{project_name}**' appears to have moved from **{old_archive_parent}**
+> to **{new_archive_parent}** ({match_count}/{total_checked} files matched at
+> {pct}% confidence). Apply the move (update source_path index entries)?"
+>
+> - "Yes — update the index and repair vault backlinks"
+> - "No — continue scan with stale index entries"
+> - "Skip scan"
+
+If "Yes":
+
+1. Apply the move to the index:
+   ```bash
+   python3 -c "
+   import os, sys, json
+   from pathlib import Path
+   sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
+   import project_move as pm
+   from dataclasses import asdict
+   move_data = json.loads(os.environ['VB_MOVE_JSON'])
+   move = pm.ProjectMove(**move_data)
+   count = pm.apply_project_move(move, Path(os.getcwd()))
+   print(f'index rows updated: {count}')
+   " VB_MOVE_JSON="$MOVE_DATA_JSON"
+   ```
+
+2. Repair vault backlinks:
+   ```bash
+   python3 -c "
+   import os, sys, json
+   from pathlib import Path
+   sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
+   import project_move as pm
+   move = pm.ProjectMove(**json.loads(os.environ['VB_MOVE_JSON']))
+   updated = pm.repair_vault_backlinks(move, os.environ['VB_VAULT'], Path(os.getcwd()))
+   print(json.dumps({'notes_updated': updated}))
+   " VB_MOVE_JSON="$MOVE_DATA_JSON" VB_VAULT="$VAULT_NAME"
+   ```
+
+3. Record `project_move` in the Step 9 memory report stats.
+
+If "Skip scan", release the lock and exit 1.
+
+## Step 1.6 — detect duplicate projects
+
+Check whether any existing vault project folders are duplicates of each other
+(i.e. they share a majority of their file fingerprints).
+
+```bash
+python3 -c "
+import os, sys, json
+from pathlib import Path
+sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
+import project_duplicate as pd
+
+workdir = Path(os.getcwd())
+domain = os.environ['VB_DOMAIN']
+groups = pd.detect_duplicates(workdir, domain)
+print(json.dumps([{
+    'canonical_name': g.canonical_name,
+    'alias_names': g.alias_names,
+    'fingerprint_overlap': g.fingerprint_overlap,
+    'confidence': g.confidence,
+} for g in groups]))
+" VB_DOMAIN="$DOMAIN_NAME"
+```
+
+For each detected DuplicateGroup, present via AskUserQuestion:
+
+> "Vault folders '**{canonical}**' and '**{aliases}**' appear to be the same project
+> ({N} shared files, {pct}% similarity). Merge aliases into '{canonical}'?"
+>
+> - "Merge — move alias notes into canonical and update index"
+> - "Show details — list the shared fingerprints" → show and re-ask
+> - "Skip — keep both folders"
+
+If "Merge": call `project_duplicate.resolve_duplicate(group, workdir, vault_name)`.
+Log the merge in the Step 9 memory report.
+
 ## Step 3.5 — detect project-folder rename
 
 Before walking the source folder, check whether the **project folder itself**
@@ -584,56 +703,83 @@ Find the vault subfolder via this algorithm:
 
 ### 6e. Read the file content (Template A vs Template B)
 
-Check the file type against the file_type handling table:
-
-| File type | Handling |
-|-----------|----------|
-| pdf, docx, pptx, xlsx | Read via file_system.access_pattern. Template A. |
-| jpg, png (≥50KB) | Read via access pattern. Template A. Process via image_pipeline. |
-| psd, ai | Read via access pattern (returns composite). Template A. |
-| dxf | Read via access pattern. Template A. |
-| dwg | Read via access pattern. Template A. (Requires LibreDWG setup.) |
-| rvt, 3dm, mov, mp4 | NEVER read — metadata-only. Template B. |
-| folder | Read 1-3 representative files inside. Template A with multi-source. |
-
-### 6e-image. Run image pipeline for image-bearing events
-
-For events with file types that may contain or be images (jpg, png, pdf,
-docx, pptx), after reading the file content, run the image pipeline:
+All file processing is routed through `scripts/scan_pipeline.py`, which consults
+the file-type handler registry to determine what to extract. Run for each event:
 
 ```bash
-python3 -c "
-import sys, json, tempfile
-from pathlib import Path
-sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
-import image_pipeline
-
-with tempfile.TemporaryDirectory() as tmpdir:
-    result = image_pipeline.process_source_for_images(
-        workdir=Path.cwd(),
-        vault_name='$VAULT_NAME',
-        archive_path='$SOURCE_PATH',
-        file_type='$FILE_TYPE',
-        event_date='$EVENT_DATE',
-        project_vault_path='$PROJECT/$SUBFOLDER',
-        out_tempdir=Path(tmpdir),
-    )
-    print(json.dumps({
-        'source_images': result['source_images'],
-        'vault_wiki_embeds': result['vault_wiki_embeds'],
-        'compressed_paths': [str(p) for p in result['compressed_paths']],
-        'attachments': result['attachments'],
-        'images_embedded': result['images_embedded'],
-        'warnings': result['warnings'],
-        'errors': result['errors'],
-    }))
-"
+python3 ${CLAUDE_PLUGIN_ROOT}/scripts/scan_pipeline.py process "$SOURCE_PATH" \
+  --workdir "$(pwd)" \
+  --vault-path "$PROJECT/$SUBFOLDER" \
+  --event-date "$EVENT_DATE"
 ```
 
-Capture all result fields. `compressed_paths` is the key — it contains the
-local paths of compressed JPEGs that have been written to the vault.
+Or call the function directly in Python:
 
-**For each `compressed_path`, use the Read tool to look at the image:**
+```python
+import sys, json
+from pathlib import Path
+sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
+import scan_pipeline
+
+result = scan_pipeline.process_file(
+    source_path='$SOURCE_PATH',
+    workdir=str(Path.cwd()),
+    vault_project_path='$PROJECT/$SUBFOLDER',
+    event_date='$EVENT_DATE',
+    dry_run=$DRY_RUN,   # True when --dry-run flag passed
+)
+print(json.dumps({
+    'handler_category': result.handler_category,
+    'text': result.text,
+    'attachments': result.attachments,
+    'images_embedded': result.images_embedded,
+    'skipped': result.skipped,
+    'skip_reason': result.skip_reason,
+    'content_confidence': result.content_confidence,
+    'sources_read': result.sources_read,
+    'read_bytes': result.read_bytes,
+    'warnings': result.warnings,
+    'errors': result.errors,
+}))
+```
+
+The registry automatically handles routing:
+
+| handler_category | Handling |
+|-----------------|----------|
+| document-pdf, document-office | text + images extracted. Template A. |
+| image-raster, image-vector | images extracted. Template A if vision runs. |
+| cad-dxf, cad-dwg, vector-ai, raster-psd | render_pages=True: screenshots extracted. Template A. |
+| text-plain | text extracted. Template A. |
+| video, audio, archive | skipped=True, skip_reason set. Template B. |
+| None (unknown ext) | skipped=True, skip_reason contains "unknown". Template B. |
+
+For folders, read 1-3 representative files by calling `process_file` on each
+representative file, then merge: text = joined texts, attachments = all attachments.
+
+Use the returned `ScanResult` fields to populate note body and frontmatter:
+- `ScanResult.text` — note body source content
+- `ScanResult.attachments` — wiki-embed strings for images (`![[filename.jpg]]`)
+- `ScanResult.content_confidence` — use to decide Template A vs B:
+  - `"high"` or `"low"` → **Template A** (content was read)
+  - `"none"` → **Template B** (metadata-only), unless `skipped=True`
+- `ScanResult.skipped` — if True, log `skip_reason` and skip note creation
+- `ScanResult.sources_read` — use for `sources_read` frontmatter field
+- `ScanResult.read_bytes` — use for `read_bytes` frontmatter field
+
+The 20-file read limit is enforced by `process_batch(max_reads=20)` when
+processing all events at once, or track manually when calling `process_file`
+in a loop (stop calling process_file for text-extraction files once 20 reads
+have been made; image-only files may continue).
+
+### 6e-image. Image descriptions for image-bearing events
+
+When `ScanResult.attachments` is non-empty (images were embedded), use the
+Read tool on the local compressed JPEG paths returned by compress_images to
+write LLM vision descriptions. The attachments list contains wiki-embed
+strings — the compressed file lives at `out_tempdir/compressed/<filename>`.
+
+**For each attachment**, read the compressed image:
 
 > Read the file at `$COMPRESSED_JPEG` using the Read tool. Write one literal
 > sentence describing what you see, in plain English, no hedging. Example:
@@ -642,17 +788,18 @@ local paths of compressed JPEGs that have been written to the vault.
 > or unreadable, write "Unable to describe — image appears corrupt or empty."
 
 Build `VISION_DESCRIPTIONS` as a list of description sentences, one per
-compressed image, in the same order as `compressed_paths`.
+compressed image, in the same order as `ScanResult.attachments`.
 
-Then build `VAULT_WIKI_EMEDS` by prepending each description to its wiki-embed:
+Then build the note's image section by prepending each description to its wiki-embed:
 ```
 VISION_DESCRIPTIONS[0] ![[attachments[0]]]
 VISION_DESCRIPTIONS[1] ![[attachments[1]]]
 ...
 ```
 
-If `images_embedded == 0` but `source_images` is non-empty (images existed
-but couldn't be embedded), use Template B fallback for the image section:
+If `ScanResult.images_embedded == 0` and the source file could have contained
+images (handler_category in document-pdf, image-raster, etc.), use Template B
+fallback for the image section:
 > `> [!info] Images referenced but not embedded`
 > `> Source images listed in frontmatter.`
 
@@ -964,7 +1111,87 @@ After every 10 events, stop and re-read your last 3 notes via
 If any check fails, STOP. Rewrite the offending note before continuing.
 Log the self-check result in the scan summary.
 
-## Step 7 — the scan summary goes in the memory report, NOT the vault
+## Step 7 — update project index notes
+
+After all event notes are written, update the MOC index for each project
+touched during this scan.
+
+### 7a — collect touched projects
+
+Gather the set of `project_name` values from all notes written in this run.
+
+### 7b — update indexes
+
+For each touched project, call `project_index.update_index()`:
+
+```bash
+python3 -c "
+import os, sys, json
+from pathlib import Path
+from datetime import date
+sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
+import project_index as pi
+
+events_json = json.loads(os.environ['VB_EVENTS_JSON'])
+events = [pi.ProjectIndexEvent(**e) for e in events_json]
+result = pi.update_index(
+    project_name=os.environ['VB_PROJECT'],
+    domain=os.environ['VB_DOMAIN'],
+    new_events=events,
+    workdir=os.getcwd(),
+    vault_name=os.environ['VB_VAULT'],
+    today=date.today(),
+)
+print(json.dumps(result))
+" VB_PROJECT=\"$PROJECT_NAME\" VB_DOMAIN=\"$DOMAIN_NAME\" \
+  VB_VAULT=\"$VAULT_NAME\" VB_EVENTS_JSON=\"$EVENTS_JSON\"
+```
+
+### 7c — add backlinks to event notes
+
+For each newly-written event note, add an `index_note` backlink:
+
+```bash
+python3 -c "
+import os, sys
+from pathlib import Path
+sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
+import project_index as pi
+
+pi.add_index_backlink(
+    workdir=os.getcwd(),
+    vault_name=os.environ['VB_VAULT'],
+    note_path=os.environ['VB_NOTE_PATH'],
+    project_name=os.environ['VB_PROJECT'],
+)
+" VB_VAULT=\"$VAULT_NAME\" VB_NOTE_PATH=\"$NOTE_PATH\" VB_PROJECT=\"$PROJECT_NAME\"
+```
+
+### 7d — create the Obsidian template (once)
+
+If the template `_Templates/vault-bridge-project-index.md` does not exist
+in the vault, create it:
+
+```bash
+obsidian read vault="$VAULT_NAME" path="_Templates/vault-bridge-project-index.md" 2>/dev/null || {
+  obsidian create vault="$VAULT_NAME" name="vault-bridge-project-index" \
+    path="_Templates" content="$(python3 -c "
+import sys
+sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
+import project_index as pi
+print(pi._TEMPLATE_PLACEHOLDER)
+")" silent
+}
+```
+
+### 7e — add to memory report
+
+Add these fields to the Step 9 `$STATS_JSON`:
+- `indexes_created: N` — new index notes created
+- `indexes_updated: N` — existing index notes updated
+- `indexes_skipped: N` — projects whose index was unchanged
+
+## Step 7b — the scan summary goes in the memory report, NOT the vault
 
 **Do NOT write a `_scan-log.md` into the vault.** The vault contains only
 real diary notes, their companion canvas files, and `_Attachments/`.

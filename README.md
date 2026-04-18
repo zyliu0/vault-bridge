@@ -85,8 +85,11 @@ note that honestly says so.
 
 - **`/vault-bridge:reconcile <project-path>`** — reconcile existing vault
   notes with the current schema, routing rules, and archive state. Audits
-  frontmatter, fixes fields, detects project-folder renames in the archive,
-  and optionally re-reads sources and moves misrouted notes.
+  frontmatter, fixes fields, detects project-folder renames and moves in
+  the archive, and optionally re-reads sources and moves misrouted notes.
+  New flags: `--rebuild-indexes` regenerates all project index notes;
+  `--resolve-duplicates` runs interactive resolution for detected duplicate
+  project groups.
 
 - **`/vault-bridge:visualization`** — generate a canvas, excalidraw, or marp deck from
   a description. No archive scan needed — writes the artifact directly into
@@ -95,6 +98,12 @@ note that honestly says so.
 - **`/vault-bridge:research`** — research a topic, write a grounded report with cited sources.
 
 - **Image pipeline** — transports archive images, extracts embedded ones from containers (PDF/DOCX/PPTX), LLM-describes, writes to vault as binary attachments with wiki-embed references (`![[filename.jpg]]`).
+
+- **Project index notes** — each project gets a `{project_name}.md` Map of Content at the vault project root, with a Timeline section linking all event notes, auto-inferred Status, and a companion `.base` table file. Overview and editorial sections are never auto-filled — only the user writes prose there.
+
+- **Move detection** — detects when an archive project folder is moved to a new parent path (same name, different location) and repairs `source_path` entries in the scan index and vault frontmatter.
+
+- **Duplicate detection** — detects vault projects with high fingerprint overlap (same content, different vault names) and offers interactive merge via `reconcile --resolve-duplicates`.
 
 - **Auto-checks GitHub for updates** — on relevant prompts, non-blocking, cached 12h (disable via `VAULT_BRIDGE_UPDATE_CHECK=off`).
 
@@ -105,7 +114,9 @@ note that honestly says so.
   installed. vault-bridge writes all notes through the `obsidian` CLI —
   it never touches vault files directly.
 - **Python 3.9+** with `pip install -r requirements.txt` (Pillow, PyYAML,
-  PyPDF2, python-docx, python-pptx)
+  PyPDF2, python-docx, python-pptx). Additional packages for Visual/CAD
+  file types (ezdxf, PyMuPDF, psd-tools, rhino3dm, olefile) are installed
+  on demand during setup Step 6.5 — not required upfront.
 - **A file system** Claude Code can read from. One of:
   - A local directory (`type: local-path`)
   - A mounted drive (`type: external-mount`)
@@ -174,13 +185,20 @@ Setup asks a few structured questions:
    - The archive root path
    - A domain template to start from (architecture, photography, writing,
      social media, research, or general)
+4. **File-type handling (Step 6.5)** — choose which file categories to
+   enable. Standard types (PDF, Office, raster images, plain text) are
+   pre-selected. Visual/CAD types (DXF, DWG, AI/Illustrator, PSD,
+   Rhino 3DM) are opt-in; selecting one installs the required package and
+   generates the handler automatically. Custom extensions can be added by
+   typing them in — PyPI search runs to suggest candidate packages.
 
 You can configure 1 domain or many — an architecture practice, a photography
 archive, and a social media content folder all in one vault. Each domain
 gets its own top-level folder and routing rules.
 
 Setup auto-detects file system types, saves the config, and optionally
-installs an Obsidian note template.
+installs an Obsidian note template. To change file-type settings later,
+run `/vault-bridge:setup` and choose **F — Edit file types**.
 
 ### Step 2 — first scan
 
@@ -322,7 +340,19 @@ vault-bridge/
 │   ├── extract_event_date.py    # filename/mtime date parsing with conflict rule
 │   ├── compress_images.py       # Pillow pipeline with de-dup naming
 │   ├── fingerprint.py           # folder + file fingerprints for rename detection
+│   ├── project_cluster.py       # shared fingerprint-cluster helpers
 │   ├── project_rename.py        # archive→vault project-folder rename detection
+│   ├── project_move.py          # project-folder move detection + index repair
+│   ├── project_index.py         # MOC index note + .base file generation
+│   ├── project_duplicate.py     # duplicate project detection and merge
+│   ├── package_registry.py      # BUILTIN_REGISTRY: extension → PackageSpec
+│   ├── handler_installer.py     # pip install + stub generation per file type
+│   ├── github_package_search.py # PyPI search for custom extension packages
+│   ├── generate_file_type_handlers.py  # regenerates file_type_handlers.py
+│   ├── file_type_handlers.py    # runtime handler: get_handler/read_text/extract_images/handle
+│   ├── scan_pipeline.py         # unified scan pipeline: process_file/process_batch
+│   ├── handlers/                # generated per-category handler stubs
+│   │   └── patterns/            # .py.tmpl templates (cad_dxf, raster_psd, …)
 │   ├── transport_loader.py      # loads named transport module from workdir
 │   ├── transport_registry.py    # lists/validates user-authored transports
 │   ├── transport_migrate.py     # legacy transport.py → transports/ migration
@@ -339,7 +369,8 @@ vault-bridge/
 ├── CLAUDE.md                    # plugin-scoped instructions + domain config reference
 ├── LICENSE                      # MIT
 ├── README.md                    # you are here
-└── requirements.txt             # Pillow, PyYAML, PyPDF2, python-docx, python-pptx
+└── requirements.txt             # core deps: Pillow, PyYAML, PyPDF2, python-docx, python-pptx
+                                 # Visual/CAD deps installed on demand during setup Step 6.5
 ```
 
 ## License

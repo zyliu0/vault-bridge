@@ -72,10 +72,15 @@ Present via AskUserQuestion:
 > - **C — Edit global settings** — vault name, writing style, fabrication stopwords
 > - **D — Full reset** — erase everything and run the full setup wizard from scratch
 > - **E — Cancel** — exit without making any changes
+> - **F — Edit file types** — add/remove file type categories and packages
 
 **Route by choice:**
 
 **E — Cancel:** Print "Setup cancelled. No changes made." and stop.
+
+**F — Edit file types:** Jump directly to **Step 6.5** (file-type configuration).
+This re-runs only the file-type selection, installs any newly chosen packages,
+and regenerates `file_type_handlers.py`. Existing domain config is unchanged.
 
 **A — Add a new domain:**
 Run steps **4a through 4e** once for one new domain, then call:
@@ -403,6 +408,153 @@ print(f'Config written to: {saved_path}')
 For single-domain setups, `save_config` automatically sets `active_domain`
 to the domain's name. For multi-domain setups, `active_domain` remains null
 and scan commands resolve the domain per-invocation via `domain_router`.
+
+## Step 6.5 — configure file-type handling
+
+This step installs Python packages for file extraction and generates a fresh
+`file_type_handlers.py` customized to the user's choices. It runs after the
+config is written (Step 6) and before transport setup (Step 7.5).
+
+### 6.5a — show built-in categories and ask which to enable
+
+Print a table of built-in categories and their default packages:
+
+**Standard file types:**
+
+| Category | Extensions | Default package |
+|---|---|---|
+| document-pdf | pdf | pdfplumber (preferred), PyPDF2 (fallback) |
+| document-office | docx, pptx, xlsx | python-docx, python-pptx, openpyxl |
+| image-raster | jpg, jpeg, png, webp, gif, bmp, tiff, tif | Pillow |
+| image-raster (HEIC) | heic, heif | pillow-heif |
+| text-plain | txt, md, rtf | stdlib (no install needed) |
+
+**Visual/CAD file types:**
+
+| Category | Extensions | Default package | Notes |
+|---|---|---|---|
+| document-office-legacy | doc, ppt | olefile | Legacy binary Office; text extraction via OLE2 stream parsing |
+| cad-dxf | dxf | ezdxf[draw] | AutoCAD DXF; renders modelspace to PNG. ezdxf[draw] includes matplotlib; first install may take 60-120s |
+| cad-dwg | dwg | ezdxf[draw] | AutoCAD DWG native R2004-R2018 reader; same renderer as DXF |
+| vector-ai | ai | PyMuPDF | Adobe Illustrator (.ai is PDF-compatible); renders pages |
+| raster-psd | psd | psd-tools | Photoshop PSD; reads text layers, composites visible layers via Pillow. Files >500MB get text-only processing |
+| cad-3dm | 3dm | rhino3dm | Rhino 3D files yield geometry metadata and notes. Visual rendering requires Rhino and is not supported in this plugin |
+
+AskUserQuestion multi-select — which categories to enable (default: standard only):
+> "Which file categories should vault-bridge process?
+> (Standard categories are enabled by default. Add Visual/CAD types if you work with those formats.)"
+>
+> **Standard:**
+> - [x] document-pdf — PDF files
+> - [x] document-office — Word (.docx), PowerPoint (.pptx), Excel (.xlsx)
+> - [x] image-raster — JPG, PNG, WebP, GIF, BMP, TIFF
+> - [x] image-raster (HEIC) — Apple HEIC/HEIF photos
+> - [x] text-plain — TXT, MD, RTF (no install needed)
+>
+> **Visual/CAD files:**
+> - [ ] document-office-legacy — DOC/PPT legacy binary (olefile)
+> - [ ] cad-dxf — AutoCAD DXF (ezdxf[draw], renders to PNG)
+> - [ ] cad-dwg — AutoCAD DWG (ezdxf[draw], native R2004-R2018 reader)
+> - [ ] vector-ai — Adobe Illustrator (PyMuPDF, renders pages)
+> - [ ] raster-psd — Photoshop PSD (psd-tools + Pillow, composites layers; files >500MB get text-only)
+> - [ ] cad-3dm — Rhino 3D (rhino3dm, metadata + notes text only, no rendering)
+
+### 6.5b — PDF package choice
+
+If document-pdf was selected, AskUserQuestion:
+> "Which PDF package would you like to use?
+> - pdfplumber (recommended) — layout-aware extraction, handles complex PDFs
+> - PyPDF2 (fallback) — simpler, faster, less accurate on complex layouts"
+
+Store the choice. It will be used when installing the PDF handler.
+
+### 6.5c — custom extensions
+
+AskUserQuestion (free text):
+> "Any additional file types to add? Enter comma-separated extensions
+> (e.g. 'xps, epub, odt'), or press Enter to skip."
+
+Normalize each entry: strip whitespace, remove leading dots, lowercase.
+
+### 6.5d — search for custom extension packages
+
+For each custom extension entered in 6.5c:
+
+```python
+import sys
+from pathlib import Path
+sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
+from github_package_search import search_for_extension
+candidates = search_for_extension(ext, max_results=5)
+```
+
+Show as AskUserQuestion numbered list with name + description + version:
+> "Which package should handle '.{ext}' files?
+> 1. {candidate.pip_name} — {candidate.description} (v{candidate.latest_version})
+> 2. ...
+> N. None — skip this extension"
+
+### 6.5e — pip install all chosen packages
+
+For each selected (ext, spec) pair:
+
+```python
+import sys
+from pathlib import Path
+sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
+from handler_installer import install_builtin, install_custom
+from package_registry import for_extension, default_for
+
+handlers_dir = Path.cwd() / '.vault-bridge' / 'handlers'
+
+# For built-in extensions (e.g. pdf, docx):
+result = install_builtin(ext, spec, handlers_dir)
+
+# For custom extensions found via search:
+result = install_custom(ext, spec, handlers_dir)
+
+if not result.ok:
+    print(f"Warning: could not install {spec.pip_name}: {result.error}")
+```
+
+Collect all results. Skip stdlib packages (pip_name="" — they install instantly
+with ok=True and no network call needed).
+
+Update `file_type_config.installed_packages` in the config with each successful
+installation:
+
+```python
+from config import load_config, save_config
+cfg = load_config(Path.cwd())
+cfg.file_type_config.setdefault("installed_packages", {})
+for result in successful_results:
+    cfg.file_type_config["installed_packages"][result.ext] = result.handler_module
+save_config(Path.cwd(), cfg)
+```
+
+### 6.5f — regenerate file_type_handlers.py
+
+```python
+import sys
+from pathlib import Path
+sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
+from generate_file_type_handlers import generate
+
+out_path = generate(Path.cwd())
+print(f"Generated: {out_path}")
+```
+
+### 6.5g — print summary
+
+> "File types configured:
+> - Enabled: {N_categories} categories
+> - Installed: {N_installed} packages ({list of pip_names})
+> - Skipped: {N_skipped} (user chose None or install failed)
+>
+> To change file-type settings later, choose 'F — Edit file types' from
+> the vault-bridge setup menu."
+
+---
 
 ## Step 7.5 — build transport per domain
 

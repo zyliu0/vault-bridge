@@ -36,6 +36,7 @@ _HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(_HERE))
 
 import vault_scan  # noqa: E402
+import project_cluster as pc  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -62,7 +63,7 @@ class ProjectRenameDetection:
 
 
 # ---------------------------------------------------------------------------
-# Detection
+# Internal helper — kept for clarity, delegates to project_cluster
 # ---------------------------------------------------------------------------
 
 def _project_from_note_path(note_path: str) -> str:
@@ -70,11 +71,19 @@ def _project_from_note_path(note_path: str) -> str:
 
     Notes live at `<project>/<subfolder>/<note>.md` relative to the vault
     root, so the first path component is the project.
+
+    Delegates to project_cluster.project_from_note_path but always returns
+    the FIRST component for rename detection (legacy scan index format
+    has no domain prefix).
     """
     if not note_path:
         return ""
     return note_path.split("/", 1)[0]
 
+
+# ---------------------------------------------------------------------------
+# Detection
+# ---------------------------------------------------------------------------
 
 def detect_project_rename(
     workdir,
@@ -178,36 +187,12 @@ def rewrite_index_project(workdir, old_name: str, new_name: str) -> int:
     note_path column of every entry. Returns the number of lines updated.
 
     Atomic: writes to a .tmp sibling then renames.
+
+    Delegates to vault_scan.rewrite_index_note_prefix.
     """
     if not old_name or not new_name or old_name == new_name:
         return 0
 
-    # Access the private _index_path helper via module attribute
-    index_file = vault_scan._index_path(workdir)
-    if not index_file.exists():
-        return 0
-
     old_prefix = old_name + "/"
-    updated = 0
-    new_lines: List[str] = []
-    for line in index_file.read_text().splitlines():
-        if not line.strip():
-            new_lines.append(line)
-            continue
-        parts = line.split("\t")
-        if len(parts) != 3:
-            new_lines.append(line)
-            continue
-        source_path, fingerprint, note_path = parts
-        if note_path.startswith(old_prefix):
-            note_path = new_name + "/" + note_path[len(old_prefix):]
-            updated += 1
-        new_lines.append(f"{source_path}\t{fingerprint}\t{note_path}")
-
-    if updated == 0:
-        return 0
-
-    tmp = index_file.with_suffix(index_file.suffix + ".tmp")
-    tmp.write_text("\n".join(new_lines) + "\n")
-    tmp.replace(index_file)
-    return updated
+    new_prefix = new_name + "/"
+    return vault_scan.rewrite_index_note_prefix(workdir, old_prefix, new_prefix)

@@ -340,3 +340,101 @@ def test_return_dict_has_all_required_keys(tmp_path):
     }
     missing = required_keys - set(result.keys())
     assert not missing, f"Missing keys in result: {missing}"
+
+
+# ---------------------------------------------------------------------------
+# New tests for process_via_handler (SP: image_pipeline integration with scan_pipeline)
+# ---------------------------------------------------------------------------
+
+def test_process_via_handler_delegates_to_scan_pipeline(tmp_path):
+    """process_via_handler delegates to scan_pipeline.process_file (mock verify)."""
+    import scan_pipeline  # noqa: F401 — ensure importable
+    out_tempdir = tmp_path / "tmp_out"
+    out_tempdir.mkdir()
+
+    archive_file = tmp_path / "photo.jpg"
+    archive_file.write_bytes(_make_jpeg_bytes())
+
+    fake_result = mock.MagicMock()
+    fake_result.attachments = ["![[2026-01-15--photo--abc12345.jpg]]"]
+    fake_result.images_embedded = 1
+    fake_result.warnings = []
+    fake_result.errors = []
+    fake_result.text = ""
+    fake_result.skipped = False
+    fake_result.handler_category = "image-raster"
+
+    with mock.patch("image_pipeline.scan_pipeline") as mock_sp:
+        mock_sp.process_file.return_value = fake_result
+        result = image_pipeline.process_via_handler(
+            source_path=str(archive_file),
+            workdir=str(tmp_path),
+            vault_project_path="TestProject/SD",
+            event_date="2026-01-15",
+            out_tempdir=out_tempdir,
+        )
+
+    mock_sp.process_file.assert_called_once()
+    call_kwargs = mock_sp.process_file.call_args
+    # The call should have source_path, workdir, vault_project_path, event_date
+    assert str(archive_file) in str(call_kwargs)
+
+
+def test_process_via_handler_returns_dict_with_required_keys(tmp_path):
+    """process_via_handler returns dict with same keys as process_source_for_images."""
+    import scan_pipeline  # noqa
+    out_tempdir = tmp_path / "tmp_out"
+    out_tempdir.mkdir()
+
+    archive_file = tmp_path / "photo.jpg"
+    archive_file.write_bytes(_make_jpeg_bytes())
+    _write_valid_transport(tmp_path, archive_file)
+
+    fake_result = mock.MagicMock()
+    fake_result.attachments = ["![[img.jpg]]"]
+    fake_result.images_embedded = 1
+    fake_result.warnings = []
+    fake_result.errors = []
+    fake_result.text = ""
+    fake_result.skipped = False
+    fake_result.handler_category = "image-raster"
+
+    with mock.patch("image_pipeline.scan_pipeline") as mock_sp:
+        mock_sp.process_file.return_value = fake_result
+        result = image_pipeline.process_via_handler(
+            source_path=str(archive_file),
+            workdir=str(tmp_path),
+            vault_project_path="TestProject/SD",
+            event_date="2026-01-15",
+            out_tempdir=out_tempdir,
+        )
+
+    required_keys = {
+        "source_images", "compressed_paths", "vault_wiki_embeds",
+        "attachments", "images_embedded", "warnings", "errors",
+    }
+    missing = required_keys - set(result.keys())
+    assert not missing, f"Missing keys: {missing}"
+
+
+def test_process_source_for_images_backward_compat(tmp_path):
+    """process_source_for_images still works (backward compat)."""
+    _write_failing_transport(tmp_path)
+    out_tempdir = tmp_path / "tmp_out"
+    out_tempdir.mkdir()
+
+    result = image_pipeline.process_source_for_images(
+        workdir=tmp_path,
+        vault_name="MyVault",
+        archive_path="/fake/file.jpg",
+        file_type="jpg",
+        event_date="2026-01-15",
+        project_vault_path="TestProject",
+        out_tempdir=out_tempdir,
+        runner=_success_vault_runner,
+    )
+
+    # Still returns the same structure
+    assert "images_embedded" in result
+    assert "errors" in result
+    assert result["images_embedded"] == 0  # transport failed

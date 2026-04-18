@@ -3,7 +3,9 @@
 Chain: transport.fetch_to_local → extract_embedded_images (if container)
        → compress_images → vault_binary.write_binary → wiki-embed
 
-Entry point: process_source_for_images()
+Entry points:
+  process_source_for_images() — original API (backward compat)
+  process_via_handler()       — new API: delegates to scan_pipeline.process_file()
 
 Python 3.9 compatible.
 """
@@ -19,6 +21,12 @@ import compress_images
 import extract_embedded_images
 import transport_loader
 import vault_binary
+
+# Lazy import to avoid circular dependency; imported inside process_via_handler
+try:
+    import scan_pipeline  # type: ignore
+except ImportError:
+    scan_pipeline = None  # type: ignore
 
 logger = logging.getLogger(__name__)
 
@@ -142,3 +150,76 @@ def process_source_for_images(
             result["errors"].append(f"vault write failed for {compressed.name}: {err}")
 
     return result
+
+
+def process_via_handler(
+    source_path: str,
+    workdir: str,
+    vault_project_path: str,
+    event_date: str,
+    out_tempdir: Optional[Path] = None,
+    *,
+    dry_run: bool = False,
+) -> Dict:
+    """New entry point: delegate file processing to scan_pipeline.process_file().
+
+    This is a thin wrapper that calls scan_pipeline.process_file() and converts
+    the resulting ScanResult back to the same dict structure as
+    process_source_for_images() for backward compatibility.
+
+    Args:
+        source_path:        Archive-side path to the source file.
+        workdir:            Working directory (not used directly — scan_pipeline handles it).
+        vault_project_path: Vault folder path for the project.
+        event_date:         ISO date string (YYYY-MM-DD).
+        out_tempdir:        Optional temp directory (ignored — scan_pipeline manages its own).
+        dry_run:            If True, skip vault writes.
+
+    Returns:
+        Dict with same keys as process_source_for_images():
+        {
+            "source_images": list[str],
+            "compressed_paths": list[Path],
+            "vault_wiki_embeds": list[str],
+            "attachments": list[str],
+            "images_embedded": int,
+            "warnings": list[str],
+            "errors": list[str],
+        }
+    """
+    if scan_pipeline is None:
+        return {
+            "source_images": [source_path],
+            "compressed_paths": [],
+            "vault_wiki_embeds": [],
+            "attachments": [],
+            "images_embedded": 0,
+            "warnings": [],
+            "errors": ["scan_pipeline module not available"],
+        }
+
+    result = scan_pipeline.process_file(
+        source_path=source_path,
+        workdir=workdir,
+        vault_project_path=vault_project_path,
+        event_date=event_date,
+        dry_run=dry_run,
+    )
+
+    # Convert ScanResult to the legacy dict shape
+    # Strip ![[...]] wrapper to get bare filenames for "attachments"
+    bare_filenames = [
+        embed[3:-2]  # strip leading "![[" (3 chars) and trailing "]]" (2 chars)
+        for embed in result.attachments
+        if embed.startswith("![[") and embed.endswith("]]")
+    ]
+
+    return {
+        "source_images": [source_path],
+        "compressed_paths": [],  # Not tracked in ScanResult; compressed paths are internal
+        "vault_wiki_embeds": list(result.attachments),
+        "attachments": bare_filenames,
+        "images_embedded": result.images_embedded,
+        "warnings": list(result.warnings),
+        "errors": list(result.errors),
+    }
