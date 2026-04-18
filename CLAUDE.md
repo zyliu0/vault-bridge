@@ -499,10 +499,11 @@ rebuild it after adding or removing file-type packages.
 
 All scan commands (retro-scan, heartbeat-scan, reconcile) route files
 through `process_file(path, workdir, config)` and
-`process_batch(paths, workdir, config, max_reads=20)`. The 20-file read
-limit applies to text extraction; files with `render_pages=True`
-(Visual/CAD types) still receive page-render screenshots after the text
-limit is reached.
+`process_batch(paths, workdir, config)`. By default there is no read limit —
+all files are fully read. Pass `max_reads=N` to cap text extraction at N
+files per batch (e.g. for throttling on large archives). Files with
+`render_pages=True` (Visual/CAD types) always have their images extracted
+regardless of any max_reads cap.
 
 **Setup wizard Step 6.5:**
 

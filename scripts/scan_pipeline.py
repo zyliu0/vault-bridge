@@ -10,7 +10,7 @@ Routes each source file through the file-type handler registry:
 
 Entry points:
   process_file(source_path, workdir, vault_project_path, event_date, *, dry_run=False) -> ScanResult
-  process_batch(source_paths, workdir, vault_project_path, event_date, *, max_reads=20, dry_run=False) -> list[ScanResult]
+  process_batch(source_paths, workdir, vault_project_path, event_date, *, max_reads=None, dry_run=False) -> list[ScanResult]
 
 CLI:
   python scripts/scan_pipeline.py process <path> --workdir DIR --vault-path PATH --event-date DATE [--dry-run]
@@ -314,21 +314,22 @@ def process_batch(
     vault_project_path: str,
     event_date: str,
     *,
-    max_reads: int = 20,
+    max_reads: Optional[int] = None,
     dry_run: bool = False,
 ) -> List[ScanResult]:
-    """Process a list of source files, enforcing a text-read rate limit.
+    """Process a list of source files, with an optional text-read cap.
 
-    The 20-file (default) read limit applies to text extraction only.
-    Image/render_pages extraction still runs even after the limit is hit
-    for files whose handler has render_pages=True (but not extract_text).
+    By default (max_reads=None) all files are fully read — no limit.
+    Pass max_reads=N to cap text extraction at N files per batch; files
+    beyond the cap that also have images still have their images extracted.
+    Pass max_reads=0 to skip all text extraction (images still run).
 
     Args:
         source_paths:       Ordered list of source file paths to process.
         workdir:            Working directory.
         vault_project_path: Vault subfolder path.
         event_date:         ISO date for attachment naming.
-        max_reads:          Maximum number of text-read operations (default 20).
+        max_reads:          Max text-read operations. None = unlimited (default).
         dry_run:            Skip all vault writes when True.
 
     Returns:
@@ -343,7 +344,7 @@ def process_batch(
         # Determine if this file would count toward the read limit
         would_read_text = handler is not None and handler.extract_text and handler.category not in _SKIP_CATEGORIES
 
-        if would_read_text and reads_done >= max_reads:
+        if would_read_text and max_reads is not None and reads_done >= max_reads:
             # Text-read limit reached — check if render_pages-only processing is possible
             if handler is not None and (handler.extract_images or handler.render_pages):
                 # Has images: text is blocked, but images should still run
@@ -452,7 +453,7 @@ if __name__ == "__main__":
     batch_parser.add_argument("--workdir", required=True, help="Working directory")
     batch_parser.add_argument("--vault-path", required=True, dest="vault_path", help="Vault project path")
     batch_parser.add_argument("--event-date", required=True, dest="event_date", help="Event date YYYY-MM-DD")
-    batch_parser.add_argument("--max-reads", type=int, default=20, dest="max_reads", help="Max text-read operations")
+    batch_parser.add_argument("--max-reads", type=int, default=None, dest="max_reads", help="Max text-read operations (default: unlimited)")
     batch_parser.add_argument("--dry-run", action="store_true", dest="dry_run", help="Skip vault writes")
 
     args = parser.parse_args()

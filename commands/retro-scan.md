@@ -636,22 +636,13 @@ then STOP before processing. No file reads, no note writes, no index updates.
 
 For each detected event, in chronological order:
 
-### Hard read rate limit
+### Read rate
 
-**CRITICAL — cache exhaustion guard:** During a single retro-scan session,
-reading more than **20 files** risks exhausting the context cache, causing
-subsequent reads to silently fail and produce Template B (metadata-only)
-notes for files that should have been read.
-
-Hardcoded rule:
-- Track `files_read_this_session` starting at `0`
-- For each file that would be read (PDF, DOCX, PPTX, XLSX, PSD, AI, DWG,
-  DXF, or representative files inside a folder): increment `files_read_this_session`
-- If `files_read_this_session == 20`, **stop reading new files**. All remaining
-  events for this scan session → Template B (metadata-only). Log:
-  `Read limit reached ({N} files). Remaining events will be metadata-only to avoid cache exhaustion.`
-- If `files_read_this_session > 20`, always use Template B — do not attempt
-  to read, do not increment the counter further
+`process_batch` has no default read limit — all files are fully read.
+Pass `--max-reads N` on the CLI (or `max_reads=N` in Python) to cap text
+extraction at N files per batch, for example when throttling on a very
+large archive. Visual/CAD files (`render_pages=True`) always have their
+images extracted regardless of any cap.
 
 This is a hard rule baked into the plugin. It cannot be overridden by the
 user mid-scan. The limit exists because the model shares context across
@@ -767,10 +758,8 @@ Use the returned `ScanResult` fields to populate note body and frontmatter:
 - `ScanResult.sources_read` — use for `sources_read` frontmatter field
 - `ScanResult.read_bytes` — use for `read_bytes` frontmatter field
 
-The 20-file read limit is enforced by `process_batch(max_reads=20)` when
-processing all events at once, or track manually when calling `process_file`
-in a loop (stop calling process_file for text-extraction files once 20 reads
-have been made; image-only files may continue).
+Use `process_batch(source_paths, ...)` to process all events at once (no
+limit by default), or call `process_file` in a loop for single-file control.
 
 ### 6e-image. Image descriptions for image-bearing events
 
@@ -834,7 +823,7 @@ NAS: `{source_path}`
 No prose. No framing. No "probably". No comparisons across files. No "the team".
 No "the review". Just the literal metadata.
 
-**Reason not read** may be one of: `file type excluded`, `read limit reached (cache guard)`,
+**Reason not read** may be one of: `file type excluded`, `read limit reached`,
 `access pattern unavailable`, `extraction failed`, `not attempted`.
 
 ### 6e-2. Proactive wikilinks for Template B notes
@@ -844,7 +833,7 @@ would be orphaned (no incoming wikilinks from other vault-bridge notes).
 If wikilinks can be found, inject them into the body to prevent orphan status.
 
 **This step fires for every Template B write**, regardless of whether the
-read limit was hit or the file type is intentionally metadata-only.
+file type is intentionally metadata-only or extraction failed.
 
 Run:
 ```bash

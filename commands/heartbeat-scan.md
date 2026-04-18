@@ -418,12 +418,10 @@ For each delta file, follow the same per-event pipeline as retro-scan:
    - `result.read_bytes` — use for `read_bytes` frontmatter field
    - `result.warnings` / `result.errors` — log these for the heartbeat memory report
 
-   The `scan_pipeline` automatically enforces the 20-file text-read limit when
-   using `process_batch(max_reads=20)`. In heartbeat, call `process_file` in a
-   loop and track `reads_done += result.sources_read`; once `reads_done >= 20`,
-   stop text extraction (remaining files become Template B). Image extraction
-   for `render_pages=True` files (DXF, DWG, AI, PSD) is NOT blocked by the
-   read limit — only text extraction is limited.
+   The `scan_pipeline` has no default read limit — all files are fully read.
+   Use `process_batch(source_paths, ...)` or call `process_file` in a loop.
+   Image extraction for `render_pages=True` files (DXF, DWG, AI, PSD) always
+   runs. To throttle, pass `max_reads=N` explicitly.
 
 5b. For Template B notes (result.content_confidence == "none"): inject proactive
    wikilinks before writing. Run `link_strategy.find_linking_candidates()` and
@@ -488,9 +486,7 @@ print(json.dumps(result))
 ```
 
 Rules:
-- If the read-rate budget is exhausted, log as `indexes_deferred` in memory report
-  and skip index updates for this run.
-- Index updates do NOT count toward the 20-file read limit (they don't read source files).
+- Index updates do not read source files — they are never rate-limited.
 
 ## Step 5b — calendar sync (opt-in)
 

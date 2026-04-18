@@ -8,7 +8,7 @@ SP2.  process_file with unknown extension → skipped=True, skip_reason contains
 SP3.  process_file with handler where skip=True (video/audio) → skipped=True
 SP4.  process_file with render_pages=True handler (mock) → extract_images called, attachments populated
 SP5.  process_file with extract_text=False handler → text="", sources_read=0
-SP6.  process_batch read limit: 21 text files → first 20 have sources_read=1, 21st has skip_reason="read_limit_reached"
+SP6.  process_batch with max_reads=20: 21 text files → first 20 have sources_read=1, 21st has skip_reason="read_limit_reached"
 SP7.  process_batch read limit does NOT affect render_pages-only files (images still extracted even after limit)
 SP8.  content_confidence: "" → "none", 50 chars → "low", 200 chars → "high"
 SP9.  dry_run=True → no vault writes (mock vault_binary, assert not called)
@@ -23,6 +23,7 @@ SP17. CLI entry point: process subcommand outputs JSON to stdout
 SP18. CLI entry point: batch subcommand with paths file outputs JSON array to stdout
 SP19. ScanResult dataclass fields match specification exactly
 SP20. process_batch with max_reads=0 → all text files have skip_reason="read_limit_reached"
+SP21. process_batch default (max_reads=None) → all files read, no limit enforced
 """
 import json
 import sys
@@ -638,7 +639,8 @@ class TestImageFileAttachments:
 
 
 # ---------------------------------------------------------------------------
-# SP6. process_batch read limit: 21 files → first 20 read, 21st skipped
+# SP6. process_batch with explicit max_reads=20: 21 files → first 20 read, 21st skipped
+# SP21. process_batch default (no max_reads): all files read, no limit
 # ---------------------------------------------------------------------------
 
 class TestProcessBatchReadLimit:
@@ -712,6 +714,29 @@ class TestProcessBatchReadLimit:
             assert r.skip_reason == "read_limit_reached", (
                 f"Expected read_limit_reached, got: {r.skip_reason!r}"
             )
+
+    def test_default_no_limit_all_files_read(self, tmp_path):
+        """SP21: default max_reads=None → all files are read, no limit."""
+        import scan_pipeline
+        files = []
+        for i in range(25):
+            f = tmp_path / f"doc_{i:02d}.txt"
+            _write_text_file(f, f"Content of file {i}. " * 10)
+            files.append(str(f))
+
+        results = scan_pipeline.process_batch(
+            source_paths=files,
+            workdir=str(tmp_path),
+            vault_project_path="Proj",
+            event_date="2026-04-19",
+            dry_run=True,
+        )
+
+        assert len(results) == 25
+        reads_done = sum(1 for r in results if r.sources_read > 0)
+        assert reads_done == 25, f"Expected all 25 read, got {reads_done}"
+        skipped_due_to_limit = [r for r in results if r.skip_reason == "read_limit_reached"]
+        assert skipped_due_to_limit == [], "No files should be skipped by default"
 
 
 # ---------------------------------------------------------------------------

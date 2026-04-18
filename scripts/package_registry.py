@@ -225,8 +225,7 @@ _PSD_TOOLS = PackageSpec(
     extract_images=True,
     github_url="https://github.com/psd-tools/psd-tools",
     preferred=True,
-    notes="Reads text layers; composites visible layers via Pillow. "
-          "Files >500MB get text-only processing.",
+    notes="Reads text layers; composites visible layers via Pillow.",
 )
 
 _RHINO3DM = PackageSpec(
