@@ -58,7 +58,7 @@ import json
 import sys
 from dataclasses import fields as dc_fields
 from pathlib import Path
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import MagicMock, patch
 from urllib.error import URLError
 
 import pytest

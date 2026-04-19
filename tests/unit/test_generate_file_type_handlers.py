@@ -46,7 +46,6 @@ EC3.  generate() returns the path it wrote to
 import importlib.util
 import json
 import sys
-import textwrap
 from pathlib import Path
 from unittest import mock
 

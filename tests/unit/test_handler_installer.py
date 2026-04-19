@@ -55,9 +55,8 @@ EC4.  generate_handler_stub for stdlib variant has empty pip_name in header
 import importlib.util
 import subprocess
 import sys
-import textwrap
 from pathlib import Path
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import MagicMock, patch
 
 import pytest
 

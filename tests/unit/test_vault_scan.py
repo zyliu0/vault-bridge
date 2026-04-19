@@ -20,7 +20,6 @@ Three responsibilities:
    - Keep last N manifests (default 2)
 """
 import os
-import signal
 import subprocess
 import sys
 import time

@@ -6,7 +6,7 @@ All tests use tmp_path for isolation and mock memory_log.append.
 import json
 import sys
 from pathlib import Path
-from unittest.mock import patch, call
+from unittest.mock import patch
 
 import pytest
 

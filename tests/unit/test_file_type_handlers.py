@@ -87,7 +87,6 @@ EC5. All extensions in HANDLERS are lowercase and start with no dot
 """
 import io
 import sys
-import textwrap
 from dataclasses import fields as dc_fields
 from pathlib import Path
 from unittest import mock

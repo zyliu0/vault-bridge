@@ -18,6 +18,11 @@ It's a Claude Code plugin. It runs from the terminal via the `claude` CLI.
 It never modifies your source files — the archive stays read-only, the
 vault is the only thing that changes.
 
+**Works best for architects and others who produce content:** drawings, renderings,
+meeting memos, specifications, reports — project work that accumulates over months
+and years but never gets properly indexed. If your practice lives in a NAS full of
+folders, vault-bridge turns it into a vault you can actually search and share.
+
 ## What it produces
 
 ```
