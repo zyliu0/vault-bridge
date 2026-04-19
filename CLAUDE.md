@@ -47,6 +47,13 @@ amounts, dimensions, or relationships must be something the model literally
 saw in the extracted text. If the source was not read, the note uses
 Template B verbatim — fixed bullet template, no prose.
 
+**No-content enforcement (v13+):** When `scan_pipeline.process_file()` is
+called on a readable file type (PDF, Office, image, text, CAD) and extraction
+yields neither text nor images, the result has `skipped=True,
+skip_reason="no_content"`. No note is written. Template B is reserved only
+for genuinely non-readable types (video, audio, archive, unknown extension).
+Callers may pass `skip_on_no_content=False` to override.
+
 The stop-word list that enforces this:
 - "pulled the back wall in"
 - "the team" (as a collective actor)
@@ -233,11 +240,14 @@ source content to populate and are never fabricated:
   updates; the user writes this by hand.
 - **Status** — inferred from event recency (`active`, `stalled`, `closed`,
   `archived`). Updated automatically.
-- **Timeline** — auto-derived: links to all event notes in date order.
-  This is the only section vault-bridge writes prose for — it links, not
-  describes.
-- **Subfolders** — auto-derived: lists vault subfolders that contain
-  events.
+- **Substructures** (v13+) — auto-derived when a project has events in ≥2
+  distinct subfolders. Groups events under `### SF/` headings so the user
+  can navigate to SD, DD, Meetings etc. without scrolling through all events.
+  Omitted when all events are in a single subfolder.
+- **Timeline (all events)** — auto-derived: links to all event notes in
+  date order regardless of subfolder. This is the only section vault-bridge
+  writes prose for — it links, not describes.
+- **Subfolders** — auto-derived: lists vault subfolders that contain events.
 - **Parties**, **Budget**, **Key Decisions**, **Open Items**, **Related
   Projects** — placeholder sections; vault-bridge never fills these in.
   They exist so the user has a consistent place to record the information
@@ -504,6 +514,13 @@ all files are fully read. Pass `max_reads=N` to cap text extraction at N
 files per batch (e.g. for throttling on large archives). Files with
 `render_pages=True` (Visual/CAD types) always have their images extracted
 regardless of any max_reads cap.
+
+Key `ScanResult` fields added in v13:
+- `image_grid: bool` — True when ≥3 images embedded; caller sets `cssclasses: [image-grid]` and renders embeds with no blank lines (Minimal theme grid)
+- `attachments_subfolder: str` — non-empty when >10 images were placed in a per-event subfolder `_Attachments/{YYYY-MM-DD}--{slug}/` instead of flat `_Attachments/`
+
+`IMAGE_SUBFOLDER_THRESHOLD = 10`: events with more than 10 embedded images get their attachments placed in a date-scoped subfolder to keep `_Attachments/` navigable.
+`IMAGE_GRID_MIN = 3`: events with ≥3 images signal the note builder to use grid layout.
 
 **Setup wizard Step 6.5:**
 

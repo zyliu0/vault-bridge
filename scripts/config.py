@@ -96,9 +96,12 @@ class Domain:
     content_overrides: List[Dict[str, str]] = field(default_factory=list)
     skip_patterns: List[str] = field(default_factory=list)
     calendar_sync: bool = False
+    throughput_bps: Optional[float] = None
 
     @classmethod
     def from_dict(cls, d: dict) -> "Domain":
+        raw_tput = d.get("throughput_bps")
+        throughput_bps: Optional[float] = float(raw_tput) if raw_tput is not None else None
         return cls(
             name=d["name"],
             label=d.get("label", d["name"]),
@@ -112,6 +115,7 @@ class Domain:
             content_overrides=list(d.get("content_overrides", [])),
             skip_patterns=list(d.get("skip_patterns", [])),
             calendar_sync=bool(d.get("calendar_sync", False)),
+            throughput_bps=throughput_bps,
         )
 
     def to_dict(self) -> dict:
@@ -128,6 +132,7 @@ class Domain:
             "content_overrides": list(self.content_overrides),
             "skip_patterns": list(self.skip_patterns),
             "calendar_sync": self.calendar_sync,
+            "throughput_bps": self.throughput_bps,
         }
 
 

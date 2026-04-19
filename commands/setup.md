@@ -628,7 +628,7 @@ Pin this wording in the command verbatim:
 > glasses." Do not describe anything you cannot see. If the image is blank
 > or unreadable, write "Unable to describe — image appears corrupt or empty."
 
-Run the probe:
+Run the probe (pass `transport_name` and `domain_name` so the speed check runs and persists the result):
 ```bash
 python3 -c "
 import sys, json
@@ -645,10 +645,14 @@ result = setup_probe.run_probe(
     sample_archive_paths=['$SAMPLE_PATH'],
     sample_container_path='$SAMPLE_CONTAINER' if '$SAMPLE_CONTAINER' != 'None' else None,
     vision_callback=vision_callback,
+    transport_name='$TRANSPORT_SLUG',
+    domain_name='$DOMAIN_NAME',
 )
 print(json.dumps(result))
 "
 ```
+
+The probe result includes `throughput_bps` (float or null). If set, it is automatically saved to the domain's config. Speed is measured using up to 5 sample files; the result is informational — used during scans to warn about expected-slow large-file reads. Reads are never blocked or timed out.
 
 Skip domains with `transport=None` (no transport configured yet).
 
@@ -696,6 +700,7 @@ Report:
 >   {for each domain:}
 >   - {label} ({name}/) — {archive_root}
 >     - Transport: {domain.transport or '(not configured — run /vault-bridge:build-transport)'}
+>     - Speed: {f"{domain.throughput_bps / 1_048_576:.1f} MB/s (measured)" if domain.throughput_bps else "(not measured)"}
 >     - {len(routing_patterns)} routing rules
 > - Capability probe: {probe_ok} ({N_passed}/{N_total} checks passed)
 >   {if probe had failures:}

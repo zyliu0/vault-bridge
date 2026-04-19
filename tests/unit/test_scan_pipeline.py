@@ -468,7 +468,10 @@ class TestProcessFileNeverRaises:
         assert result.skipped is True
 
     def test_permission_error_goes_to_errors(self, tmp_path):
-        """SP16: extraction failure → errors list populated, not raised."""
+        """SP16: extraction failure → errors list populated, not raised.
+
+        skip_on_no_content=False to test the error-capture path specifically.
+        """
         import scan_pipeline
         txt = tmp_path / "file.txt"
         _write_text_file(txt, "content")
@@ -480,6 +483,7 @@ class TestProcessFileNeverRaises:
                 workdir=str(tmp_path),
                 vault_project_path="Proj",
                 event_date="2026-04-19",
+                skip_on_no_content=False,  # don't skip — test error capture
                 dry_run=True,
             )
         # Must not raise; error should be captured
@@ -946,7 +950,10 @@ class TestProcessBatchEdgeCases:
 
 class TestProcessImagesErrorPaths:
     def test_compress_error_goes_to_warnings(self, tmp_path):
-        """compress_images.CompressError on an image → warning added, not an error."""
+        """compress_images.CompressError on an image → warning added, not an error.
+
+        skip_on_no_content=False to test the warning-capture path specifically.
+        """
         import scan_pipeline
         img = tmp_path / "photo.jpg"
         _write_fake_jpeg(img)
@@ -961,6 +968,7 @@ class TestProcessImagesErrorPaths:
                     workdir=str(tmp_path),
                     vault_project_path="Proj",
                     event_date="2026-04-19",
+                    skip_on_no_content=False,
                     dry_run=False,
                 )
         assert len(result.warnings) >= 1
@@ -968,7 +976,10 @@ class TestProcessImagesErrorPaths:
         assert result.images_embedded == 0
 
     def test_generic_compress_exception_goes_to_warnings(self, tmp_path):
-        """Generic exception during compress → warning, not crash."""
+        """Generic exception during compress → warning, not crash.
+
+        skip_on_no_content=False to test the error-capture path specifically.
+        """
         import scan_pipeline
         img = tmp_path / "photo.jpg"
         _write_fake_jpeg(img)
@@ -983,13 +994,17 @@ class TestProcessImagesErrorPaths:
                     workdir=str(tmp_path),
                     vault_project_path="Proj",
                     event_date="2026-04-19",
+                    skip_on_no_content=False,
                     dry_run=False,
                 )
         assert isinstance(result, scan_pipeline.ScanResult)
         assert result.images_embedded == 0
 
     def test_vault_write_failure_goes_to_errors(self, tmp_path):
-        """vault_binary.write_binary returning ok=False → error in result."""
+        """vault_binary.write_binary returning ok=False → error in result.
+
+        skip_on_no_content=False to test the error-capture path specifically.
+        """
         import scan_pipeline
         img = tmp_path / "photo.jpg"
         _write_fake_jpeg(img)
@@ -1007,6 +1022,7 @@ class TestProcessImagesErrorPaths:
                         workdir=str(tmp_path),
                         vault_project_path="Proj",
                         event_date="2026-04-19",
+                        skip_on_no_content=False,
                         dry_run=False,
                     )
         assert len(result.errors) >= 1
@@ -1032,6 +1048,7 @@ class TestProcessImagesErrorPaths:
                         workdir=str(tmp_path),
                         vault_project_path="Proj",
                         event_date="2026-04-19",
+                        skip_on_no_content=False,
                         dry_run=False,
                     )
         assert isinstance(result, scan_pipeline.ScanResult)
@@ -1052,6 +1069,7 @@ class TestProcessImagesErrorPaths:
                 workdir=str(tmp_path),
                 vault_project_path="Proj",
                 event_date="2026-04-19",
+                skip_on_no_content=False,
                 dry_run=False,
             )
         assert isinstance(result, scan_pipeline.ScanResult)
@@ -1117,7 +1135,8 @@ class TestProcessImagesOnly:
                     )
 
         dxf_result = results[-1]
-        assert dxf_result.skip_reason == "read_limit_reached"
+        assert dxf_result.skipped is False
+        assert dxf_result.skip_reason == ""  # written note, not skipped
         assert dxf_result.sources_read == 0  # text not read
         assert dxf_result.images_embedded >= 1  # images extracted
 
@@ -1226,8 +1245,439 @@ class TestProcessImagesOnlyErrorBranch:
                 workdir=str(tmp_path),
                 vault_project_path="Proj",
                 event_date="2026-04-19",
+                vault_name="",
                 dry_run=True,
             )
         assert isinstance(result, scan_pipeline.ScanResult)
         assert len(result.errors) >= 1
         assert "image-only processing error" in result.errors[0]
+
+
+# ---------------------------------------------------------------------------
+# vault_name propagation and _Attachments path
+# ---------------------------------------------------------------------------
+
+class TestVaultNamePropagation:
+    def test_vault_name_passed_to_write_binary(self, tmp_path):
+        """vault_name parameter must reach vault_binary.write_binary."""
+        import scan_pipeline
+        img = tmp_path / "photo.jpg"
+        _write_fake_jpeg(img)
+        compressed = tmp_path / "2026-04-19--photo--abc123ab.jpg"
+        _write_fake_jpeg(compressed)
+
+        calls = []
+
+        def fake_write_binary(vault_name, src_abs_path, vault_dst_path):
+            calls.append({"vault_name": vault_name, "vault_dst_path": vault_dst_path})
+            return {"ok": True}
+
+        with mock.patch("scan_pipeline.file_type_handlers.extract_images", return_value=[img]):
+            with mock.patch("scan_pipeline.compress_images.compress_image", return_value=compressed):
+                with mock.patch("scan_pipeline.vault_binary.write_binary", side_effect=fake_write_binary):
+                    scan_pipeline.process_file(
+                        source_path=str(img),
+                        workdir=str(tmp_path),
+                        vault_project_path="arch-projects/2408 Sample/SD",
+                        event_date="2026-04-19",
+                        vault_name="MyVault",
+                        dry_run=False,
+                    )
+
+        assert len(calls) == 1
+        assert calls[0]["vault_name"] == "MyVault", (
+            f"Expected vault_name='MyVault', got '{calls[0]['vault_name']}'"
+        )
+
+    def test_attachments_written_to_project_root_not_subfolder(self, tmp_path):
+        """_Attachments/ must sit at the project root, not inside the routing subfolder."""
+        import scan_pipeline
+        img = tmp_path / "photo.jpg"
+        _write_fake_jpeg(img)
+        compressed = tmp_path / "2026-04-19--photo--abc123ab.jpg"
+        _write_fake_jpeg(compressed)
+
+        captured_dst = []
+
+        def fake_write_binary(vault_name, src_abs_path, vault_dst_path):
+            captured_dst.append(vault_dst_path)
+            return {"ok": True}
+
+        with mock.patch("scan_pipeline.file_type_handlers.extract_images", return_value=[img]):
+            with mock.patch("scan_pipeline.compress_images.compress_image", return_value=compressed):
+                with mock.patch("scan_pipeline.vault_binary.write_binary", side_effect=fake_write_binary):
+                    scan_pipeline.process_file(
+                        source_path=str(img),
+                        workdir=str(tmp_path),
+                        vault_project_path="arch-projects/2408 Sample/SD",
+                        event_date="2026-04-19",
+                        vault_name="V",
+                        dry_run=False,
+                    )
+
+        assert len(captured_dst) == 1
+        dst = captured_dst[0]
+        # Must be under project root _Attachments/, NOT inside SD/_Attachments/
+        assert dst.startswith("arch-projects/2408 Sample/_Attachments/"), (
+            f"Expected project-root _Attachments, got: {dst}"
+        )
+        assert "SD/_Attachments" not in dst, (
+            f"Attachment must not be inside the routing subfolder: {dst}"
+        )
+
+    def test_attachments_root_helper_strips_subfolder(self, tmp_path):
+        """_attachments_root must return <project>/_Attachments, not <project>/<sub>/_Attachments."""
+        import scan_pipeline
+        assert scan_pipeline._attachments_root("arch-projects/2408 Sample/SD") == \
+            "arch-projects/2408 Sample/_Attachments"
+        assert scan_pipeline._attachments_root("photography/2024 Shoot/Selects") == \
+            "photography/2024 Shoot/_Attachments"
+        assert scan_pipeline._attachments_root("content/YouTube Series/Published") == \
+            "content/YouTube Series/_Attachments"
+
+
+# ---------------------------------------------------------------------------
+# Transport speed helpers
+# ---------------------------------------------------------------------------
+
+class TestSafeFileSize:
+    def test_existing_file_returns_size(self, tmp_path):
+        import scan_pipeline
+        f = tmp_path / "data.bin"
+        f.write_bytes(b"X" * 1024)
+        assert scan_pipeline._safe_file_size(str(f)) == 1024
+
+    def test_missing_file_returns_zero(self, tmp_path):
+        import scan_pipeline
+        assert scan_pipeline._safe_file_size(str(tmp_path / "noexist.bin")) == 0
+
+
+class TestEstimateReadSecs:
+    def test_returns_none_when_no_throughput(self):
+        import scan_pipeline
+        assert scan_pipeline._estimate_read_secs(10_000_000, None) is None
+
+    def test_returns_none_when_throughput_zero(self):
+        import scan_pipeline
+        assert scan_pipeline._estimate_read_secs(10_000_000, 0.0) is None
+
+    def test_computes_correct_estimate(self):
+        import scan_pipeline
+        # 10 MB at 1 MB/s = 10s
+        est = scan_pipeline._estimate_read_secs(10_000_000, 1_000_000.0)
+        assert abs(est - 10.0) < 0.01
+
+    def test_returns_none_for_zero_size(self):
+        import scan_pipeline
+        assert scan_pipeline._estimate_read_secs(0, 1_000_000.0) is None
+
+
+class TestSlowReadWarning:
+    """process_file adds a warning when estimated read time > 30s."""
+
+    def test_slow_file_gets_warning(self, tmp_path):
+        import scan_pipeline
+        txt = tmp_path / "huge.txt"
+        txt.write_text("hello world")
+
+        # mock file size to 100 MB, throughput 1 MB/s → 100s estimated
+        with mock.patch("scan_pipeline._safe_file_size", return_value=100_000_000):
+            with mock.patch("scan_pipeline.file_type_handlers.read_text", return_value="content"):
+                result = scan_pipeline.process_file(
+                    source_path=str(txt),
+                    workdir=str(tmp_path),
+                    vault_project_path="Proj/Sub",
+                    event_date="2026-04-19",
+                    throughput_bps=1_000_000.0,
+                    dry_run=True,
+                )
+        assert any("estimated read" in w for w in result.warnings)
+        assert result.skipped is False  # never skipped — just warned
+        assert result.text == "content"
+
+    def test_fast_file_no_warning(self, tmp_path):
+        import scan_pipeline
+        txt = tmp_path / "small.txt"
+        txt.write_text("hello world")
+
+        # 1 MB file at 1 MB/s → 1s, under 30s threshold
+        with mock.patch("scan_pipeline._safe_file_size", return_value=1_000_000):
+            with mock.patch("scan_pipeline.file_type_handlers.read_text", return_value="content"):
+                result = scan_pipeline.process_file(
+                    source_path=str(txt),
+                    workdir=str(tmp_path),
+                    vault_project_path="Proj/Sub",
+                    event_date="2026-04-19",
+                    throughput_bps=1_000_000.0,
+                    dry_run=True,
+                )
+        assert not any("estimated read" in w for w in result.warnings)
+
+    def test_no_throughput_no_warning(self, tmp_path):
+        import scan_pipeline
+        txt = tmp_path / "file.txt"
+        txt.write_text("hello world")
+
+        with mock.patch("scan_pipeline._safe_file_size", return_value=100_000_000):
+            with mock.patch("scan_pipeline.file_type_handlers.read_text", return_value="content"):
+                result = scan_pipeline.process_file(
+                    source_path=str(txt),
+                    workdir=str(tmp_path),
+                    vault_project_path="Proj/Sub",
+                    event_date="2026-04-19",
+                    throughput_bps=None,
+                    dry_run=True,
+                )
+        assert not any("estimated read" in w for w in result.warnings)
+
+
+class TestDomainThroughputRoundtrip:
+    """Domain.throughput_bps round-trips through to_dict / from_dict."""
+
+    def test_throughput_bps_persists(self):
+        from config import Domain
+        d = Domain(
+            name="test", label="Test", template_seed="general",
+            archive_root="/tmp", throughput_bps=5_242_880.0,
+        )
+        d2 = Domain.from_dict(d.to_dict())
+        assert d2.throughput_bps == 5_242_880.0
+
+    def test_throughput_bps_none_round_trips(self):
+        from config import Domain
+        d = Domain(
+            name="test", label="Test", template_seed="general",
+            archive_root="/tmp", throughput_bps=None,
+        )
+        d2 = Domain.from_dict(d.to_dict())
+        assert d2.throughput_bps is None
+
+    def test_legacy_dict_without_throughput_defaults_to_none(self):
+        from config import Domain
+        d = Domain.from_dict({"name": "x", "archive_root": "/tmp"})
+        assert d.throughput_bps is None
+
+
+# ---------------------------------------------------------------------------
+# No-meta-only enforcement
+# ---------------------------------------------------------------------------
+
+class TestSkipOnNoContent:
+    def test_readable_file_with_no_text_and_no_images_is_skipped(self, tmp_path):
+        """SP-N1: skip_on_no_content=True (default) skips files with no content at all."""
+        import scan_pipeline
+        txt = tmp_path / "empty.txt"
+        txt.write_text("")
+
+        with mock.patch("scan_pipeline.file_type_handlers.read_text", return_value=""):
+            result = scan_pipeline.process_file(
+                source_path=str(txt),
+                workdir=str(tmp_path),
+                vault_project_path="Proj/Sub",
+                event_date="2026-04-19",
+                dry_run=True,
+            )
+        assert result.skipped is True
+        assert result.skip_reason == "no_content"
+
+    def test_skip_on_no_content_false_allows_empty_result(self, tmp_path):
+        """SP-N2: skip_on_no_content=False: empty file produces a non-skipped result."""
+        import scan_pipeline
+        txt = tmp_path / "empty.txt"
+        txt.write_text("")
+
+        with mock.patch("scan_pipeline.file_type_handlers.read_text", return_value=""):
+            result = scan_pipeline.process_file(
+                source_path=str(txt),
+                workdir=str(tmp_path),
+                vault_project_path="Proj/Sub",
+                event_date="2026-04-19",
+                skip_on_no_content=False,
+                dry_run=True,
+            )
+        assert result.skipped is False
+        assert result.skip_reason == ""
+        assert result.content_confidence == "none"
+
+    def test_file_with_text_is_not_skipped(self, tmp_path):
+        """SP-N3: file with text is never skipped by no-content rule."""
+        import scan_pipeline
+        txt = tmp_path / "file.txt"
+        txt.write_text("real content here")
+
+        result = scan_pipeline.process_file(
+            source_path=str(txt),
+            workdir=str(tmp_path),
+            vault_project_path="Proj/Sub",
+            event_date="2026-04-19",
+            dry_run=True,
+        )
+        assert result.skipped is False
+        assert result.content_confidence in ("high", "low")
+
+    def test_file_with_images_only_is_not_skipped(self, tmp_path):
+        """SP-N4: image-only result (no text) is not skipped if images are embedded."""
+        import scan_pipeline
+        img = tmp_path / "photo.jpg"
+        _write_fake_jpeg(img)
+        compressed = tmp_path / "2026-04-19--photo--abc123ab.jpg"
+        _write_fake_jpeg(compressed)
+
+        with mock.patch("scan_pipeline.file_type_handlers.extract_images", return_value=[img]):
+            with mock.patch("scan_pipeline.compress_images.compress_image", return_value=compressed):
+                with mock.patch("scan_pipeline.vault_binary.write_binary", return_value={"ok": True}):
+                    result = scan_pipeline.process_file(
+                        source_path=str(img),
+                        workdir=str(tmp_path),
+                        vault_project_path="arch-projects/2408 Sample/SD",
+                        event_date="2026-04-19",
+                        vault_name="V",
+                        dry_run=False,
+                    )
+        assert result.skipped is False
+        assert result.images_embedded == 1
+
+
+# ---------------------------------------------------------------------------
+# Image subfolder and grid
+# ---------------------------------------------------------------------------
+
+class TestImageSubfolderAndGrid:
+    def test_few_images_use_flat_attachments(self, tmp_path):
+        """SP-IG1: ≤10 images → flat _Attachments/ (no batch subfolder)."""
+        import scan_pipeline
+        img = tmp_path / "photo.jpg"
+        _write_fake_jpeg(img)
+        compressed = tmp_path / "2026-04-19--photo--abc123ab.jpg"
+        _write_fake_jpeg(compressed)
+
+        with mock.patch("scan_pipeline.file_type_handlers.extract_images", return_value=[img]):
+            with mock.patch("scan_pipeline.compress_images.compress_image", return_value=compressed):
+                with mock.patch("scan_pipeline.vault_binary.write_binary", return_value={"ok": True}):
+                    result = scan_pipeline.process_file(
+                        source_path=str(img),
+                        workdir=str(tmp_path),
+                        vault_project_path="arch-projects/2408 Sample/SD",
+                        event_date="2026-04-19",
+                        vault_name="V",
+                        dry_run=False,
+                    )
+        assert result.attachments_subfolder == ""
+
+    def test_many_images_use_batch_subfolder(self, tmp_path):
+        """SP-IG2: >10 images → event-specific subfolder."""
+        import scan_pipeline
+
+        img = tmp_path / "photo.jpg"
+        _write_fake_jpeg(img)
+        compressed = tmp_path / "2026-04-19--photo--abc123ab.jpg"
+        _write_fake_jpeg(compressed)
+
+        # Return 11 images
+        eleven_imgs = [img] * 11
+
+        captured_dsts = []
+        def fake_write(vault_name, src_abs_path, vault_dst_path):
+            captured_dsts.append(vault_dst_path)
+            return {"ok": True}
+
+        with mock.patch("scan_pipeline.file_type_handlers.extract_images", return_value=eleven_imgs):
+            with mock.patch("scan_pipeline.compress_images.compress_image", return_value=compressed):
+                with mock.patch("scan_pipeline.vault_binary.write_binary", side_effect=fake_write):
+                    result = scan_pipeline.process_file(
+                        source_path=str(img),
+                        workdir=str(tmp_path),
+                        vault_project_path="arch-projects/2408 Sample/SD",
+                        event_date="2026-04-19",
+                        vault_name="V",
+                        dry_run=False,
+                    )
+        assert result.attachments_subfolder != ""
+        assert "2026-04-19" in result.attachments_subfolder
+        # All writes should go into the batch subfolder
+        for dst in captured_dsts:
+            assert result.attachments_subfolder in dst
+
+    def test_image_grid_flag_false_for_few_images(self, tmp_path):
+        """SP-IG3: <IMAGE_GRID_MIN images → image_grid=False."""
+        import scan_pipeline
+        img = tmp_path / "photo.jpg"
+        _write_fake_jpeg(img)
+        compressed = tmp_path / "2026-04-19--photo--abc123ab.jpg"
+        _write_fake_jpeg(compressed)
+
+        with mock.patch("scan_pipeline.file_type_handlers.extract_images", return_value=[img]):
+            with mock.patch("scan_pipeline.compress_images.compress_image", return_value=compressed):
+                result = scan_pipeline.process_file(
+                    source_path=str(img),
+                    workdir=str(tmp_path),
+                    vault_project_path="arch-projects/2408 Sample/SD",
+                    event_date="2026-04-19",
+                    dry_run=True,
+                )
+        assert result.image_grid is False
+
+    def test_image_grid_flag_true_for_many_images(self, tmp_path):
+        """SP-IG4: ≥IMAGE_GRID_MIN images → image_grid=True."""
+        import scan_pipeline
+        img = tmp_path / "photo.jpg"
+        _write_fake_jpeg(img)
+        compressed = tmp_path / "2026-04-19--photo--abc123ab.jpg"
+        _write_fake_jpeg(compressed)
+
+        three_imgs = [img] * 3
+
+        with mock.patch("scan_pipeline.file_type_handlers.extract_images", return_value=three_imgs):
+            with mock.patch("scan_pipeline.compress_images.compress_image", return_value=compressed):
+                result = scan_pipeline.process_file(
+                    source_path=str(img),
+                    workdir=str(tmp_path),
+                    vault_project_path="arch-projects/2408 Sample/SD",
+                    event_date="2026-04-19",
+                    dry_run=True,
+                )
+        assert result.image_grid is True
+
+
+# ---------------------------------------------------------------------------
+# _format_images_block
+# ---------------------------------------------------------------------------
+
+class TestFormatImagesBlock:
+    def test_empty_attachments_returns_empty_string(self):
+        import scan_pipeline
+        assert scan_pipeline._format_images_block([]) == ""
+
+    def test_single_image_returns_standalone_embed(self):
+        import scan_pipeline
+        result = scan_pipeline._format_images_block(["![[photo.jpg]]"])
+        assert result == "![[photo.jpg]]"
+
+    def test_multiple_images_joined_without_blank_lines(self):
+        import scan_pipeline
+        result = scan_pipeline._format_images_block([
+            "![[a.jpg]]", "![[b.jpg]]", "![[c.jpg]]",
+        ])
+        # No blank lines (minimal theme grid)
+        assert "\n\n" not in result
+        assert result == "![[a.jpg]]\n![[b.jpg]]\n![[c.jpg]]"
+
+
+# ---------------------------------------------------------------------------
+# _event_batch_folder
+# ---------------------------------------------------------------------------
+
+class TestEventBatchFolder:
+    def test_returns_date_and_slug(self, tmp_path):
+        import scan_pipeline
+        folder = scan_pipeline._event_batch_folder("2026-04-19", "/nas/proj/2026-04-19 meeting.pdf")
+        assert folder.startswith("2026-04-19--")
+        assert "meeting" in folder
+
+    def test_handles_special_chars_in_path(self):
+        import scan_pipeline
+        folder = scan_pipeline._event_batch_folder("2026-04-19", "/nas/proj/Meeting Notes (Final).docx")
+        assert folder.startswith("2026-04-19--")
+        # No special characters in slug
+        assert "(" not in folder
+        assert ")" not in folder

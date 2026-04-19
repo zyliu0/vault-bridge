@@ -18,6 +18,9 @@ Python 3.9 compatible.
 """
 import hashlib
 import importlib.util
+import time
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FuturesTimeout
 from pathlib import Path
 from types import ModuleType
 from typing import Any, Dict, Iterator, List, Optional, Tuple
@@ -35,6 +38,10 @@ class TransportInvalid(Exception):
 
 class TransportFailed(Exception):
     """Raised when the transport's fetch_to_local call itself raises."""
+
+
+class TransportTimeout(Exception):
+    """Raised when fetch_to_local_timed exceeds the per-file wall-clock budget."""
 
 
 # Cache: maps (workdir_str, transport_key, mtime_float) → loaded module
@@ -201,6 +208,61 @@ def fetch_to_local(
         raise TransportFailed(
             f"transport.fetch_to_local({actual_archive_path!r}) failed: {exc}"
         ) from exc
+
+
+def fetch_to_local_timed(
+    workdir: Path,
+    transport_name: str,
+    archive_path: str,
+    timeout_secs: Optional[float] = None,
+) -> Tuple[Path, float]:
+    """Fetch a file with an optional wall-clock timeout. Returns (local_path, elapsed_secs).
+
+    Uses a ThreadPoolExecutor so the timeout is enforced from the Python side
+    even when the transport blocks inside a C extension or OS call.
+
+    Args:
+        workdir:        Working directory.
+        transport_name: Named transport slug.
+        archive_path:   Archive path to fetch.
+        timeout_secs:   Wall-clock budget in seconds. None = no limit.
+
+    Returns:
+        (Path to local copy, elapsed seconds)
+
+    Raises:
+        TransportTimeout:  if timeout_secs is exceeded.
+        TransportMissing:  if the transport module does not exist.
+        TransportInvalid:  if the transport lacks required callables.
+        TransportFailed:   if the transport's fetch_to_local raises.
+    """
+    mod = load_transport(workdir, transport_name)
+
+    def _do_fetch() -> Path:
+        try:
+            return Path(mod.fetch_to_local(archive_path))
+        except Exception as exc:
+            raise TransportFailed(
+                f"transport.fetch_to_local({archive_path!r}) failed: {exc}"
+            ) from exc
+
+    t0 = time.monotonic()
+
+    if timeout_secs is None:
+        result = _do_fetch()
+        return result, time.monotonic() - t0
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(_do_fetch)
+        try:
+            result = future.result(timeout=timeout_secs)
+            elapsed = time.monotonic() - t0
+            return result, elapsed
+        except FuturesTimeout:
+            future.cancel()
+            raise TransportTimeout(
+                f"{archive_path!r}: read exceeded {timeout_secs:.1f}s budget"
+            )
 
 
 def list_archive(

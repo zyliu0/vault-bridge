@@ -27,6 +27,7 @@ import extract_embedded_images
 import local_config  # noqa: F401 — kept for backward compat; new code uses config module
 import memory_report
 import transport_loader
+import transport_speed_probe
 import vault_binary
 
 # Size of the hardcoded probe PNG for test injection
@@ -40,8 +41,10 @@ def run_probe(
     sample_container_path: Optional[str],
     vision_callback: Callable[[Path], str],
     runner: Optional[Callable] = None,
+    transport_name: Optional[str] = None,
+    domain_name: Optional[str] = None,
 ) -> Dict:
-    """Run 6 capability checks.
+    """Run 6 capability checks plus an optional transport speed probe (check 2.5).
 
     Args:
         workdir: Working directory with .vault-bridge/transport.py.
@@ -50,6 +53,8 @@ def run_probe(
         sample_container_path: Optional path to a PDF/DOCX/PPTX for extraction test.
         vision_callback: Callable that takes a JPEG path and returns a description string.
         runner: Optional subprocess runner injectable for tests.
+        transport_name: Named transport slug. When set, check 2.5 (speed probe) runs.
+        domain_name: Domain name used to persist measured throughput_bps in config.
 
     Returns:
         {
@@ -58,6 +63,7 @@ def run_probe(
             "sample_used": str,
             "vision_description": str,
             "report_path": str,
+            "throughput_bps": Optional[float],
         }
     """
     checks: List[Dict] = []
@@ -66,6 +72,7 @@ def run_probe(
     vision_description = ""
     compressed_path: Optional[Path] = None
     fetched_path: Optional[Path] = None
+    measured_throughput_bps: Optional[float] = None
 
     with tempfile.TemporaryDirectory() as tmpdir:
         tmpdir_path = Path(tmpdir)
@@ -103,10 +110,24 @@ def run_probe(
             return _build_result(
                 overall_ok, checks, sample_used, vision_description,
                 workdir, vault_name, tmpdir_path,
+                throughput_bps=None,
             )
 
         # Capture fetched path for subsequent checks
         fetched_path = check2.get("_path")
+
+        # ------------------------------------------------------------------
+        # Check 2.5: check_transport_speed (optional — only when transport_name given)
+        # ------------------------------------------------------------------
+        if transport_name:
+            check25 = _run_check(
+                "check_transport_speed",
+                lambda: _check_transport_speed(workdir, transport_name, domain_name, sample_archive_paths),
+            )
+            checks.append(check25)
+            if check25.get("ok"):
+                measured_throughput_bps = check25.get("_throughput_bps")
+            # Non-fatal: speed probe failure does not block other checks
 
         # ------------------------------------------------------------------
         # Check 3: check_compress
@@ -179,6 +200,7 @@ def run_probe(
     return _build_result(
         overall_ok, checks, sample_used, vision_description,
         workdir, vault_name, None,
+        throughput_bps=measured_throughput_bps,
     )
 
 
@@ -293,6 +315,34 @@ def _check_vision(
         return {"ok": False, "detail": "vision error", "error": str(exc), "_description": ""}
 
 
+def _check_transport_speed(
+    workdir: Path,
+    transport_name: str,
+    domain_name: Optional[str],
+    sample_paths: List[str],
+) -> Dict:
+    """Check 2.5: probe transport read throughput and persist it."""
+    result = transport_speed_probe.probe_throughput(
+        workdir=workdir,
+        transport_name=transport_name,
+        sample_paths=sample_paths,
+    )
+    if domain_name:
+        transport_speed_probe.save_throughput(workdir, domain_name, result.throughput_bps)
+
+    mbps = result.throughput_bps / 1_048_576
+    detail = f"{mbps:.2f} MB/s ({result.confidence} confidence, {result.files_sampled} sample(s))"
+    if result.fallback_used:
+        detail = f"fallback speed used (1 MB/s): {result.detail}"
+
+    return {
+        "ok": not result.fallback_used,
+        "detail": detail,
+        "error": result.detail if result.fallback_used else None,
+        "_throughput_bps": result.throughput_bps,
+    }
+
+
 def _check_vault_write_full(
     vault_name: str,
     compressed_path: Optional[Path],
@@ -372,6 +422,7 @@ def _build_result(
     workdir: Path,
     vault_name: str,
     tmpdir: Optional[Path],
+    throughput_bps: Optional[float] = None,
 ) -> Dict:
     """Build the final result dict and write a memory report."""
     # Clean up internal-only keys before returning
@@ -414,4 +465,5 @@ def _build_result(
         "sample_used": sample_used,
         "vision_description": vision_description,
         "report_path": report_path_str,
+        "throughput_bps": throughput_bps,
     }

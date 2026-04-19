@@ -617,3 +617,243 @@ def test_add_index_backlink_uses_property_set(tmp_path, monkeypatch):
     # Check that "property:set" or "property" appeared in the call
     call_strs = [" ".join(c) if isinstance(c, list) else str(c) for c in calls]
     assert any("property" in s for s in call_strs)
+
+
+# ---------------------------------------------------------------------------
+# _obsidian_create — uses obsidian eval (not obsidian create)
+# ---------------------------------------------------------------------------
+
+class TestObsidianCreate:
+    def _capture(self, monkeypatch):
+        """Return (calls list, monkeypatched fake_run)."""
+        calls = []
+
+        def fake_run(cmd, **kwargs):
+            calls.append(cmd)
+            class R:
+                returncode = 0
+                stdout = ""
+                stderr = ""
+            return R()
+
+        import subprocess
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        return calls
+
+    def test_uses_eval_not_create(self, monkeypatch):
+        """_obsidian_create must call obsidian eval, not obsidian create."""
+        calls = self._capture(monkeypatch)
+        pi._obsidian_create("MyVault", "arch/2408 Sample/2408 Sample.md", "body")
+        assert len(calls) == 1
+        assert calls[0][1] == "eval", f"Expected 'eval', got '{calls[0][1]}'"
+
+    def test_vault_name_in_call(self, monkeypatch):
+        """vault= argument must match the vault_name parameter."""
+        calls = self._capture(monkeypatch)
+        pi._obsidian_create("TheVault", "dom/Proj/Proj.md", "body")
+        call_str = " ".join(calls[0])
+        assert "vault=TheVault" in call_str
+
+    def test_full_path_with_extension_in_js(self, monkeypatch):
+        """The exact vault path including extension must appear in the JS code arg."""
+        calls = self._capture(monkeypatch)
+        pi._obsidian_create("V", "arch-projects/2408 Sample/2408 Sample.md", "content")
+        code_arg = next((a for a in calls[0] if a.startswith("code=")), "")
+        assert "arch-projects/2408 Sample/2408 Sample.md" in code_arg
+
+    def test_base_file_path_preserved(self, monkeypatch):
+        """The .base extension must survive verbatim — obsidian eval honours any extension."""
+        calls = self._capture(monkeypatch)
+        pi._obsidian_create("V", "arch/Proj/Proj.base", "filters:\n  and: []")
+        code_arg = next((a for a in calls[0] if a.startswith("code=")), "")
+        assert "Proj.base" in code_arg
+
+    def test_overwrite_uses_modify(self, monkeypatch):
+        """With overwrite=True the JS must call app.vault.modify (for existing notes)."""
+        calls = self._capture(monkeypatch)
+        pi._obsidian_create("V", "dom/P/P.md", "body", overwrite=True)
+        code_arg = next((a for a in calls[0] if a.startswith("code=")), "")
+        assert "modify" in code_arg
+
+    def test_no_overwrite_skips_existing(self, monkeypatch):
+        """Without overwrite=True the JS must short-circuit if the file exists."""
+        calls = self._capture(monkeypatch)
+        pi._obsidian_create("V", "dom/P/P.md", "body", overwrite=False)
+        code_arg = next((a for a in calls[0] if a.startswith("code=")), "")
+        assert "exists" in code_arg
+        assert "modify" not in code_arg
+
+
+class TestUpdateIndexCreatesAtProjectRoot:
+    """update_index must place the index note directly under the project folder."""
+
+    def test_index_path_is_domain_slash_project_slash_project_md(self, tmp_path, monkeypatch):
+        """The index note path must be <domain>/<project>/<project>.md."""
+        calls = []
+
+        def fake_run(cmd, **kwargs):
+            calls.append(cmd)
+            class R:
+                returncode = 1  # file not found → create
+                stdout = ""
+                stderr = ""
+            return R()
+
+        import subprocess
+        monkeypatch.setattr(subprocess, "run", fake_run)
+
+        events = _make_events(("2024-08-15", "2024-08-15 kickoff", "SD"))
+        pi.update_index(
+            project_name="2408 Sample",
+            domain="arch-projects",
+            new_events=events,
+            workdir=str(tmp_path),
+            vault_name="V",
+        )
+
+        # Find the obsidian eval call that writes the index note
+        eval_calls = [c for c in calls if len(c) >= 2 and c[1] == "eval"]
+        assert eval_calls, "Expected at least one obsidian eval call"
+        code_args = " ".join(" ".join(c) for c in eval_calls)
+        assert "arch-projects/2408 Sample/2408 Sample.md" in code_args, (
+            f"Index note path not found in eval calls.\nCalls: {eval_calls}"
+        )
+
+    def test_base_file_path_is_domain_slash_project_slash_project_base(self, tmp_path, monkeypatch):
+        """The .base companion file path must be <domain>/<project>/<project>.base."""
+        calls = []
+
+        def fake_run(cmd, **kwargs):
+            calls.append(cmd)
+            class R:
+                returncode = 1
+                stdout = ""
+                stderr = ""
+            return R()
+
+        import subprocess
+        monkeypatch.setattr(subprocess, "run", fake_run)
+
+        events = _make_events(("2024-08-15", "2024-08-15 kickoff", "SD"))
+        pi.update_index(
+            project_name="My Project",
+            domain="photography",
+            new_events=events,
+            workdir=str(tmp_path),
+            vault_name="V",
+        )
+
+        eval_calls = [c for c in calls if len(c) >= 2 and c[1] == "eval"]
+        code_args = " ".join(" ".join(c) for c in eval_calls)
+        assert "photography/My Project/My Project.base" in code_args, (
+            f".base path not found in eval calls.\nCalls: {eval_calls}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# _generate_substructure_nav
+# ---------------------------------------------------------------------------
+
+class TestGenerateSubstructureNav:
+    def test_single_subfolder_returns_empty(self):
+        """Single subfolder → no substructure nav (flat Timeline is sufficient)."""
+        events = _make_events(
+            ("2024-08-15", "2024-08-15 sd-drawing", "SD"),
+            ("2024-09-01", "2024-09-01 sd-revision", "SD"),
+        )
+        result = pi._generate_substructure_nav(events, ["SD"])
+        assert result == ""
+
+    def test_empty_events_returns_empty(self):
+        """No events → empty string."""
+        result = pi._generate_substructure_nav([], [])
+        assert result == ""
+
+    def test_multiple_subfolders_produces_nav(self):
+        """Multiple subfolders → nav section with one heading per subfolder."""
+        events = _make_events(
+            ("2024-08-15", "2024-08-15 sd-drawing", "SD"),
+            ("2024-09-01", "2024-09-01 dd-plan", "DD"),
+            ("2024-09-15", "2024-09-15 sd-revision", "SD"),
+        )
+        result = pi._generate_substructure_nav(events, ["SD", "DD"])
+        assert "### SD/" in result
+        assert "### DD/" in result
+        assert "2024-08-15 sd-drawing" in result
+        assert "2024-09-01 dd-plan" in result
+        assert "2024-09-15 sd-revision" in result
+
+    def test_nav_preserves_subfolder_order(self):
+        """Subfolder sections appear in the order given by all_subfolders."""
+        events = _make_events(
+            ("2024-08-15", "2024-08-15 sd-drawing", "SD"),
+            ("2024-09-01", "2024-09-01 dd-plan", "DD"),
+            ("2024-09-15", "2024-09-15 ca-review", "CA"),
+        )
+        result = pi._generate_substructure_nav(events, ["SD", "DD", "CA"])
+        sd_pos = result.index("### SD/")
+        dd_pos = result.index("### DD/")
+        ca_pos = result.index("### CA/")
+        assert sd_pos < dd_pos < ca_pos
+
+    def test_events_without_subfolder_are_included_in_nav(self):
+        """Events with empty subfolder are included only if other subfolders exist."""
+        events = _make_events(
+            ("2024-08-15", "2024-08-15 general", ""),
+            ("2024-09-01", "2024-09-01 dd-plan", "DD"),
+        )
+        result = pi._generate_substructure_nav(events, ["DD"])
+        # Only one non-empty subfolder → empty nav
+        assert result == ""
+
+
+class TestGenerateIndexSubstructures:
+    def test_index_includes_substructures_section_when_multiple_subfolders(self):
+        """generate_index produces ## Substructures section when events span 2+ subfolders."""
+        events = _make_events(
+            ("2024-08-15", "2024-08-15 sd-drawing", "SD"),
+            ("2024-09-01", "2024-09-01 dd-plan", "DD"),
+        )
+        result = pi.generate_index(
+            project_name="2408 Sample",
+            domain="arch-projects",
+            events=events,
+            subfolders=["SD", "DD"],
+            existing=None,
+            today=date(2024, 10, 1),
+        )
+        assert "## Substructures" in result
+        assert "### SD/" in result
+        assert "### DD/" in result
+
+    def test_index_omits_substructures_section_for_single_subfolder(self):
+        """generate_index omits ## Substructures when all events share one subfolder."""
+        events = _make_events(
+            ("2024-08-15", "2024-08-15 sd-drawing", "SD"),
+            ("2024-09-01", "2024-09-01 sd-revision", "SD"),
+        )
+        result = pi.generate_index(
+            project_name="2408 Sample",
+            domain="arch-projects",
+            events=events,
+            subfolders=["SD"],
+            existing=None,
+            today=date(2024, 10, 1),
+        )
+        assert "## Substructures" not in result
+
+    def test_index_uses_timeline_all_events_heading(self):
+        """generate_index uses '## Timeline (all events)' as the flat timeline heading."""
+        events = _make_events(
+            ("2024-08-15", "2024-08-15 sd-drawing", "SD"),
+            ("2024-09-01", "2024-09-01 dd-plan", "DD"),
+        )
+        result = pi.generate_index(
+            project_name="2408 Sample",
+            domain="arch-projects",
+            events=events,
+            subfolders=["SD", "DD"],
+            existing=None,
+            today=date(2024, 10, 1),
+        )
+        assert "## Timeline (all events)" in result

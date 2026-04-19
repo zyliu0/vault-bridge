@@ -405,6 +405,7 @@ For each delta file, follow the same per-event pipeline as retro-scan:
        workdir=str(Path.cwd()),
        vault_project_path='$PROJECT/$SUBFOLDER',
        event_date='$EVENT_DATE',
+       vault_name='$VAULT_NAME',
        dry_run=$DRY_RUN,   # True when --dry-run flag passed, False for real runs
    )
    ```
@@ -412,11 +413,16 @@ For each delta file, follow the same per-event pipeline as retro-scan:
    Use the returned `ScanResult` fields:
    - `result.text` — note body source content
    - `result.attachments` — wiki-embed strings for images
-   - `result.content_confidence` — `"high"` or `"low"` → Template A; `"none"` → Template B
+   - `result.content_confidence` — `"high"` or `"low"` → Template A; `"none"` → Template B (non-readable types only)
    - `result.skipped` — if True, log `result.skip_reason` and skip note creation entirely
+   - `result.skip_reason` — `"no_content"` (readable file yielded nothing; no note), `"read_limit_reached"`, or type reason
    - `result.sources_read` — use for `sources_read` frontmatter field
    - `result.read_bytes` — use for `read_bytes` frontmatter field
+   - `result.image_grid` — True when ≥3 images embedded; set `cssclasses: [image-grid]` and no-blank-line embeds
+   - `result.attachments_subfolder` — non-empty when >10 images in a date-scoped subfolder
    - `result.warnings` / `result.errors` — log these for the heartbeat memory report
+
+   **No-content enforcement:** readable files yielding no text and no images return `skipped=True, skip_reason="no_content"`. No Template B note is written for them.
 
    The `scan_pipeline` has no default read limit — all files are fully read.
    Use `process_batch(source_paths, ...)` or call `process_file` in a loop.

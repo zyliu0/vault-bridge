@@ -65,7 +65,10 @@ cssclasses:
 ==Current status==: {{status}}
 Timeline: =={{timeline_start}}== → ==ongoing==
 
-## Timeline
+## Substructures
+_No substructures yet._
+
+## Timeline (all events)
 _No events yet._
 
 ## Subfolders
@@ -245,7 +248,7 @@ def parse_existing_index(text: str) -> dict:
         "Open Items": "open_items",
         "Related Projects": "related_projects",
     }
-    all_known = set(known_sections.keys()) | {"Status", "Timeline", "Subfolders"}
+    all_known = set(known_sections.keys()) | {"Status", "Timeline", "Timeline (all events)", "Subfolders", "Substructures"}
 
     # Split body into H2 sections
     section_pattern = re.compile(r"^## (.+)$", re.MULTILINE)
@@ -281,6 +284,46 @@ def _parse_fm_simple(fm_text: str) -> dict:
 # ---------------------------------------------------------------------------
 # generate_index
 # ---------------------------------------------------------------------------
+
+def _generate_substructure_nav(
+    events: List[ProjectIndexEvent],
+    all_subfolders: List[str],
+) -> str:
+    """Generate a per-subfolder navigation block for the index note.
+
+    Groups events by subfolder and emits a mini-index for each:
+
+        ### SD/
+        - ==2024-08-15== — [[2024-08-15 sd-drawing]]
+        - ==2024-09-01== — [[2024-09-01 sd-revision]]
+
+    Returns an empty string when there is only one (or zero) subfolder,
+    since a flat Timeline section is sufficient in that case.
+    """
+    active_subfolders = [sf for sf in all_subfolders if sf]
+    if len(active_subfolders) <= 1:
+        return ""
+
+    # Group events by subfolder, preserving date order
+    groups: Dict[str, List[ProjectIndexEvent]] = {}
+    for sf in active_subfolders:
+        groups[sf] = []
+    for ev in events:
+        if ev.subfolder in groups:
+            groups[ev.subfolder].append(ev)
+
+    lines: List[str] = []
+    for sf in active_subfolders:
+        group_events = groups.get(sf, [])
+        if not group_events:
+            continue
+        lines.append(f"### {sf}/")
+        for ev in group_events:
+            lines.append(f"- =={ev.event_date}== — [[{ev.note_filename}]]")
+        lines.append("")
+
+    return "\n".join(lines).rstrip()
+
 
 def generate_index(
     project_name: str,
@@ -333,11 +376,12 @@ def generate_index(
     for ev in sorted_events:
         timeline_lines.append(f"- =={ev.event_date}== — [[{ev.note_filename}]]")
 
-    # --- Build subfolders list ---
+    # --- Build substructure navigation ---
     all_subfolders = list(dict.fromkeys(
         [ev.subfolder for ev in sorted_events] + subfolders
     ))
     subfolder_lines = [f"- {sf}" for sf in all_subfolders if sf]
+    substructure_nav = _generate_substructure_nav(sorted_events, all_subfolders)
 
     # --- Frontmatter ---
     timeline_end_val = status_obj.timeline_end if status_obj.timeline_end else ""
@@ -372,8 +416,15 @@ def generate_index(
         f"==Current status==: {status_obj.status}  ",
         f"Timeline: =={status_obj.timeline_start}== → =={status_obj.timeline_end or 'ongoing'}==",
         "",
-        "## Timeline",
     ]
+
+    # Substructure navigation (grouped by subfolder) — only when there are subfolders
+    if substructure_nav:
+        body_parts += ["## Substructures", ""]
+        body_parts.append(substructure_nav)
+        body_parts.append("")
+
+    body_parts += ["## Timeline (all events)"]
     body_parts.extend(timeline_lines if timeline_lines else ["_No events yet._"])
     body_parts += [
         "",
@@ -525,11 +576,44 @@ def update_index(
 
 
 def _obsidian_create(vault_name: str, path: str, content: str, overwrite: bool = False) -> None:
-    """Write a note via the obsidian CLI."""
-    cmd = ["obsidian", "create", f"vault={vault_name}", f"path={path}",
-           f"content={content}", "silent"]
+    """Write a text file to the vault via obsidian eval + app.vault.create/modify.
+
+    Uses the JS API directly so the exact path (including extension) is
+    honoured — critical for .base files and notes in deep folders.
+    Mirrors the approach used by vault_binary.py for binary writes.
+    """
+    import json as _json
+
+    path_json = _json.dumps(path)
+    content_json = _json.dumps(content)
+
     if overwrite:
-        cmd.append("overwrite")
+        js = (
+            "(async () => {"
+            f"  const p = {path_json};"
+            f"  const c = {content_json};"
+            "  const dir = p.substring(0, p.lastIndexOf('/'));"
+            "  if (dir) { try { await app.vault.createFolder(dir); } catch(e) {} }"
+            "  const f = app.vault.getAbstractFileByPath(p);"
+            "  if (f) { await app.vault.modify(f, c); return 'updated'; }"
+            "  await app.vault.create(p, c);"
+            "  return 'created';"
+            "})()"
+        )
+    else:
+        js = (
+            "(async () => {"
+            f"  const p = {path_json};"
+            f"  const c = {content_json};"
+            "  const dir = p.substring(0, p.lastIndexOf('/'));"
+            "  if (dir) { try { await app.vault.createFolder(dir); } catch(e) {} }"
+            "  if (app.vault.getAbstractFileByPath(p)) { return 'exists'; }"
+            "  await app.vault.create(p, c);"
+            "  return 'created';"
+            "})()"
+        )
+
+    cmd = ["obsidian", "eval", f"vault={vault_name}", f"code={js}"]
     try:
         subprocess.run(cmd, capture_output=True, text=True)
     except Exception:

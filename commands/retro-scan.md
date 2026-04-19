@@ -717,6 +717,7 @@ result = scan_pipeline.process_file(
     workdir=str(Path.cwd()),
     vault_project_path='$PROJECT/$SUBFOLDER',
     event_date='$EVENT_DATE',
+    vault_name='$VAULT_NAME',
     dry_run=$DRY_RUN,   # True when --dry-run flag passed
 )
 print(json.dumps({
@@ -731,6 +732,8 @@ print(json.dumps({
     'read_bytes': result.read_bytes,
     'warnings': result.warnings,
     'errors': result.errors,
+    'image_grid': result.image_grid,
+    'attachments_subfolder': result.attachments_subfolder,
 }))
 ```
 
@@ -738,12 +741,18 @@ The registry automatically handles routing:
 
 | handler_category | Handling |
 |-----------------|----------|
-| document-pdf, document-office | text + images extracted. Template A. |
-| image-raster, image-vector | images extracted. Template A if vision runs. |
-| cad-dxf, cad-dwg, vector-ai, raster-psd | render_pages=True: screenshots extracted. Template A. |
-| text-plain | text extracted. Template A. |
-| video, audio, archive | skipped=True, skip_reason set. Template B. |
-| None (unknown ext) | skipped=True, skip_reason contains "unknown". Template B. |
+| document-pdf, document-office | text + images extracted → Template A. If neither extracted, **skipped** (`skip_reason="no_content"`). |
+| image-raster, image-vector | images extracted → Template A if vision runs. If no images, **skipped**. |
+| cad-dxf, cad-dwg, vector-ai, raster-psd | render_pages=True: screenshots extracted → Template A. If no images, **skipped**. |
+| text-plain | text extracted → Template A. If empty text, **skipped**. |
+| video, audio, archive | skipped=True, skip_reason set → Template B. |
+| None (unknown ext) | skipped=True, skip_reason contains "unknown" → Template B. |
+
+**No-content enforcement (`skip_on_no_content=True`, the default):** If `result.text == ""` AND `result.images_embedded == 0` for a readable file type, the result has `skipped=True, skip_reason="no_content"`. No note is written. This is the fabrication firewall — readable files that yield nothing are dropped, not mocked up as metadata-only notes.
+
+**Image subfolder:** When a single event embeds >10 images, `result.attachments_subfolder` is set to a date-scoped subfolder path (e.g. `2026-04-19--event-slug`). Attachments land at `_Attachments/{attachments_subfolder}/` instead of the flat `_Attachments/`. Use `result.attachments_subfolder` to know which path was used.
+
+**Image grid:** When `result.image_grid == True` (≥3 images embedded), set `cssclasses: [image-grid]` in frontmatter and place wiki-embeds in the `## Images` section with **no blank lines between them**. The Minimal theme renders consecutive embeds as a side-by-side grid.
 
 For folders, read 1-3 representative files by calling `process_file` on each
 representative file, then merge: text = joined texts, attachments = all attachments.
@@ -753,10 +762,13 @@ Use the returned `ScanResult` fields to populate note body and frontmatter:
 - `ScanResult.attachments` — wiki-embed strings for images (`![[filename.jpg]]`)
 - `ScanResult.content_confidence` — use to decide Template A vs B:
   - `"high"` or `"low"` → **Template A** (content was read)
-  - `"none"` → **Template B** (metadata-only), unless `skipped=True`
-- `ScanResult.skipped` — if True, log `skip_reason` and skip note creation
+  - `"none"` → **Template B** (metadata-only), only for non-readable types (video, archive, unknown)
+- `ScanResult.skipped` — if True, log `skip_reason` and skip note creation entirely (no note written)
+- `ScanResult.skip_reason` — `"no_content"` (readable file yielded nothing), `"read_limit_reached"` (text-only file at batch limit), or type-specific reason
 - `ScanResult.sources_read` — use for `sources_read` frontmatter field
 - `ScanResult.read_bytes` — use for `read_bytes` frontmatter field
+- `ScanResult.image_grid` — True when ≥3 images embedded; set `cssclasses: [image-grid]` and use no-blank-line embeds
+- `ScanResult.attachments_subfolder` — non-empty when >10 images were placed in a date-scoped subfolder
 
 Use `process_batch(source_paths, ...)` to process all events at once (no
 limit by default), or call `process_file` in a loop for single-file control.
@@ -1012,7 +1024,7 @@ Field rules:
 - `len(attachments)` MUST equal `images_embedded` — the validator enforces this.
 - If no images processed at all, omit `source_images`, `images_embedded`, and `attachments`.
 - If no tags, omit the `tags` field.
-- `cssclasses: [img-grid]` when attachments present; `cssclasses: []` otherwise.
+- `cssclasses: [image-grid]` when `result.image_grid == True` (≥3 images); `cssclasses: []` otherwise.
 
 ### 6j. Write the note via obsidian CLI
 
