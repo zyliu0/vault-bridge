@@ -20,7 +20,7 @@ Rules:
 - The output is ordered per FIELD_ORDER (canonical serialization order)
 """
 import re
-from datetime import datetime
+from datetime import date as _date, datetime
 from pathlib import Path
 
 # Make sibling scripts importable
@@ -33,7 +33,7 @@ from schema import (  # noqa: E402
     ENUMS,
     LITERAL_VALUES,
 )
-from extract_event_date import extract_event_date  # noqa: E402
+from extract_event_date import extract_event_date, parse_date_prefix  # noqa: E402
 
 # Extensions that map to known file_type enum values
 _EXT_TO_FILE_TYPE = {
@@ -116,25 +116,48 @@ def upgrade_frontmatter(
     fm["captured_date"] = datetime.now().date().isoformat()
 
     # --- event_date + event_date_source ---
+    # PyYAML parses `event_date: 2024-09-09` as a datetime.date, not a string,
+    # so we accept both shapes here. Previously this fell through to re-
+    # extracting from mtime=now, which set every legacy note's event_date
+    # to today whenever the filename-vs-now gap exceeded the 7-day conflict
+    # threshold. Preserve the stored value first; only fall back to the
+    # filename when the stored value is missing or unparseable.
     existing_event_date = existing_fm.get("event_date")
     existing_event_date_source = existing_fm.get("event_date_source")
 
-    if (existing_event_date
-            and isinstance(existing_event_date, str)
-            and re.match(r"^\d{4}-\d{2}-\d{2}$", existing_event_date)):
-        # Preserve a valid-looking existing event_date
-        fm["event_date"] = existing_event_date
+    preserved_iso = None
+    if isinstance(existing_event_date, str) and re.match(
+            r"^\d{4}-\d{2}-\d{2}$", existing_event_date):
+        preserved_iso = existing_event_date
+    elif isinstance(existing_event_date, (_date, datetime)):
+        preserved_iso = existing_event_date.isoformat()[:10]
+
+    if preserved_iso:
+        fm["event_date"] = preserved_iso
         if existing_event_date_source in ENUMS["event_date_source"]:
             fm["event_date_source"] = existing_event_date_source
         else:
-            # Re-extract source from filename to get a valid value
-            _, source = _extract_date_from_filename(note_filename, mtime_unix)
-            fm["event_date_source"] = source
+            # Attribute to the filename when it matches; otherwise mtime.
+            name_stem = Path(note_filename).stem
+            fm["event_date_source"] = (
+                "filename-prefix"
+                if parse_date_prefix(name_stem) == preserved_iso
+                else "mtime"
+            )
     else:
-        # Extract from the note filename
-        date_str, source = _extract_date_from_filename(note_filename, mtime_unix)
-        fm["event_date"] = date_str
-        fm["event_date_source"] = source
+        # No usable stored event_date. Prefer the filename prefix directly —
+        # do NOT go through extract_event_date, which compares against mtime
+        # and returns "today" when the gap exceeds CONFLICT_THRESHOLD_DAYS.
+        # For legacy upgrade that comparison is meaningless.
+        name_stem = Path(note_filename).stem
+        prefix_iso = parse_date_prefix(name_stem)
+        if prefix_iso is not None:
+            fm["event_date"] = prefix_iso
+            fm["event_date_source"] = "filename-prefix"
+        else:
+            date_str, source = _extract_date_from_filename(note_filename, mtime_unix)
+            fm["event_date"] = date_str
+            fm["event_date_source"] = source
 
     # --- scan_type ---
     existing_scan_type = existing_fm.get("scan_type")

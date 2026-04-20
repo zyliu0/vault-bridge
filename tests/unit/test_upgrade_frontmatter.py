@@ -280,3 +280,61 @@ def test_filename_without_date_uses_mtime():
     )
     assert fm["event_date"] == "2025-03-15"
     assert fm["event_date_source"] == "mtime"
+
+
+# ---------------------------------------------------------------------------
+# Case 10: regression — reconcile passes mtime_unix=now. Upgrade must not
+# overwrite correct legacy event_dates with today just because the filename
+# date is older than CONFLICT_THRESHOLD_DAYS.
+# ---------------------------------------------------------------------------
+
+def test_preserves_yaml_date_object_event_date():
+    """PyYAML parses `event_date: 2024-09-09` as a date object, not a string.
+    The upgrade must still preserve it instead of falling through to mtime.
+    """
+    from datetime import date
+    now = datetime.now().timestamp()
+    fm = _upgrade(
+        existing_fm={"event_date": date(2024, 9, 9)},
+        note_filename="2024-09-09 client review.md",
+        mtime_unix=now,  # reconcile.md passes time.time()
+    )
+    assert fm["event_date"] == "2024-09-09"
+    assert fm["event_date_source"] == "filename-prefix"
+
+
+def test_never_writes_today_when_filename_has_date_prefix():
+    """Even when existing event_date is unparseable and mtime_unix is 'now',
+    a filename with a valid date prefix must take precedence over 'today'.
+    """
+    from datetime import date
+    today = datetime.now().date().isoformat()
+    fm = _upgrade(
+        existing_fm={},  # no stored event_date
+        note_filename="2024-09-09 memo.md",
+        mtime_unix=datetime.now().timestamp(),  # reconcile.md passes time.time()
+    )
+    assert fm["event_date"] == "2024-09-09"
+    assert fm["event_date"] != today
+    assert fm["event_date_source"] == "filename-prefix"
+
+
+def test_preserves_string_event_date_even_with_now_mtime():
+    fm = _upgrade(
+        existing_fm={"event_date": "2023-01-15", "event_date_source": "filename-prefix"},
+        note_filename="2024-09-09 different date.md",
+        mtime_unix=datetime.now().timestamp(),
+    )
+    # Stored value wins over the filename prefix when both are valid.
+    assert fm["event_date"] == "2023-01-15"
+    assert fm["event_date_source"] == "filename-prefix"
+
+
+def test_yaml_datetime_object_also_preserved():
+    """Some YAML libraries parse an explicit timestamp as datetime, not date."""
+    fm = _upgrade(
+        existing_fm={"event_date": datetime(2024, 9, 9, 12, 0, 0)},
+        note_filename="2024-09-09 memo.md",
+        mtime_unix=datetime.now().timestamp(),
+    )
+    assert fm["event_date"] == "2024-09-09"

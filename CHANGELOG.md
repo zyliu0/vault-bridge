@@ -1,5 +1,44 @@
 # Changelog
 
+## v14.1.0 — fix upgrade_frontmatter clobbering event_date with today
+
+**Bug fix:** `/vault-bridge:reconcile --migrate-v2` (and any other caller of
+`upgrade_frontmatter`) would overwrite correct legacy `event_date` values
+with today's date.
+
+### Root cause
+
+Two interacting issues:
+1. **YAML date coercion** — PyYAML parses `event_date: 2024-09-09` as a
+   `datetime.date` object, not a string. The old preserve-branch checked
+   `isinstance(existing_event_date, str)` and fell through for every v1
+   note.
+2. **Wrong mtime passed at re-extract** — `commands/reconcile.md` passes
+   `mtime_unix=time.time()` because the obsidian CLI doesn't surface a
+   note's mtime. The filename-date-vs-mtime conflict check in
+   `extract_event_date.py` (7-day threshold) then always fired and
+   returned today's date.
+
+### Fix
+
+- `scripts/upgrade_frontmatter.py` accepts `date`/`datetime` YAML objects
+  and only falls back to the filename when no stored value survives.
+- In the upgrade path, the filename's ISO date prefix wins directly via
+  `parse_date_prefix` — no mtime comparison, no "today" fallback.
+- `event_date_source` is attributed correctly (`filename-prefix` when it
+  matches, else `mtime`).
+
+### Tests
+
+- `test_preserves_yaml_date_object_event_date`
+- `test_never_writes_today_when_filename_has_date_prefix`
+- `test_preserves_string_event_date_even_with_now_mtime`
+- `test_yaml_datetime_object_also_preserved`
+
+All 1683 tests pass.
+
+---
+
 ## v14.0.0 — event-writer + vision curation + domain-prefixed paths
 
 **Core principle enforced in code, not just in prose:** a vault-bridge note is
