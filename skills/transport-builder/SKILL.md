@@ -32,11 +32,20 @@ Options:
 3. "A NAS over SMB or NFS (mounted as a volume)"
 4. "A NAS over SFTP"
 5. "An S3 bucket"
-6. "A cloud service via MCP (Notion, Google Drive, etc.)"
-7. "Something else — I'll describe it"
+6. "A NAS I already use through an MCP (Synology, QNAP, TrueNAS…)"
+7. "A cloud service with no direct protocol (Notion, Google Drive, etc.)"
+8. "Something else — I'll describe it"
 
-Record the chosen archetype. For option 7, ask for a free-text description
+Record the chosen archetype. For option 8, ask for a free-text description
 before proceeding to follow-ups.
+
+> **On MCPs and transports.** vault-bridge's transport is a small Python
+> module called by scan scripts — it runs outside Claude's MCP sandbox,
+> so it can't invoke `mcp__*` tools. This is not a conflict with your MCP
+> — the MCP keeps working for your interactive flows. For scanning,
+> vault-bridge needs a direct protocol (SFTP, SMB, NFS, S3, local path).
+> Most NAS MCPs are convenience wrappers around one of those protocols,
+> so you can reuse the same host/credentials in a Python transport.
 
 ---
 
@@ -76,19 +85,54 @@ Ask:
 - "Archive prefix/path within the bucket (optional, e.g. projects/ or leave blank for root)"
 - "Any skip patterns? (optional)"
 
-### Archetype: "A cloud service via MCP (Notion, Google Drive, etc.)"
-AskUserQuestion with explanation:
-> "Cloud services via MCP are accessed through Claude's MCP tools (mcp__*), not
-> directly from Python. vault-bridge cannot call MCP tools from a transport module.
-> Instead, you have two options:
-> 1. Mount the cloud drive locally (e.g. Google Drive for Desktop) and use the
->    'external drive' archetype.
-> 2. Use MCP tools manually to fetch files, then run vault-bridge on the local copy.
-> Would you like to proceed with the local-mount approach, or abort?"
+### Archetype: "A NAS I already use through an MCP"
 
-Options: "Use local-mount approach", "Abort — I'll figure out my workflow first"
+The MCP keeps working for interactive browsing — don't remove it. For
+scanning we need a direct connection to the same NAS. Ask via
+AskUserQuestion:
 
-If user chooses local-mount, proceed as "An external drive that I mount".
+> "Which direct protocol does your NAS expose? Pick the one that maps
+> to how your NAS MCP is configured underneath. Synology, QNAP, and
+> TrueNAS all support SFTP and SMB out of the box."
+>
+> - "SFTP — port 22 (most reliable for Synology/QNAP over LAN)"
+> - "SMB/NFS — mounted as a volume on my Mac/Linux"
+> - "HTTP/WebDAV — the NAS exposes an HTTP file API"
+> - "Not sure — help me pick"
+
+If **SFTP**: proceed as "A NAS over SFTP" and suggest reusing the same
+host/credentials as the MCP configuration (remind the user where the
+MCP config typically lives, e.g. `~/.config/claude/mcp.json` or the
+host's `.env`).
+
+If **SMB/NFS**: proceed as "A NAS over SMB or NFS (mounted as a
+volume)". Remind the user to mount the share first (Finder →
+Go → Connect to Server, or `mount -t cifs …`).
+
+If **HTTP/WebDAV**: proceed as "Something else — I'll describe it"
+with a note that the transport will use `requests` or `urllib` to
+GET files.
+
+If **Not sure**: ask a single follow-up — "What NAS brand and model?"
+(Synology/QNAP/TrueNAS/UGREEN/…). Based on the answer recommend SFTP as
+the default (works on every major NAS) and route to the SFTP follow-up.
+
+### Archetype: "A cloud service with no direct protocol (Notion, Google Drive, etc.)"
+
+For services that only expose themselves through MCP or proprietary
+APIs (Notion pages, Google Drive files without the desktop client),
+there is no direct Python protocol. AskUserQuestion:
+
+> "This service has no direct Python protocol, so vault-bridge can't
+> scan it in place. Two options:"
+>
+> - "Mount the service locally (Google Drive for Desktop, rclone
+>   mount, etc.) and use the mounted folder"
+> - "Export to a local folder periodically, then scan the export"
+> - "Abort — I'll figure out my workflow first"
+
+If user picks either local-mount approach, route to "An external
+drive that I mount". If abort, stop cleanly.
 
 ### Archetype: "Something else"
 Ask:

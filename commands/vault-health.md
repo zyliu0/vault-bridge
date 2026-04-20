@@ -116,6 +116,11 @@ still exists on the user's file system. How you check depends on
 - `local-path`: use Read tool or Python `os.path.exists()` → broken if missing.
 - `external-mount`: same as local-path.
 
+**Skip this check for vault-only domains** (`domain.has_external_archive()`
+is False) — these notes have no external source to verify. Orphan and
+backlink checks (Checks 1 + 5) still apply to them so the audit can
+repair missing or wrong wikilinks.
+
 A broken source_path means the file was moved, renamed, or deleted on the
 source after the vault note was written. Flag it.
 

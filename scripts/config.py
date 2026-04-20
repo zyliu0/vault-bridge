@@ -135,6 +135,16 @@ class Domain:
             "throughput_bps": self.throughput_bps,
         }
 
+    def has_external_archive(self) -> bool:
+        """True when this domain is backed by an external filesystem.
+
+        Vault-only domains (no archive to scan — notes are authored directly
+        via /vault-bridge:visualization, /vault-bridge:research, or manual
+        entry) set `archive_root = ""` and skip transport binding entirely.
+        Scan commands (retro-scan, heartbeat-scan) must skip these domains.
+        """
+        return bool(self.archive_root and self.archive_root.strip())
+
 
 @dataclass
 class ProjectOverrides:

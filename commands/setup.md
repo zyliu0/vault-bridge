@@ -292,7 +292,29 @@ with hyphens, and stripping to ASCII. E.g., "Architecture Projects" →
 Show the generated slug in the confirmation so the user sees how it'll
 appear in vault subfolders and frontmatter.
 
-### 4b. Ask where the archive lives
+### 4b. Ask whether the domain has an external archive
+
+Some domains pull from a filesystem that vault-bridge scans and
+maintains (NAS, external drive, local folder). Others are **vault-only**
+— notes are authored directly (via `/vault-bridge:research`,
+`/vault-bridge:visualization`, or by hand) with no source archive.
+
+Present via AskUserQuestion:
+
+> "Does '{domain_label}' have an external filesystem that vault-bridge
+> should scan and keep in sync?"
+>
+> - **Yes — external archive** — point vault-bridge at a folder (NAS,
+>   external drive, local path). retro-scan and heartbeat-scan will
+>   index it and write diary notes as files change.
+> - **No — vault-only** — no external archive. The domain is a
+>   container for notes you author through vault-bridge commands. No
+>   transport will be built for it.
+
+If **vault-only**: set `archive_root = ""`, `transport = None`, and
+**skip to Step 4d**. Do not ask for an archive path.
+
+If **external archive**: ask for the path:
 
 > "Where is the archive root for '{domain_label}'?
 >
@@ -305,12 +327,16 @@ appear in vault subfolders and frontmatter.
 > - `~/Documents/Architecture/` — local folder with one sub-folder per job
 > - `/Volumes/Photos/ClientWork/` — an external drive"
 
-Verify the path exists.
+Verify the path exists. For remote paths that aren't locally mounted
+(NAS via SFTP, etc.), accept without filesystem check — the transport
+built in Step 7.5 will validate reachability.
 
 ### 4c. (No auto-detection — transport is configured in Step 7.5)
 
 The transport type (how to reach the archive) is no longer guessed here.
-`Domain.transport` starts as `None` and is bound during Step 7.5.
+`Domain.transport` starts as `None` and is bound during Step 7.5 for
+domains with an external archive. Vault-only domains stay at
+`transport = None` forever.
 
 ### 4d. Ask which domain template to start from
 
@@ -558,8 +584,13 @@ print(f"Generated: {out_path}")
 
 ## Step 7.5 — build transport per domain
 
-For each configured domain, offer to build a transport using the
-`transport-builder` skill. AskUserQuestion per domain:
+Iterate over `cfg.domains`. **Skip any domain where
+`domain.has_external_archive()` is False** — vault-only domains have no
+archive to reach, so there is nothing to build. Print one line per
+skipped domain: `"Vault-only — no transport needed for '{domain.label}'"`.
+
+For each remaining domain (with an archive_root set), offer to build a
+transport using the `transport-builder` skill. AskUserQuestion per domain:
 
 > "How should vault-bridge connect to the archive for '{domain.label}' ({domain.archive_root})?"
 >

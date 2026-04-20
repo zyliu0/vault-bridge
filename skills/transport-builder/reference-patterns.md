@@ -355,16 +355,25 @@ def list_archive(
 
 ---
 
-## Pattern: Notion via MCP (not callable from Python)
+## Pattern: services accessed via MCP (direct protocol preferred)
 
-Notion content is only accessible via Claude's `mcp__*` tools, which are not
-importable as Python functions. A transport module CANNOT call MCP tools.
+vault-bridge's transport is a Python module called by scan scripts — it
+runs outside Claude's MCP sandbox, so it cannot invoke `mcp__*` tools.
+This is a runtime boundary, not a product limitation: the user's MCP
+keeps working for interactive flows; the transport just needs a direct
+protocol for scanning.
 
-Instead, document this limitation and direct the user to one of:
-1. Export the Notion workspace to a local folder (Notion Settings → Export)
+**NAS accessed via MCP (Synology, QNAP, TrueNAS, UGREEN, etc.):** the
+MCP is almost always a convenience wrapper over SFTP or SMB. Reuse the
+same host/credentials in the corresponding `sftp` or `smb-mount`
+pattern. Do NOT generate a stub — generate the real SFTP/SMB transport.
+
+**Cloud services with no direct protocol (Notion, some Drive setups):**
+no Python equivalent exists. Direct the user to one of:
+1. Export the workspace to a local folder (Notion Settings → Export)
    and use the `local-path` pattern on the export directory.
-2. Sync Notion to a local folder via a third-party tool (e.g. notion-backup)
-   and use `local-path`.
+2. Sync to a local folder via a third-party tool (e.g. notion-backup,
+   rclone mount, Google Drive for Desktop) and use `local-path`.
 
 Generate a stub module that raises `NotImplementedError` with a clear message,
 and log a warning in the transport-builder log.

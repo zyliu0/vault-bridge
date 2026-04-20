@@ -556,3 +556,42 @@ def test_reports_dir_helper(tmp_path):
     rd = cfg_mod.reports_dir(tmp_path)
     assert rd.exists()
     assert rd.name == "reports"
+
+
+# ---------------------------------------------------------------------------
+# Domain.has_external_archive — vault-only vs external-archive domains
+# ---------------------------------------------------------------------------
+
+def _make_domain(**overrides):
+    base = dict(name="d", label="D", template_seed="general", archive_root="")
+    base.update(overrides)
+    return cfg_mod.Domain(**base)
+
+
+def test_has_external_archive_true_for_populated_root():
+    assert _make_domain(archive_root="/volume1/projects").has_external_archive() is True
+
+
+def test_has_external_archive_false_for_empty_root():
+    assert _make_domain(archive_root="").has_external_archive() is False
+
+
+def test_has_external_archive_false_for_whitespace_root():
+    assert _make_domain(archive_root="   ").has_external_archive() is False
+
+
+def test_vault_only_domain_round_trips_through_save_load(tmp_path):
+    """A vault-only domain (empty archive_root, no transport) survives a config round-trip."""
+    config = cfg_mod.Config.from_dict(_SAMPLE_V4)
+    config.domains.append(_make_domain(
+        name="vault-only",
+        label="Vault Only",
+        archive_root="",
+        transport=None,
+    ))
+    cfg_mod.save_config(tmp_path, config)
+    loaded = cfg_mod.load_config(tmp_path)
+    vo = next(d for d in loaded.domains if d.name == "vault-only")
+    assert vo.has_external_archive() is False
+    assert vo.transport is None
+    assert vo.archive_root == ""

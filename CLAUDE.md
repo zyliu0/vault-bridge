@@ -83,8 +83,8 @@ same structure — the data model does not vary by profession.
 vault-bridge supports multiple domains in a single vault. Each domain has:
 - `name` — slug used in frontmatter and folder names (e.g., `arch-projects`)
 - `label` — display name (e.g., "Architecture Projects")
-- `archive_root` — where the source files live
-- `transport` — slug of the transport module in `<workdir>/.vault-bridge/transports/<slug>.py`; null until built via `/vault-bridge:build-transport`
+- `archive_root` — where the source files live. **Empty string (`""`) means the domain is vault-only** (no external filesystem to scan; notes authored directly). `Domain.has_external_archive()` is the canonical check. Scan commands (retro-scan, heartbeat-scan) skip vault-only domains.
+- `transport` — slug of the transport module in `<workdir>/.vault-bridge/transports/<slug>.py`; null until built via `/vault-bridge:build-transport`. Vault-only domains keep `transport=None` permanently.
 - `routing_patterns` — path-based routing rules for subfolders
 - `content_overrides` — filename-based routing overrides
 - `fallback` — subfolder when no pattern matches

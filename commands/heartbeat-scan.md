@@ -110,10 +110,31 @@ except SetupNeeded:
     import sys; sys.exit(0)
 ```
 
-Heartbeat scans ALL domains. For each domain in `cfg.domains`:
-- Use `domain.transport` (slug) via `transport_loader.load_transport(Path.cwd(), domain.transport)` to access files; skip domain if transport is None
-- Use `domain.archive_root` as the base path to scan
-- Use `domain.routing_patterns`, `domain.skip_patterns`, `domain.style`
+Heartbeat handles every domain, but what it does per-domain depends on
+whether an external archive is configured. For each `domain` in
+`cfg.domains`, classify:
+
+**Vault-only** (`domain.has_external_archive()` is False):
+- Skip archive walk (Step 3), manifest diff (Step 4), and event
+  processing (Step 5/6) entirely — there is no archive to scan.
+- **Still run backlink maintenance**: scan vault notes in this
+  domain's folder and repair broken/missing backlinks, update the
+  project index note, and propagate any project-folder renames
+  detected via existing vault-side fingerprints. This keeps vault-only
+  domains (research, visualization, hand-authored notes) healthy
+  without touching an archive.
+- Log once per run: `"heartbeat: vault-only domain '{domain.name}' —
+  archive walk skipped, backlink maintenance applied"`.
+
+**External archive** (`domain.has_external_archive()` is True):
+- **Skip if `domain.transport is None`** — archive configured but no
+  transport bound yet. Log and move on.
+- Otherwise use `domain.transport` (slug) via
+  `transport_loader.load_transport(Path.cwd(), domain.transport)` to access files.
+- Use `domain.archive_root` as the base path to scan.
+- Use `domain.routing_patterns`, `domain.skip_patterns`, `domain.style`.
+- Run the full archive-walk → diff → event pipeline, plus the same
+  backlink maintenance at the end.
 
 For each delta file, use `domain_router.resolve_domain()` to determine
 which domain it belongs to:
