@@ -189,7 +189,9 @@ def upgrade_frontmatter(
     # --- cssclasses ---
     existing_css = existing_fm.get("cssclasses")
     if isinstance(existing_css, list):
-        fm["cssclasses"] = existing_css
+        # v14: silent migration from the old `image-grid` name to `img-grid`,
+        # which matches the stylesheet shipped in snippets/img-grid.css.
+        fm["cssclasses"] = ["img-grid" if c == "image-grid" else c for c in existing_css]
     else:
         fm["cssclasses"] = []
 

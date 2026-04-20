@@ -182,6 +182,17 @@ def test_missing_cssclasses_defaults_to_empty():
     assert fm["cssclasses"] == []
 
 
+def test_legacy_image_grid_migrates_to_img_grid():
+    """v14 silent migration: cssclasses entries named `image-grid` rewrite to `img-grid`."""
+    fm = _upgrade(existing_fm={"cssclasses": ["image-grid"]})
+    assert fm["cssclasses"] == ["img-grid"]
+
+
+def test_legacy_image_grid_mixed_with_other_classes_migrates():
+    fm = _upgrade(existing_fm={"cssclasses": ["image-grid", "custom"]})
+    assert fm["cssclasses"] == ["img-grid", "custom"]
+
+
 # ---------------------------------------------------------------------------
 # Case 5: source_path inference from NAS line in body
 # ---------------------------------------------------------------------------

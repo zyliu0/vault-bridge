@@ -43,9 +43,18 @@ logger = logging.getLogger(__name__)
 # Categories that have no useful content to extract (video, audio, archive)
 _SKIP_CATEGORIES = frozenset({"video", "audio", "archive"})
 
-# When a single event produces more than this many images, use an event-specific
-# subfolder (_Attachments/{event-date}--{slug}/) instead of flat _Attachments/.
-IMAGE_SUBFOLDER_THRESHOLD = 10
+# Hard cap on how many candidate images the pipeline will compress per event.
+# Pipelines that extract many images from a single container (e.g. a slide
+# deck) stop after this many, to bound the vision-captioning cost upstream.
+IMAGE_CANDIDATE_CAP = 20
+
+# Hard cap on how many images get embedded in a single event note. Anything
+# beyond the cap is discarded — notes are event descriptions, not full
+# photographic records.
+IMAGE_EMBED_CAP = 10
+
+# v13 legacy name kept for anyone who imported it; always equals the embed cap.
+IMAGE_SUBFOLDER_THRESHOLD = IMAGE_EMBED_CAP
 
 # Minimum number of images in a batch that triggers image-grid CSS class.
 IMAGE_GRID_MIN = 3
@@ -86,7 +95,16 @@ class ScanResult:
     sources_read: int
     content_confidence: str
     image_grid: bool = False            # True when images_embedded >= IMAGE_GRID_MIN
-    attachments_subfolder: str = ""     # empty = flat _Attachments/, else event-specific subfolder
+    attachments_subfolder: str = ""     # v14: always "" — kept for v13 callers.
+    # v14: every compressed candidate image and the prompt the caller runs to
+    # caption it (order-aligned). Populated even when images_embedded is
+    # capped at IMAGE_EMBED_CAP, so the caller can see everything that was
+    # available before curation.
+    image_candidate_paths: List[str] = field(default_factory=list)
+    image_caption_prompts: List[str] = field(default_factory=list)
+    # Captions filled in by the command spec after running the prompts.
+    # Empty by default — populated only when the caller injects vision output.
+    image_captions: List[str] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -120,6 +138,9 @@ def _make_skipped(source_path: str, reason: str, category: Optional[str] = None)
         content_confidence="none",
         image_grid=False,
         attachments_subfolder="",
+        image_candidate_paths=[],
+        image_caption_prompts=[],
+        image_captions=[],
     )
 
 
@@ -200,38 +221,54 @@ def _process_images(
     vault_name: str,
     dry_run: bool,
 ) -> tuple:
-    """Extract, compress, and optionally write images for a source file.
+    """Extract, compress, and write images for a source file.
 
-    When the number of images exceeds IMAGE_SUBFOLDER_THRESHOLD, attachments
-    are written into an event-specific subfolder (_Attachments/{date}--{slug}/)
-    rather than the flat _Attachments/ folder.
+    v14 behavior:
+      - At most IMAGE_CANDIDATE_CAP raw images are compressed per event.
+      - At most IMAGE_EMBED_CAP (10) compressed images are embedded. The rest
+        are dropped — notes are event descriptions, not photo archives.
+      - No per-event batch subfolder. Attachments always land in the flat
+        `_Attachments/` folder alongside the project.
+      - Candidate compressed paths and one caption prompt per candidate are
+        returned so the command spec can run vision over them and (optionally)
+        re-curate via image_vision.select_top_k.
 
     Returns:
-        (attachments, images_embedded, image_grid, attachments_subfolder, warnings, errors)
-        where image_grid is True when images_embedded >= IMAGE_GRID_MIN, and
-        attachments_subfolder is the batch folder name used (empty for flat layout).
+        (attachments, images_embedded, image_grid, "",
+         warnings, errors, candidate_paths, caption_prompts)
     """
+    # Lazy import — avoid cycles.
+    import image_vision
+
     attachments: List[str] = []
     warnings: List[str] = []
     errors: List[str] = []
     images_embedded = 0
+    candidate_paths: List[str] = []
+    caption_prompts: List[str] = []
 
-    # Step 1: Extract images via handler registry
+    # Step 1: Extract images via handler registry, capped at IMAGE_CANDIDATE_CAP.
     try:
         raw_images = file_type_handlers.extract_images(source_path)
     except Exception as exc:
         errors.append(f"extract_images failed: {exc}")
-        return attachments, images_embedded, False, "", warnings, errors
+        return attachments, images_embedded, False, "", warnings, errors, candidate_paths, caption_prompts
 
     if not raw_images:
-        return attachments, images_embedded, False, "", warnings, errors
+        return attachments, images_embedded, False, "", warnings, errors, candidate_paths, caption_prompts
 
-    # Step 2: Compress all images before deciding on subfolder
+    capped_raw = list(raw_images)[:IMAGE_CANDIDATE_CAP]
+    if len(raw_images) > IMAGE_CANDIDATE_CAP:
+        warnings.append(
+            f"image candidates capped at {IMAGE_CANDIDATE_CAP} (source had {len(raw_images)})"
+        )
+
+    # Step 2: Compress every candidate.
     compress_dir = tmp_dir / "compressed"
     compress_dir.mkdir(parents=True, exist_ok=True)
 
     compressed_paths: List[Path] = []
-    for img_path in raw_images:
+    for img_path in capped_raw:
         try:
             compressed = compress_images.compress_image(img_path, compress_dir, event_date)
             compressed_paths.append(compressed)
@@ -241,16 +278,29 @@ def _process_images(
             warnings.append(f"compress error for {img_path}: {exc}")
 
     if not compressed_paths:
-        return attachments, images_embedded, False, "", warnings, errors
+        return attachments, images_embedded, False, "", warnings, errors, candidate_paths, caption_prompts
 
-    # Step 3: Choose destination — flat or per-event subfolder
-    batch_folder = ""
-    if len(compressed_paths) > IMAGE_SUBFOLDER_THRESHOLD:
-        batch_folder = _event_batch_folder(event_date, source_path)
-    attachments_root = _attachments_root(vault_project_path, batch_folder)
+    # Record candidates + caption prompts for every compressed image — even
+    # beyond the embed cap, so the caller can run vision over them and
+    # re-rank via image_vision.select_top_k if desired.
+    event_meta = {
+        "event_date": event_date,
+        "source_basename": Path(source_path).name,
+    }
+    for c in compressed_paths:
+        candidate_paths.append(str(c))
+        caption_prompts.append(image_vision.caption_prompt_for(str(c), event_meta))
+
+    # Step 3: Enforce embed cap. No subfolder split.
+    embed_set = compressed_paths[:IMAGE_EMBED_CAP]
+    if len(compressed_paths) > IMAGE_EMBED_CAP:
+        warnings.append(
+            f"embedded images capped at {IMAGE_EMBED_CAP} (compressed {len(compressed_paths)})"
+        )
+    attachments_root = _attachments_root(vault_project_path, "")
 
     # Step 4: Write to vault
-    for compressed in compressed_paths:
+    for compressed in embed_set:
         if dry_run:
             attachments.append(f"![[{compressed.name}]]")
             images_embedded += 1
@@ -275,7 +325,7 @@ def _process_images(
             errors.append(f"vault write failed for {compressed.name}: {err}")
 
     image_grid = images_embedded >= IMAGE_GRID_MIN
-    return attachments, images_embedded, image_grid, batch_folder, warnings, errors
+    return attachments, images_embedded, image_grid, "", warnings, errors, candidate_paths, caption_prompts
 
 
 # ---------------------------------------------------------------------------
@@ -406,10 +456,15 @@ def _process_file_inner(
             text = ""
 
     # Step 4: Extract / process images (if supported by handler)
+    candidate_paths: List[str] = []
+    caption_prompts: List[str] = []
     if handler.extract_images or handler.render_pages:
         with tempfile.TemporaryDirectory() as tmp_str:
             tmp_dir = Path(tmp_str)
-            img_attachments, img_embedded, img_grid, img_subfolder, img_warnings, img_errors = _process_images(
+            (
+                img_attachments, img_embedded, img_grid, img_subfolder,
+                img_warnings, img_errors, img_candidates, img_prompts,
+            ) = _process_images(
                 source_path=source_path,
                 workdir=workdir,
                 vault_project_path=vault_project_path,
@@ -425,6 +480,8 @@ def _process_file_inner(
             attachments_subfolder = img_subfolder
             warnings.extend(img_warnings)
             errors.extend(img_errors)
+            candidate_paths = img_candidates
+            caption_prompts = img_prompts
 
     # Step 5: Enforce no-meta-only rule — skip if nothing was extracted
     if skip_on_no_content and text == "" and images_embedded == 0:
@@ -448,6 +505,9 @@ def _process_file_inner(
         content_confidence=content_confidence,
         image_grid=image_grid,
         attachments_subfolder=attachments_subfolder,
+        image_candidate_paths=candidate_paths,
+        image_caption_prompts=caption_prompts,
+        image_captions=[],
     )
 
 
@@ -556,11 +616,16 @@ def _process_images_only(
     attachments_subfolder = ""
     warnings: List[str] = []
     errors: List[str] = []
+    candidate_paths: List[str] = []
+    caption_prompts: List[str] = []
 
     try:
         with tempfile.TemporaryDirectory() as tmp_str:
             tmp_dir = Path(tmp_str)
-            attachments, images_embedded, image_grid, attachments_subfolder, warnings, errors = _process_images(
+            (
+                attachments, images_embedded, image_grid, attachments_subfolder,
+                warnings, errors, candidate_paths, caption_prompts,
+            ) = _process_images(
                 source_path=source_path,
                 workdir=workdir,
                 vault_project_path=vault_project_path,
@@ -589,6 +654,9 @@ def _process_images_only(
             content_confidence="none",
             image_grid=False,
             attachments_subfolder="",
+            image_candidate_paths=candidate_paths,
+            image_caption_prompts=caption_prompts,
+            image_captions=[],
         )
 
     return ScanResult(
@@ -606,6 +674,9 @@ def _process_images_only(
         content_confidence="none",
         image_grid=image_grid,
         attachments_subfolder=attachments_subfolder,
+        image_candidate_paths=candidate_paths,
+        image_caption_prompts=caption_prompts,
+        image_captions=[],
     )
 
 

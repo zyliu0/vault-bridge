@@ -712,10 +712,26 @@ Find the vault subfolder via this algorithm:
 All file processing is routed through `scripts/scan_pipeline.py`, which consults
 the file-type handler registry to determine what to extract. Run for each event:
 
+**CRITICAL (v14):** Every vault path MUST include the domain prefix. The full
+vault folder for an event is `{domain}/{project}/{subfolder}`. Compute it via:
+
+```python
+import sys
+sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
+from vault_paths import event_folder
+VAULT_FOLDER = event_folder(DOMAIN, PROJECT, SUBFOLDER)
+# e.g. event_folder("arch-projects", "2408 Sample", "SD") == "arch-projects/2408 Sample/SD"
+```
+
+Pass `VAULT_FOLDER` (the full 3-segment path) as `vault_project_path` to
+`scan_pipeline.process_file` and as `path=` to `obsidian create`. The previous
+2-segment form (`$PROJECT/$SUBFOLDER`) caused event notes to land at the
+vault root instead of inside their domain folder — v14 fixes this.
+
 ```bash
 python3 ${CLAUDE_PLUGIN_ROOT}/scripts/scan_pipeline.py process "$SOURCE_PATH" \
   --workdir "$(pwd)" \
-  --vault-path "$PROJECT/$SUBFOLDER" \
+  --vault-path "$DOMAIN/$PROJECT/$SUBFOLDER" \
   --event-date "$EVENT_DATE"
 ```
 
@@ -726,11 +742,14 @@ import sys, json
 from pathlib import Path
 sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
 import scan_pipeline
+from vault_paths import event_folder
+
+VAULT_FOLDER = event_folder('$DOMAIN', '$PROJECT', '$SUBFOLDER')
 
 result = scan_pipeline.process_file(
     source_path='$SOURCE_PATH',
     workdir=str(Path.cwd()),
-    vault_project_path='$PROJECT/$SUBFOLDER',
+    vault_project_path=VAULT_FOLDER,     # e.g. 'arch-projects/2408 Sample/SD'
     event_date='$EVENT_DATE',
     vault_name='$VAULT_NAME',
     dry_run=$DRY_RUN,   # True when --dry-run flag passed
@@ -765,9 +784,9 @@ The registry automatically handles routing:
 
 **No-content enforcement (`skip_on_no_content=True`, the default):** If `result.text == ""` AND `result.images_embedded == 0` for a readable file type, the result has `skipped=True, skip_reason="no_content"`. No note is written. This is the fabrication firewall — readable files that yield nothing are dropped, not mocked up as metadata-only notes.
 
-**Image subfolder:** When a single event embeds >10 images, `result.attachments_subfolder` is set to a date-scoped subfolder path (e.g. `2026-04-19--event-slug`). Attachments land at `_Attachments/{attachments_subfolder}/` instead of the flat `_Attachments/`. Use `result.attachments_subfolder` to know which path was used.
+**Image caps (v14):** `IMAGE_CANDIDATE_CAP = 20` bounds how many images are compressed per event; `IMAGE_EMBED_CAP = 10` bounds how many are embedded. Extra images are dropped — notes are event descriptions, not photographic records. `result.attachments_subfolder` is always `""` (the v13 subfolder split was removed).
 
-**Image grid:** When `result.image_grid == True` (≥3 images embedded), set `cssclasses: [image-grid]` in frontmatter and place wiki-embeds in the `## Images` section with **no blank lines between them**. The Minimal theme renders consecutive embeds as a side-by-side grid.
+**Image grid:** When `result.image_grid == True` (≥3 images embedded), set `cssclasses: [img-grid]` in frontmatter and place wiki-embeds with **no blank lines between them**. The Minimal theme renders consecutive embeds as a side-by-side grid.
 
 For folders, read 1-3 representative files by calling `process_file` on each
 representative file, then merge: text = joined texts, attachments = all attachments.
@@ -782,76 +801,111 @@ Use the returned `ScanResult` fields to populate note body and frontmatter:
 - `ScanResult.skip_reason` — `"no_content"` (readable file yielded nothing), `"read_limit_reached"` (text-only file at batch limit), or type-specific reason
 - `ScanResult.sources_read` — use for `sources_read` frontmatter field
 - `ScanResult.read_bytes` — use for `read_bytes` frontmatter field
-- `ScanResult.image_grid` — True when ≥3 images embedded; set `cssclasses: [image-grid]` and use no-blank-line embeds
-- `ScanResult.attachments_subfolder` — non-empty when >10 images were placed in a date-scoped subfolder
+- `ScanResult.image_grid` — True when ≥3 images embedded; set `cssclasses: [img-grid]` and use no-blank-line embeds
+- `ScanResult.image_candidate_paths` / `ScanResult.image_caption_prompts` — run vision over every prompt (see 6e-image), then pick ≤10 via `image_vision.select_top_k`
+- `ScanResult.attachments_subfolder` — deprecated in v14; always empty
 
 Use `process_batch(source_paths, ...)` to process all events at once (no
 limit by default), or call `process_file` in a loop for single-file control.
 
-### 6e-image. Image descriptions for image-bearing events
+### 6e-image. Vision captioning + image curation (v14)
 
-When `ScanResult.attachments` is non-empty (images were embedded), use the
-Read tool on the local compressed JPEG paths returned by compress_images to
-write LLM vision descriptions. The attachments list contains wiki-embed
-strings — the compressed file lives at `out_tempdir/compressed/<filename>`.
+The scan pipeline compressed up to `IMAGE_CANDIDATE_CAP = 20` candidate
+images per event and returned:
+- `result.image_candidate_paths` — every compressed JPEG's local path
+- `result.image_caption_prompts` — one caption prompt per candidate (same order)
 
-**For each attachment**, read the compressed image:
+For each candidate, run its prompt via the Read tool. The prompt already
+contains event context and fabrication-firewall rules; just execute it and
+record the returned sentence. Build `CAPTIONS` as a list of strings, same
+length and order as `image_caption_prompts`.
 
-> Read the file at `$COMPRESSED_JPEG` using the Read tool. Write one literal
-> sentence describing what you see, in plain English, no hedging. Example:
-> "A black-and-white photograph of a kitchen counter with three empty
-> glasses." Do not describe anything you cannot see. If the image is blank
-> or unreadable, write "Unable to describe — image appears corrupt or empty."
+Then call `image_vision.select_top_k` to pick ≤10 images by relevance:
 
-Build `VISION_DESCRIPTIONS` as a list of description sentences, one per
-compressed image, in the same order as `ScanResult.attachments`.
+```python
+import sys
+sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
+import image_vision
+from scan_pipeline import IMAGE_EMBED_CAP
 
-Then build the note's image section by prepending each description to its wiki-embed:
-```
-VISION_DESCRIPTIONS[0] ![[attachments[0]]]
-VISION_DESCRIPTIONS[1] ![[attachments[1]]]
-...
-```
+selected = image_vision.select_top_k(
+    CAPTIONS,
+    event_meta={'project': '${PROJECT}', 'source_basename': '${SOURCE_BASENAME}'},
+    k=IMAGE_EMBED_CAP,   # 10
+)
 
-If `ScanResult.images_embedded == 0` and the source file could have contained
-images (handler_category in document-pdf, image-raster, etc.), use Template B
-fallback for the image section:
-> `> [!info] Images referenced but not embedded`
-> `> Source images listed in frontmatter.`
-
-**Template A** — content was successfully read. `sources_read` is non-empty.
-`content_confidence: high`. Body is a 100-200 word first-person diary paragraph
-grounded in what you actually saw in the extracted content. Preceded by any
-image wiki-embeds with LLM vision descriptions — each image line looks like:
-
-```
-A brief description of what the image shows. ![[attachment-filename.jpg]]
+FINAL_CAPTIONS = [CAPTIONS[i] for i in selected]
+FINAL_ATTACHMENTS = [result.attachments[i] for i in selected if i < len(result.attachments)]
 ```
 
-The description sentence comes from Step 6e-image and is the literal output
-of the LLM reading the compressed JPEG. If images_embedded > 0,
-`cssclasses: [img-grid]` is set to trigger the vault CSS grid layout.
+If the scan pipeline already capped `result.attachments` at 10 (fewer
+candidates than prompts is possible), `selected` indices outside the
+attachments list are ignored — they referenced dropped candidates.
 
-**Template B** — content was NOT read (metadata-only event). `sources_read: []`.
-`content_confidence: metadata-only`. Body uses this EXACT template verbatim:
+Store `FINAL_CAPTIONS` and `FINAL_ATTACHMENTS` for the next steps — the
+event-writer consumes them to write the body, and `assemble_note_body`
+joins them into a grid block with no blank lines between embeds.
 
+### 6f. Compose the note body via event_writer (v14)
+
+Notes are EVENT DESCRIPTIONS, not dumps of extracted text. The event-writer
+layer translates raw content + vision captions into a 100-200 word diary
+paragraph, or falls back to Template B metadata bullets when nothing was
+readable. Never paste raw text into the note body.
+
+```python
+import sys
+sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
+import event_writer
+
+# Attach the curated captions so the writer can ground body prose in them.
+result.image_captions = FINAL_CAPTIONS
+result.attachments = FINAL_ATTACHMENTS
+result.images_embedded = len(FINAL_ATTACHMENTS)
+result.image_grid = result.images_embedded >= 3  # IMAGE_GRID_MIN
+
+meta = {
+    'source_path': '${SOURCE_PATH}',
+    'event_date': '${EVENT_DATE}',
+    'domain': '${DOMAIN}',
+    'project': '${PROJECT}',
+    'subfolder': '${SUBFOLDER}',
+    'file_type': '${FILE_TYPE}',
+}
+composed = event_writer.compose_body(result, meta)
 ```
-**Metadata-only event.** Content was not read by vault-bridge.
 
-- **Filename/folder:** `{name}`
-- **Type:** {file_type}
-- **Size:** {size or "folder with N children"}
-- **Modified:** {YYYY-MM-DD}
-- **Reason not read:** {reason}
+**If `composed.template_kind == 'B'`:** the body is already rendered
+deterministically — use `composed.body_text` as the diary body. No LLM
+call required. Continue to 6g.
 
-NAS: `{source_path}`
+**If `composed.template_kind == 'A'`:** execute `composed.prompt_text`
+as a sub-prompt (you are the model that runs it). The prompt is
+self-contained — it carries event metadata, the raw-text excerpt, the
+captions, and the fabrication-firewall rules. Return only the 100-200
+word diary paragraph. Then validate:
+
+```python
+vresult = composed.validator(diary_body)
 ```
 
-No prose. No framing. No "probably". No comparisons across files. No "the team".
-No "the review". Just the literal metadata.
+- **`vresult.ok == True`**: use `diary_body` as the note body.
+- **`vresult.ok == False`** (first attempt): append `vresult.reasons` to
+  the prompt ("Your previous attempt failed these checks: ...") and
+  retry ONCE.
+- **`vresult.ok == False`** (second attempt): fall back to Template B —
+  render the metadata-only body via `event_writer.compose_body` with a
+  synthetic `skipped=True, skip_reason='validator_retry_exhausted'`
+  result, log `validator_retry_exhausted` to warnings, and continue.
 
-**Reason not read** may be one of: `file type excluded`, `read limit reached`,
-`access pattern unavailable`, `extraction failed`, `not attempted`.
+**Assemble the final body with image embeds (no blank lines between them):**
+
+```python
+final_body = event_writer.assemble_note_body(diary_body, result.attachments)
+```
+
+This places the prose first, a blank line, then the `![[…]]` embeds on
+consecutive lines so Obsidian's Minimal theme renders them as a grid.
 
 ### 6e-2. Proactive wikilinks for Template B notes
 
@@ -876,7 +930,7 @@ orphan = {
     'source_path': '${SOURCE_PATH}',
     'file_type': '${FILE_TYPE}',
     'event_date': '${EVENT_DATE}',
-    'vault_path': '${PROJECT}/${SUBFOLDER}/${NOTE_NAME}.md',
+    'vault_path': '${DOMAIN}/${PROJECT}/${SUBFOLDER}/${NOTE_NAME}.md',
 }
 workdir = Path('${WORKDIR}')
 vault_name = '${VAULT_NAME}'
@@ -1039,28 +1093,33 @@ Field rules:
 - `len(attachments)` MUST equal `images_embedded` — the validator enforces this.
 - If no images processed at all, omit `source_images`, `images_embedded`, and `attachments`.
 - If no tags, omit the `tags` field.
-- `cssclasses: [image-grid]` when `result.image_grid == True` (≥3 images); `cssclasses: []` otherwise.
+- `cssclasses: [img-grid]` when `result.image_grid == True` (≥3 images); `cssclasses: []` otherwise.
 
 ### 6j. Write the note via obsidian CLI
 
-Build the full note content (frontmatter + body) as a string. Then write
-it to the vault using the `obsidian` CLI — never the Write tool directly:
+Build the full note content (frontmatter + body) as a string. The `path=`
+argument MUST be the full `{domain}/{project}/{subfolder}` folder (use
+`vault_paths.event_folder(domain, project, subfolder)` — never the old
+2-segment `$PROJECT/$SUBFOLDER`). Write via the `obsidian` CLI — never the
+Write tool directly:
 
 ```bash
-obsidian create vault="$VAULT_NAME" name="$NOTE_NAME" path="$PROJECT/$SUBFOLDER" content="$FULL_CONTENT" silent overwrite
+# VAULT_FOLDER was computed earlier via vault_paths.event_folder(...)
+# e.g. "arch-projects/2408 Sample/SD"
+obsidian create vault="$VAULT_NAME" name="$NOTE_NAME" path="$VAULT_FOLDER" content="$FULL_CONTENT" silent overwrite
 ```
 
 Where:
 - `$VAULT_NAME` — from config.vault_name
 - `$NOTE_NAME` — the note filename without `.md` extension
-- `$PROJECT/$SUBFOLDER` — e.g. `2408 Sample Project/SD`
+- `$VAULT_FOLDER` — `{domain}/{project}/{subfolder}` from `event_folder()`
 - `$FULL_CONTENT` — the complete note including `---` frontmatter fences and body.
   Use `\n` for newlines in the content string.
 
-If a canvas was generated (see 6f-2), also write it:
+If a canvas was generated (see 6f-2), also write it under the same folder:
 
 ```bash
-obsidian create vault="$VAULT_NAME" name="$CANVAS_NAME" path="$PROJECT/$SUBFOLDER" content="$CANVAS_JSON" silent overwrite
+obsidian create vault="$VAULT_NAME" name="$CANVAS_NAME" path="$VAULT_FOLDER" content="$CANVAS_JSON" silent overwrite
 ```
 
 Where `$CANVAS_NAME` is `{event_date} {short-topic}` (obsidian CLI adds the extension based on content).
@@ -1073,7 +1132,7 @@ notes. Please open Obsidian and retry."
 
 After writing, read the note back and validate:
 ```bash
-obsidian read vault="$VAULT_NAME" path="$PROJECT/$SUBFOLDER/$NOTE_NAME.md"
+obsidian read vault="$VAULT_NAME" path="$VAULT_FOLDER/$NOTE_NAME.md"
 ```
 
 Pipe the content to the validator:

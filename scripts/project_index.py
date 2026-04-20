@@ -514,8 +514,9 @@ def update_index(
     if today is None:
         today = date.today()
 
-    vault_path = f"{domain}/{project_name}/{project_name}.md"
-    base_path = f"{domain}/{project_name}/{project_name}.base"
+    from scripts import vault_paths
+    vault_path = vault_paths.project_index_path(domain, project_name)
+    base_path = vault_paths.project_base_path(domain, project_name)
 
     # Try to read existing index
     existing_text: Optional[str] = None

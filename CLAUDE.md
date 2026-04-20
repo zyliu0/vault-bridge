@@ -37,6 +37,32 @@ Never use the `Write` or `Edit` tools to modify files inside the vault
 directory. If the obsidian CLI is unavailable (Obsidian not running),
 tell the user to open Obsidian and retry.
 
+## Core principle: notes are event descriptions, not file dumps
+
+A vault-bridge note is a diary entry about an **event** — what happened,
+what was decided, what was seen — grounded in the file that was read.
+The note is NOT a transcript, summary, or copy of the file's contents.
+The plugin's job is to **translate files into event notes**, not to
+re-store them in the vault.
+
+The `event_writer` layer (`scripts/event_writer.py`) is where this
+translation happens. Scan commands call `event_writer.compose_body(result, meta)`
+which classifies the event and either:
+- Renders **Template B** deterministically for unreadable events (video,
+  audio, archive, unknown extensions, or readable files that extracted
+  nothing). No LLM call.
+- Emits a **Template A** prompt for the invoking Claude to execute. The
+  prompt carries the raw-text excerpt, the curated image captions, and
+  the fabrication-firewall rules. The returned body is validated (stop
+  words, 100-200 word range, verbatim-paste detection); on validator
+  failure the command retries once, then falls back to Template B.
+
+Images are curated, not dumped. The pipeline compresses up to
+`IMAGE_CANDIDATE_CAP = 20` candidates per event; vision runs over every
+candidate; `image_vision.select_top_k` picks the top `IMAGE_EMBED_CAP = 10`
+by relevance; only those are embedded. The captions feed back into the
+Template A prompt so the note body reflects what was actually seen.
+
 ## Core principle: the fabrication firewall
 
 vault-bridge writes vault notes from a user's file archive. The greatest
@@ -515,11 +541,14 @@ files per batch (e.g. for throttling on large archives). Files with
 `render_pages=True` (Visual/CAD types) always have their images extracted
 regardless of any max_reads cap.
 
-Key `ScanResult` fields added in v13:
-- `image_grid: bool` — True when ≥3 images embedded; caller sets `cssclasses: [image-grid]` and renders embeds with no blank lines (Minimal theme grid)
-- `attachments_subfolder: str` — non-empty when >10 images were placed in a per-event subfolder `_Attachments/{YYYY-MM-DD}--{slug}/` instead of flat `_Attachments/`
+Key `ScanResult` fields (v14):
+- `image_grid: bool` — True when ≥3 images embedded; caller sets `cssclasses: [img-grid]` and renders embeds with no blank lines (Minimal theme grid)
+- `image_candidate_paths: list[str]` — every compressed candidate image path before the embed cap is applied; used by the command spec to run vision captioning over every candidate
+- `image_caption_prompts: list[str]` — one caption prompt per candidate, aligned by index; the invoking Claude runs each prompt and feeds the returned captions into `image_vision.select_top_k` to pick which images to embed
+- `image_captions: list[str]` — populated by the command after vision returns; passed to `event_writer.compose_body` so the note body can reference what was seen
+- `attachments_subfolder: str` — deprecated in v14: always empty. Kept on the dataclass so v13 serialisations do not break.
 
-`IMAGE_SUBFOLDER_THRESHOLD = 10`: events with more than 10 embedded images get their attachments placed in a date-scoped subfolder to keep `_Attachments/` navigable.
+`IMAGE_CANDIDATE_CAP = 20` and `IMAGE_EMBED_CAP = 10`: the pipeline compresses at most 20 candidates per event and embeds at most 10 of them. Notes are event descriptions, not photographic records — extra images are dropped.
 `IMAGE_GRID_MIN = 3`: events with ≥3 images signal the note builder to use grid layout.
 
 **Setup wizard Step 6.5:**

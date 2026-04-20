@@ -102,7 +102,9 @@ note that honestly says so.
 
 - **`/vault-bridge:research`** — research a topic, write a grounded report with cited sources.
 
-- **Image pipeline** — transports archive images, extracts embedded ones from containers (PDF/DOCX/PPTX), LLM-describes, writes to vault as binary attachments with wiki-embed references (`![[filename.jpg]]`).
+- **Event-writer (v14)** — notes are event descriptions, not file dumps. `scripts/event_writer.py` turns raw extracted content + vision captions into a 100-200 word diary paragraph (Template A) or a deterministic metadata-only body (Template B when the file could not be read). A validator rejects stop-words, out-of-range word counts, and verbatim paste from the source; failures retry once then fall back to Template B.
+
+- **Image pipeline** — transports archive images, extracts embedded ones from containers (PDF/DOCX/PPTX), compresses, **runs vision captioning over up to 20 candidates, embeds the 10 most relevant** via `scripts/image_vision.py::select_top_k`, writes to vault as binary attachments with wiki-embed references (`![[filename.jpg]]`). Obsidian Minimal-theme `img-grid` CSS class is applied when ≥3 images are embedded.
 
 - **Project index notes** — each project gets a `{project_name}.md` Map of Content at the vault project root, with a Timeline section linking all event notes, auto-inferred Status, and a companion `.base` table file. Overview and editorial sections are never auto-filled — only the user writes prose there.
 

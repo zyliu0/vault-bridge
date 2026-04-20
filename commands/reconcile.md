@@ -508,10 +508,13 @@ Reconstruct the full note content:
 {original body text, unchanged}
 ```
 
-Write it back via the obsidian CLI (never the Edit tool on vault files):
+Write it back via the obsidian CLI (never the Edit tool on vault files).
+The `path=` argument MUST be the full `{domain}/{project}/{subfolder}` folder —
+compute via `vault_paths.event_folder(domain, project, subfolder)`:
 
 ```bash
-obsidian create vault="$VAULT_NAME" name="$NOTE_NAME" path="$SUBFOLDER_PATH" content="$FULL_CONTENT" silent overwrite
+# VAULT_FOLDER was computed via vault_paths.event_folder(domain, project, subfolder)
+obsidian create vault="$VAULT_NAME" name="$NOTE_NAME" path="$VAULT_FOLDER" content="$FULL_CONTENT" silent overwrite
 ```
 
 The body stays byte-for-byte identical (unless --re-read added a warning callout).

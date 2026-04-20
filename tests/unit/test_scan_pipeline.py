@@ -1571,8 +1571,8 @@ class TestImageSubfolderAndGrid:
                     )
         assert result.attachments_subfolder == ""
 
-    def test_many_images_use_batch_subfolder(self, tmp_path):
-        """SP-IG2: >10 images → event-specific subfolder."""
+    def test_many_images_hard_capped_at_embed_cap(self, tmp_path):
+        """v14: >IMAGE_EMBED_CAP candidates → exactly IMAGE_EMBED_CAP embedded, flat layout, no subfolder."""
         import scan_pipeline
 
         img = tmp_path / "photo.jpg"
@@ -1580,7 +1580,6 @@ class TestImageSubfolderAndGrid:
         compressed = tmp_path / "2026-04-19--photo--abc123ab.jpg"
         _write_fake_jpeg(compressed)
 
-        # Return 11 images
         eleven_imgs = [img] * 11
 
         captured_dsts = []
@@ -1599,11 +1598,13 @@ class TestImageSubfolderAndGrid:
                         vault_name="V",
                         dry_run=False,
                     )
-        assert result.attachments_subfolder != ""
-        assert "2026-04-19" in result.attachments_subfolder
-        # All writes should go into the batch subfolder
+        assert result.images_embedded == scan_pipeline.IMAGE_EMBED_CAP
+        assert result.attachments_subfolder == ""
+        # Candidates are preserved even though only the cap was embedded.
+        assert len(result.image_candidate_paths) == 11
+        # Every write went into the flat _Attachments/ folder.
         for dst in captured_dsts:
-            assert result.attachments_subfolder in dst
+            assert "/_Attachments/" in dst
 
     def test_image_grid_flag_false_for_few_images(self, tmp_path):
         """SP-IG3: <IMAGE_GRID_MIN images → image_grid=False."""

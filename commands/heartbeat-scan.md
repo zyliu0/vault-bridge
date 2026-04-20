@@ -412,7 +412,17 @@ For each delta file, follow the same per-event pipeline as retro-scan:
 2. Compute `fingerprint` via `fingerprint.py`
 3. Check the scan index — if the fingerprint is already known (rename
    detected from the delta side), update the index and skip note write
-4. Route to the vault subfolder via `routing.patterns`
+4. Route to the vault subfolder via `routing.patterns`, then compute the
+   full domain-prefixed vault folder:
+
+   ```python
+   import sys
+   sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
+   from vault_paths import event_folder
+   VAULT_FOLDER = event_folder(DOMAIN, PROJECT, SUBFOLDER)
+   # -> "{domain}/{project}/{subfolder}"
+   ```
+
 5. Process the file content via `scan_pipeline.process_file()`:
 
    ```python
@@ -424,7 +434,7 @@ For each delta file, follow the same per-event pipeline as retro-scan:
    result = scan_pipeline.process_file(
        source_path='$SOURCE_PATH',
        workdir=str(Path.cwd()),
-       vault_project_path='$PROJECT/$SUBFOLDER',
+       vault_project_path=VAULT_FOLDER,
        event_date='$EVENT_DATE',
        vault_name='$VAULT_NAME',
        dry_run=$DRY_RUN,   # True when --dry-run flag passed, False for real runs
@@ -439,8 +449,9 @@ For each delta file, follow the same per-event pipeline as retro-scan:
    - `result.skip_reason` — `"no_content"` (readable file yielded nothing; no note), `"read_limit_reached"`, or type reason
    - `result.sources_read` — use for `sources_read` frontmatter field
    - `result.read_bytes` — use for `read_bytes` frontmatter field
-   - `result.image_grid` — True when ≥3 images embedded; set `cssclasses: [image-grid]` and no-blank-line embeds
-   - `result.attachments_subfolder` — non-empty when >10 images in a date-scoped subfolder
+   - `result.image_grid` — True when ≥3 images embedded; set `cssclasses: [img-grid]` and no-blank-line embeds
+   - `result.image_candidate_paths` / `result.image_caption_prompts` — run vision over each prompt, feed captions to `image_vision.select_top_k` to choose ≤10 embeds
+   - `result.attachments_subfolder` — deprecated in v14, always empty
    - `result.warnings` / `result.errors` — log these for the heartbeat memory report
 
    **No-content enforcement:** readable files yielding no text and no images return `skipped=True, skip_reason="no_content"`. No Template B note is written for them.
@@ -450,7 +461,39 @@ For each delta file, follow the same per-event pipeline as retro-scan:
    Image extraction for `render_pages=True` files (DXF, DWG, AI, PSD) always
    runs. To throttle, pass `max_reads=N` explicitly.
 
-5b. For Template B notes (result.content_confidence == "none"): inject proactive
+5a. **Compose the note body via event_writer (v14).** Heartbeat is
+    non-interactive, so Template A prose synthesis is NOT done here —
+    only the deterministic Template B path runs autonomously. Template A
+    candidates are converted to a synthetic Template B ("needs retro-scan")
+    and logged so the user can run `/vault-bridge:retro-scan` later.
+
+    ```python
+    import sys
+    sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
+    import event_writer
+
+    meta = {
+        'source_path': '$SOURCE_PATH',
+        'event_date': '$EVENT_DATE',
+        'domain': '$DOMAIN',
+        'project': '$PROJECT',
+        'subfolder': '$SUBFOLDER',
+        'file_type': '$FILE_TYPE',
+    }
+    composed = event_writer.compose_body(result, meta)
+    if composed.template_kind == 'A':
+        # Autonomous mode cannot run the Template A prompt safely. Fall
+        # back to Template B and log the skip for retro-scan follow-up.
+        result.skipped = True
+        result.skip_reason = 'needs_retro_scan'
+        composed = event_writer.compose_body(result, meta)
+        warnings.append('template-a downgraded to template-b in heartbeat; retro-scan recommended')
+
+    body_text = composed.body_text
+    final_body = event_writer.assemble_note_body(body_text, result.attachments)
+    ```
+
+5b. For Template B notes (now all heartbeat notes): inject proactive
    wikilinks before writing. Run `link_strategy.find_linking_candidates()` and
    append `## Related notes` wikilinks via `link_strategy.build_related_notes_section()`.
    This is non-interactive — if no candidates found, write Template B as-is.
@@ -471,12 +514,12 @@ For each delta file, follow the same per-event pipeline as retro-scan:
    (heartbeat uses the values from `ScanResult.content_confidence` directly).
 8. Write the note via obsidian CLI (never the Write tool directly):
    ```bash
-   obsidian create vault="$VAULT_NAME" name="$NOTE_NAME" path="$PROJECT/$SUBFOLDER" content="$FULL_CONTENT" silent overwrite
+   obsidian create vault="$VAULT_NAME" name="$NOTE_NAME" path="$VAULT_FOLDER" content="$FULL_CONTENT" silent overwrite
    ```
    If Obsidian is not running, STOP and log the error.
 9. **Validate** — read back and validate:
    ```
-   obsidian read vault="$VAULT_NAME" path="$PROJECT/$SUBFOLDER/$NOTE_NAME.md" | python3 ${CLAUDE_PLUGIN_ROOT}/scripts/validate_frontmatter.py --stdin
+   obsidian read vault="$VAULT_NAME" path="$VAULT_FOLDER/$NOTE_NAME.md" | python3 ${CLAUDE_PLUGIN_ROOT}/scripts/validate_frontmatter.py --stdin
    ```
    Hard stop on non-zero exit.
 10. Append to the scan index
@@ -530,7 +573,7 @@ Heartbeat must never exit non-zero due to calendar issues.
 
 2. Check `calendar_event_id` in the note's frontmatter:
    ```
-   obsidian read vault="$VAULT_NAME" path="$PROJECT/$SUBFOLDER/$NOTE_NAME.md" | grep -i calendar_event_id
+   obsidian read vault="$VAULT_NAME" path="$VAULT_FOLDER/$NOTE_NAME.md" | grep -i calendar_event_id
    ```
    If already set, skip — already synced (deduplication by frontmatter).
 
@@ -544,7 +587,7 @@ Heartbeat must never exit non-zero due to calendar issues.
    event_date = EVENT_DATE  # YYYY-MM-DD, already computed in Step 5.1
    start_dt, end_dt = cs.format_all_day_event(event_date)
    description = cs.build_event_description(
-       note_path="$PROJECT/$SUBFOLDER/$NOTE_NAME.md",
+       note_path="$VAULT_FOLDER/$NOTE_NAME.md",
        source_path="$SOURCE_PATH",
    )
    ```
@@ -562,7 +605,7 @@ Heartbeat must never exit non-zero due to calendar issues.
 
 5. On success, store the returned `event_id` in the note's frontmatter:
    ```
-   obsidian property:set vault="$VAULT_NAME" path="$PROJECT/$SUBFOLDER/$NOTE_NAME.md" key="calendar_event_id" value="$EVENT_ID"
+   obsidian property:set vault="$VAULT_NAME" path="$VAULT_FOLDER/$NOTE_NAME.md" key="calendar_event_id" value="$EVENT_ID"
    ```
    Add `calendar_event_id` to the note's frontmatter template so future
    heartbeat runs skip this note.
