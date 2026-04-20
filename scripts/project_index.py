@@ -514,7 +514,7 @@ def update_index(
     if today is None:
         today = date.today()
 
-    from scripts import vault_paths
+    import vault_paths
     vault_path = vault_paths.project_index_path(domain, project_name)
     base_path = vault_paths.project_base_path(domain, project_name)
 

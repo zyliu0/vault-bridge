@@ -362,7 +362,9 @@ def _check_vault_write_full(
         return {"ok": False, "detail": "no compressed image to write", "error": "no input"}
     try:
         probe_hash = hashlib.sha256(compressed_path.read_bytes()).hexdigest()[:8]
-        vault_dst = f"_Attachments/_probe/{probe_hash}_probe.jpg"
+        # Probe path namespaced under _vb-probe/ so we don't leave an empty
+        # _Attachments/ folder at the vault root after cleanup.
+        vault_dst = f"_vb-probe/{probe_hash}_probe.jpg"
         result = vault_binary.write_binary(
             vault_name=vault_name,
             src_abs_path=compressed_path,
@@ -385,7 +387,7 @@ def _check_vault_write_full(
     finally:
         # Always clean the probe folder — don't leak test artifacts into the vault.
         effective_runner = runner if runner is not None else vault_binary._default_runner
-        vault_binary._delete_vault_path(vault_name, "_Attachments/_probe", effective_runner)
+        vault_binary._delete_vault_path(vault_name, "_vb-probe", effective_runner)
 
 
 # ---------------------------------------------------------------------------

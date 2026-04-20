@@ -54,12 +54,22 @@ class TestImageCaps:
         import scan_pipeline
         img = tmp_path / "photo.jpg"
         _write_fake_jpeg(img)
-        compressed = tmp_path / "2026-04-19--photo--abc123ab.jpg"
-        _write_fake_jpeg(compressed)
+
+        # v14.3 (F2): byte-unique compressed files so the content-hash dedup
+        # does not collapse the 15 "identical" mocks into one attachment.
+        def make_unique(src_path, out_dir, event_date):
+            idx = make_unique.counter
+            make_unique.counter += 1
+            out = out_dir / f"2026-04-19--photo--{idx:08x}.jpg"
+            _write_fake_jpeg(out)
+            with out.open("ab") as f:
+                f.write(f"unique-{idx}".encode())
+            return out
+        make_unique.counter = 0
 
         raw = [img] * 15
         with mock.patch("scan_pipeline.file_type_handlers.extract_images", return_value=raw):
-            with mock.patch("scan_pipeline.compress_images.compress_image", return_value=compressed):
+            with mock.patch("scan_pipeline.compress_images.compress_image", side_effect=make_unique):
                 with mock.patch("scan_pipeline.vault_binary.write_binary", return_value={"ok": True}):
                     result = scan_pipeline.process_file(
                         source_path=str(img),

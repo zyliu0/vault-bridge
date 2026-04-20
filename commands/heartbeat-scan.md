@@ -444,17 +444,17 @@ For each delta file, follow the same per-event pipeline as retro-scan:
    Use the returned `ScanResult` fields:
    - `result.text` — note body source content
    - `result.attachments` — wiki-embed strings for images
-   - `result.content_confidence` — `"high"` or `"low"` → Template A; `"none"` → Template B (non-readable types only)
+   - `result.content_confidence` — `"high"` or `"low"` → event note; `"none"` → metadata stub (non-readable types only)
    - `result.skipped` — if True, log `result.skip_reason` and skip note creation entirely
    - `result.skip_reason` — `"no_content"` (readable file yielded nothing; no note), `"read_limit_reached"`, or type reason
    - `result.sources_read` — use for `sources_read` frontmatter field
    - `result.read_bytes` — use for `read_bytes` frontmatter field
-   - `result.image_grid` — True when ≥3 images embedded; set `cssclasses: [img-grid]` and no-blank-line embeds
+   - `result.image_grid` — True when ≥3 images embedded; set `cssclasses: [img-grid]` and call `event_writer.assemble_note_body` (row-chunked embeds; v14.3 F5)
    - `result.image_candidate_paths` / `result.image_caption_prompts` — run vision over each prompt, feed captions to `image_vision.select_top_k` to choose ≤10 embeds
    - `result.attachments_subfolder` — deprecated in v14, always empty
    - `result.warnings` / `result.errors` — log these for the heartbeat memory report
 
-   **No-content enforcement:** readable files yielding no text and no images return `skipped=True, skip_reason="no_content"`. No Template B note is written for them.
+   **No-content enforcement:** readable files yielding no text and no images return `skipped=True, skip_reason="no_content"`. No metadata stub is written for them.
 
    The `scan_pipeline` has no default read limit — all files are fully read.
    Use `process_batch(source_paths, ...)` or call `process_file` in a loop.
@@ -462,10 +462,11 @@ For each delta file, follow the same per-event pipeline as retro-scan:
    runs. To throttle, pass `max_reads=N` explicitly.
 
 5a. **Compose the note body via event_writer (v14).** Heartbeat is
-    non-interactive, so Template A prose synthesis is NOT done here —
-    only the deterministic Template B path runs autonomously. Template A
-    candidates are converted to a synthetic Template B ("needs retro-scan")
-    and logged so the user can run `/vault-bridge:retro-scan` later.
+    non-interactive, so event-note prose synthesis is NOT done here —
+    only the deterministic metadata-stub path runs autonomously.
+    Event-note candidates are converted to a synthetic metadata stub
+    ("needs retro-scan") and logged so the user can run
+    `/vault-bridge:retro-scan` later.
 
     ```python
     import sys
@@ -481,22 +482,22 @@ For each delta file, follow the same per-event pipeline as retro-scan:
         'file_type': '$FILE_TYPE',
     }
     composed = event_writer.compose_body(result, meta)
-    if composed.template_kind == 'A':
-        # Autonomous mode cannot run the Template A prompt safely. Fall
-        # back to Template B and log the skip for retro-scan follow-up.
+    if composed.note_kind == 'event':
+        # Autonomous mode cannot run the event-note prompt safely. Fall
+        # back to a metadata stub and log the skip for retro-scan follow-up.
         result.skipped = True
         result.skip_reason = 'needs_retro_scan'
         composed = event_writer.compose_body(result, meta)
-        warnings.append('template-a downgraded to template-b in heartbeat; retro-scan recommended')
+        warnings.append('event-note downgraded to metadata-stub in heartbeat; retro-scan recommended')
 
     body_text = composed.body_text
     final_body = event_writer.assemble_note_body(body_text, result.attachments)
     ```
 
-5b. For Template B notes (now all heartbeat notes): inject proactive
+5b. For metadata stubs (now all heartbeat notes): inject proactive
    wikilinks before writing. Run `link_strategy.find_linking_candidates()` and
    append `## Related notes` wikilinks via `link_strategy.build_related_notes_section()`.
-   This is non-interactive — if no candidates found, write Template B as-is.
+   This is non-interactive — if no candidates found, write the stub as-is.
 6. Apply the fabrication firewall stop-word list
 7. Build frontmatter with the required fields in canonical order:
    `schema_version: 2`, `plugin: vault-bridge`, `domain`, `project`,
@@ -621,7 +622,7 @@ where N is the number of events successfully created this run.
 ## Highlights, callouts, and canvas — same rules as retro-scan
 
 **Highlights** (`==text==`) — mark key facts (dates, amounts, decisions,
-named people) that you literally read in the source. Template A only.
+named people) that you literally read in the source. Event notes only.
 
 **Callouts** — use sparingly (0-3 per note):
 - `> [!abstract] Summary` — top of complex notes for a 1-2 sentence summary
@@ -634,7 +635,7 @@ named people) that you literally read in the source. Template A only.
 involves 3+ parties, multiple steps, or interrelated deliverables. Same
 filename stem as the note. Link from the note body with
 `[[{event_date} {short-topic}.canvas|Event diagram]]`. Max 15 nodes.
-Template B events NEVER get callouts, highlights, or canvases.
+Metadata stubs NEVER get callouts, highlights, or canvases.
 
 ## The fabrication firewall stop-word list
 

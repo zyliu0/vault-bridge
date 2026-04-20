@@ -190,7 +190,9 @@ def probe_binary_write(
 
     probe_bytes = PROBE_PNG_BYTES
     probe_hash = hashlib.sha256(probe_bytes).hexdigest()[:8]
-    probe_dst = f"_Attachments/_probe/{probe_hash}_probe.png"
+    # Probe path namespaced under _vb-probe/ so we don't leave an empty
+    # _Attachments/ folder at the vault root after cleanup.
+    probe_dst = f"_vb-probe/{probe_hash}_probe.png"
 
     with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
         tmp.write(probe_bytes)
@@ -225,4 +227,4 @@ def probe_binary_write(
         }
     finally:
         # Clean up the probe folder from the vault so we don't leave debris.
-        _delete_vault_path(vault_name, "_Attachments/_probe", runner)
+        _delete_vault_path(vault_name, "_vb-probe", runner)

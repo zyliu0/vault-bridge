@@ -598,7 +598,7 @@ Run the same retro-scan event detection pipeline as if the user were running
 means:
 1. Re-resolve the archive path from the note's `source_path`
 2. Re-run the image pipeline (Step 6e-image) with LLM vision descriptions
-3. Re-generate the frontmatter and Template A body
+3. Re-generate the frontmatter and event-note body
 4. **Delete the existing note** from the vault
 5. **Write a new note** at the same vault path with fresh frontmatter + body
 
@@ -807,9 +807,9 @@ Notes moved:           {N} (if --move was used)
 Index entries added:   {N}
 
 Metadata-only rewrites:
-  Rewritten to Template A: {N}
-  Kept as metadata-only:    {N}
-  Rescan failed:            {N}
+  Rewritten to event note: {N}
+  Kept as metadata stub:   {N}
+  Rescan failed:           {N}
 
 Content verification:
   Upgraded to high confidence: {N} (if --re-read was used)

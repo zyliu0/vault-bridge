@@ -707,7 +707,7 @@ Find the vault subfolder via this algorithm:
    override with that `subfolder`.
 3. If nothing matched, use `routing.fallback`.
 
-### 6e. Read the file content (Template A vs Template B)
+### 6e. Read the file content (event note vs metadata stub)
 
 All file processing is routed through `scripts/scan_pipeline.py`, which consults
 the file-type handler registry to determine what to extract. Run for each event:
@@ -775,18 +775,18 @@ The registry automatically handles routing:
 
 | handler_category | Handling |
 |-----------------|----------|
-| document-pdf, document-office | text + images extracted → Template A. If neither extracted, **skipped** (`skip_reason="no_content"`). |
-| image-raster, image-vector | images extracted → Template A if vision runs. If no images, **skipped**. |
-| cad-dxf, cad-dwg, vector-ai, raster-psd | render_pages=True: screenshots extracted → Template A. If no images, **skipped**. |
-| text-plain | text extracted → Template A. If empty text, **skipped**. |
-| video, audio, archive | skipped=True, skip_reason set → Template B. |
-| None (unknown ext) | skipped=True, skip_reason contains "unknown" → Template B. |
+| document-pdf, document-office | text + images extracted → event note. If neither extracted, **skipped** (`skip_reason="no_content"`). |
+| image-raster, image-vector | images extracted → event note if vision runs. If no images, **skipped**. |
+| cad-dxf, cad-dwg, vector-ai, raster-psd | render_pages=True: screenshots extracted → event note. If no images, **skipped**. |
+| text-plain | text extracted → event note. If empty text, **skipped**. |
+| video, audio, archive | skipped=True, skip_reason set → metadata stub. |
+| None (unknown ext) | skipped=True, skip_reason contains "unknown" → metadata stub. |
 
 **No-content enforcement (`skip_on_no_content=True`, the default):** If `result.text == ""` AND `result.images_embedded == 0` for a readable file type, the result has `skipped=True, skip_reason="no_content"`. No note is written. This is the fabrication firewall — readable files that yield nothing are dropped, not mocked up as metadata-only notes.
 
 **Image caps (v14):** `IMAGE_CANDIDATE_CAP = 20` bounds how many images are compressed per event; `IMAGE_EMBED_CAP = 10` bounds how many are embedded. Extra images are dropped — notes are event descriptions, not photographic records. `result.attachments_subfolder` is always `""` (the v13 subfolder split was removed).
 
-**Image grid:** When `result.image_grid == True` (≥3 images embedded), set `cssclasses: [img-grid]` in frontmatter and place wiki-embeds with **no blank lines between them**. The Minimal theme renders consecutive embeds as a side-by-side grid.
+**Image grid:** When `result.image_grid == True` (≥3 images embedded), set `cssclasses: [img-grid]` in frontmatter and call `event_writer.assemble_note_body(prose, attachments)`, which chunks embeds into rows of 3 with a blank line between rows. The Minimal theme renders each paragraph as its own grid row; a single paragraph of 10 embeds collapses into one 10-column strip, which is why the row chunking matters (v14.3, F5). Image grids render only in Reading view — toggle with Cmd/Ctrl+E if the layout looks wrong.
 
 For folders, read 1-3 representative files by calling `process_file` on each
 representative file, then merge: text = joined texts, attachments = all attachments.
@@ -794,14 +794,14 @@ representative file, then merge: text = joined texts, attachments = all attachme
 Use the returned `ScanResult` fields to populate note body and frontmatter:
 - `ScanResult.text` — note body source content
 - `ScanResult.attachments` — wiki-embed strings for images (`![[filename.jpg]]`)
-- `ScanResult.content_confidence` — use to decide Template A vs B:
-  - `"high"` or `"low"` → **Template A** (content was read)
-  - `"none"` → **Template B** (metadata-only), only for non-readable types (video, archive, unknown)
+- `ScanResult.content_confidence` — use to decide event note vs metadata stub:
+  - `"high"` or `"low"` → **event note** (content was read)
+  - `"none"` → **metadata stub**, only for non-readable types (video, archive, unknown)
 - `ScanResult.skipped` — if True, log `skip_reason` and skip note creation entirely (no note written)
 - `ScanResult.skip_reason` — `"no_content"` (readable file yielded nothing), `"read_limit_reached"` (text-only file at batch limit), or type-specific reason
 - `ScanResult.sources_read` — use for `sources_read` frontmatter field
 - `ScanResult.read_bytes` — use for `read_bytes` frontmatter field
-- `ScanResult.image_grid` — True when ≥3 images embedded; set `cssclasses: [img-grid]` and use no-blank-line embeds
+- `ScanResult.image_grid` — True when ≥3 images embedded; set `cssclasses: [img-grid]` and use `event_writer.assemble_note_body` (chunks embeds into rows of 3; Reading view only)
 - `ScanResult.image_candidate_paths` / `ScanResult.image_caption_prompts` — run vision over every prompt (see 6e-image), then pick ≤10 via `image_vision.select_top_k`
 - `ScanResult.attachments_subfolder` — deprecated in v14; always empty
 
@@ -844,14 +844,15 @@ attachments list are ignored — they referenced dropped candidates.
 
 Store `FINAL_CAPTIONS` and `FINAL_ATTACHMENTS` for the next steps — the
 event-writer consumes them to write the body, and `assemble_note_body`
-joins them into a grid block with no blank lines between embeds.
+chunks them into grid rows (blank lines between rows, consecutive lines within a row).
 
 ### 6f. Compose the note body via event_writer (v14)
 
 Notes are EVENT DESCRIPTIONS, not dumps of extracted text. The event-writer
 layer translates raw content + vision captions into a 100-200 word diary
-paragraph, or falls back to Template B metadata bullets when nothing was
-readable. Never paste raw text into the note body.
+paragraph (an **event note**), or falls back to a **metadata stub** —
+fixed bullets, no prose — when nothing was readable. Never paste raw
+text into the note body.
 
 ```python
 import sys
@@ -875,11 +876,21 @@ meta = {
 composed = event_writer.compose_body(result, meta)
 ```
 
-**If `composed.template_kind == 'B'`:** the body is already rendered
+**Announce the decision to the user BEFORE running the LLM** so they see
+what each event will produce. Emit one line per event, e.g.:
+
+- `→ 250415 schematic review memo.txt — reading text + 4 images, writing event note`
+- `→ walkthrough.mp4 — video, writing metadata stub (no prose, just source pointer)`
+- `→ empty.pdf — readable but no content extracted, skipping (no note written)`
+
+Use `composed.note_kind`, `result.skipped`, `result.images_embedded`, and
+`result.text` to pick the right wording. Print to stderr; one line per event.
+
+**If `composed.note_kind == 'stub'`:** the body is already rendered
 deterministically — use `composed.body_text` as the diary body. No LLM
 call required. Continue to 6g.
 
-**If `composed.template_kind == 'A'`:** execute `composed.prompt_text`
+**If `composed.note_kind == 'event'`:** execute `composed.prompt_text`
 as a sub-prompt (you are the model that runs it). The prompt is
 self-contained — it carries event metadata, the raw-text excerpt, the
 captions, and the fabrication-firewall rules. Return only the 100-200
@@ -893,12 +904,12 @@ vresult = composed.validator(diary_body)
 - **`vresult.ok == False`** (first attempt): append `vresult.reasons` to
   the prompt ("Your previous attempt failed these checks: ...") and
   retry ONCE.
-- **`vresult.ok == False`** (second attempt): fall back to Template B —
-  render the metadata-only body via `event_writer.compose_body` with a
+- **`vresult.ok == False`** (second attempt): fall back to a metadata
+  stub — render the stub body via `event_writer.compose_body` with a
   synthetic `skipped=True, skip_reason='validator_retry_exhausted'`
   result, log `validator_retry_exhausted` to warnings, and continue.
 
-**Assemble the final body with image embeds (no blank lines between them):**
+**Assemble the final body with image embeds (row-chunked grid; blank lines BETWEEN rows, not within):**
 
 ```python
 final_body = event_writer.assemble_note_body(diary_body, result.attachments)
@@ -907,14 +918,14 @@ final_body = event_writer.assemble_note_body(diary_body, result.attachments)
 This places the prose first, a blank line, then the `![[…]]` embeds on
 consecutive lines so Obsidian's Minimal theme renders them as a grid.
 
-### 6e-2. Proactive wikilinks for Template B notes
+### 6e-2. Proactive wikilinks for metadata stubs
 
-After building the Template B body, BEFORE writing, check whether this note
+After building the metadata-stub body, BEFORE writing, check whether this note
 would be orphaned (no incoming wikilinks from other vault-bridge notes).
 If wikilinks can be found, inject them into the body to prevent orphan status.
 
-**This step fires for every Template B write**, regardless of whether the
-file type is intentionally metadata-only or extraction failed.
+**This step fires for every metadata-stub write**, regardless of whether the
+file type is intentionally unreadable or extraction failed.
 
 Run:
 ```bash
@@ -942,19 +953,19 @@ print(json.dumps({'section': section, 'candidate_count': len(candidates)}))
 "
 ```
 
-If `section` is non-empty, inject it into the Template B body:
+If `section` is non-empty, inject it into the metadata-stub body:
 ```
-BODY_WITH_LINKS = TEMPLATE_B_BODY + "\n\n" + SECTION + "\n"
+BODY_WITH_LINKS = STUB_BODY + "\n\n" + SECTION + "\n"
 ```
 
-If `section` is empty, use `TEMPLATE_B_BODY` unchanged.
+If `section` is empty, use `STUB_BODY` unchanged.
 
 Log: if `candidate_count > 0`, record `orphaned_notes_avoided: N` in the
 scan summary (Step 9).
 
-### 6f. Highlights and callouts (Template A only)
+### 6f. Highlights and callouts (event notes only)
 
-When writing Template A note bodies, use Obsidian formatting to surface
+When writing event-note bodies, use Obsidian formatting to surface
 important information so the note is scannable in reading view.
 
 **Highlights** — use `==highlighted text==` for key facts the reader should
@@ -983,7 +994,7 @@ Rules:
 - A note may have 0-3 callouts. Most notes need zero. Do not force them.
 - Callouts are ONLY for content you actually read. Never use a callout to
   speculate about what might be in an unread file.
-- Template B notes NEVER get callouts or highlights.
+- Metadata stubs NEVER get callouts or highlights.
 
 ### 6f-2. Canvas generation for complex events
 
@@ -1032,11 +1043,11 @@ Rules:
 - Every node's text must come from content you actually read.
 - Keep canvases to 15 nodes or fewer. If it needs more, the event should
   probably be split into multiple notes.
-- Template B (metadata-only) events NEVER get a canvas.
+- Metadata stubs NEVER get a canvas.
 
 ### 6g. The fabrication firewall — stop-word list
 
-Before writing ANY sentence in a Template A body, check it against this stop-word list:
+Before writing ANY sentence in an event-note body, check it against this stop-word list:
 
 - "pulled the back wall in"
 - "the team" (as a collective actor)
@@ -1066,7 +1077,7 @@ plugin: vault-bridge
 domain: "{domain-name}"
 project: "{project-name-from-top-level-folder}"
 source_path: "{absolute-path-on-source}"
-file_type: {folder | pdf | docx | pptx | xlsx | jpg | png | psd | ai | dxf | dwg | rvt | 3dm | mov | mp4 | image-folder | md | txt | html | csv | json}
+file_type: {folder | pdf | docx | pptx | xlsx | jpg | png | psd | ai | dxf | dwg | rvt | 3dm | mov | mp4 | image-folder | md | txt | html | csv | json | key | numbers | pages | odt | ods | odp | zip | rar | 7z | tar | url | webloc | eml | msg | other}
 captured_date: {today YYYY-MM-DD}
 event_date: {computed in 6a}
 event_date_source: {filename-prefix | parent-folder-prefix | mtime}
@@ -1176,8 +1187,8 @@ event benefits from this one.)
 
 After every 10 events, stop and re-read your last 3 notes via
 `obsidian read vault="$VAULT_NAME" path="..."`. Confirm:
-- Each has non-empty `sources_read` OR uses Template B verbatim
-- Template A notes contain only specifics you can point at in extracted content
+- Each has non-empty `sources_read` OR uses the metadata stub verbatim
+- Event notes contain only specifics you can point at in extracted content
 - No note contains invented architectural moves, people, quotes, or decisions
 - Diary voice hasn't collapsed into "YYMMDD topic — " openings
 - Highlights (`==text==`) only mark facts literally present in sources_read
@@ -1278,7 +1289,7 @@ Collect the scan summary fields in memory for the Step 9 report:
 - Scan date and source folder
 - Events processed / skipped / failed counts
 - Total `read_file` calls made and bytes read
-- Template A vs Template B counts
+- event-note vs metadata-stub counts
 - orphaned_notes_avoided: notes that would have been orphaned but got wikilinks proactively
 - Any renames detected
 - Any self-check findings
@@ -1307,7 +1318,7 @@ python3 ${CLAUDE_PLUGIN_ROOT}/scripts/memory_report.py retro \
 Where `$STATS_JSON` is a JSON object with (all optional but include what
 you know): `started`, `finished`, `duration_sec`, `workdir`, `source`,
 `domain`, `dry_run`, `counts` (object: events, written, skipped, failed,
-template_a, template_b, orphaned_notes_avoided, renames, new_subfolders_discovered, categories_added,
+event_notes, metadata_stubs, orphaned_notes_avoided, renames, new_subfolders_discovered, categories_added,
 skipped_subfolders, routed_to_fallback), `notes_written` (list of vault paths),
 `warnings` (list of strings), `errors` (list of strings), and optional
 freeform `notes` (string).

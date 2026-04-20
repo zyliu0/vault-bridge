@@ -33,8 +33,8 @@ _MAX_DATE_PROXIMITY_SCORE = 10
 _MAX_RELEVANCE_SCORE = 3  # same project
 _PATH_OVERLAP_BONUS = 1
 
-# Template B body format (must match retro-scan.md Step 6e)
-TEMPLATE_B_BODY = """**Metadata-only event.** Content was not read by vault-bridge.
+# Metadata-stub body format (must match retro-scan.md Step 6e)
+STUB_BODY = """**Metadata-only event.** Content was not read by vault-bridge.
 
 - **Filename/folder:** {name}
 - **Type:** {file_type}
@@ -213,17 +213,17 @@ def build_related_notes_section(
     return "\n".join(lines)
 
 
-def build_template_b_with_links(
-    template_b_body: str,
+def build_stub_with_links(
+    stub_body: str,
     related_section: str,
 ) -> str:
-    """Append related notes section to a Template B body.
+    """Append related notes section to a metadata-stub body.
 
-    If related_section is empty, returns template_b_body unchanged.
+    If related_section is empty, returns stub_body unchanged.
     """
     if not related_section:
-        return template_b_body
-    return template_b_body.rstrip() + "\n\n" + related_section + "\n"
+        return stub_body
+    return stub_body.rstrip() + "\n\n" + related_section + "\n"
 
 
 # ---------------------------------------------------------------------------

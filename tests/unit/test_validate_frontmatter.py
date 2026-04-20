@@ -45,7 +45,7 @@ def write_note(tmp_path: Path, name: str, frontmatter_yaml: str, body: str = "Bo
 # Canonical frontmatter strings used as building blocks for drift cases.
 # Each is valid on its own; tests mutate them to create specific drifts.
 
-VALID_TEMPLATE_A_FRONTMATTER = """schema_version: 1
+VALID_EVENT_NOTE_FRONTMATTER = """schema_version: 1
 plugin: vault-bridge
 project: "Test Project"
 source_path: "/nas/test.pdf"
@@ -61,7 +61,7 @@ content_confidence: high
 cssclasses: []
 """
 
-VALID_TEMPLATE_B_FRONTMATTER = """schema_version: 1
+VALID_STUB_FRONTMATTER = """schema_version: 1
 plugin: vault-bridge
 project: "Test Project"
 source_path: "/nas/test.dwg"
@@ -81,21 +81,21 @@ cssclasses: []
 # Happy path — valid notes must pass
 # ---------------------------------------------------------------------------
 
-def test_valid_template_a_note_passes(tmp_path):
-    note = write_note(tmp_path, "valid_a.md", VALID_TEMPLATE_A_FRONTMATTER)
+def test_valid_event_note_passes(tmp_path):
+    note = write_note(tmp_path, "valid_a.md", VALID_EVENT_NOTE_FRONTMATTER)
     code, stderr = run_validator(note)
-    assert code == 0, f"Valid Template A should pass, got stderr:\n{stderr}"
+    assert code == 0, f"Valid event note should pass, got stderr:\n{stderr}"
 
 
-def test_valid_template_b_note_passes(tmp_path):
-    note = write_note(tmp_path, "valid_b.md", VALID_TEMPLATE_B_FRONTMATTER)
+def test_valid_metadata_stub_note_passes(tmp_path):
+    note = write_note(tmp_path, "valid_b.md", VALID_STUB_FRONTMATTER)
     code, stderr = run_validator(note)
-    assert code == 0, f"Valid Template B should pass, got stderr:\n{stderr}"
+    assert code == 0, f"Valid metadata stub should pass, got stderr:\n{stderr}"
 
 
 def test_valid_note_with_attachments_passes(tmp_path):
     """The optional `attachments` field is allowed when present."""
-    fm = VALID_TEMPLATE_A_FRONTMATTER.replace(
+    fm = VALID_EVENT_NOTE_FRONTMATTER.replace(
         "cssclasses: []\n",
         "attachments:\n  - '2024-09-09--test--a1b2c3d4.jpg'\ncssclasses: [img-grid]\n",
     )
@@ -110,7 +110,7 @@ def test_valid_note_with_attachments_passes(tmp_path):
 
 def test_drift_1_unknown_field_content_type(tmp_path):
     """The Test 2 canonical drift: `content_type` instead of `content_confidence`."""
-    fm = VALID_TEMPLATE_A_FRONTMATTER.replace(
+    fm = VALID_EVENT_NOTE_FRONTMATTER.replace(
         "content_confidence: high",
         "content_type: full",
     )
@@ -123,7 +123,7 @@ def test_drift_1_unknown_field_content_type(tmp_path):
 
 
 def test_drift_1_unknown_field_read_bytes_typo(tmp_path):
-    fm = VALID_TEMPLATE_A_FRONTMATTER.replace(
+    fm = VALID_EVENT_NOTE_FRONTMATTER.replace(
         "read_bytes: 1024",
         "bytes_read: 1024",
     )
@@ -141,7 +141,7 @@ def test_drift_1_unknown_field_read_bytes_typo(tmp_path):
 
 def test_drift_2_missing_read_bytes(tmp_path):
     """Test 2's other drift: read_bytes simply absent."""
-    fm = VALID_TEMPLATE_A_FRONTMATTER.replace(
+    fm = VALID_EVENT_NOTE_FRONTMATTER.replace(
         "read_bytes: 1024\n",
         "",
     )
@@ -153,7 +153,7 @@ def test_drift_2_missing_read_bytes(tmp_path):
 
 
 def test_drift_2_missing_sources_read(tmp_path):
-    fm = VALID_TEMPLATE_A_FRONTMATTER.replace(
+    fm = VALID_EVENT_NOTE_FRONTMATTER.replace(
         'sources_read:\n  - "/nas/test.pdf"\n',
         "",
     )
@@ -169,7 +169,7 @@ def test_drift_2_missing_sources_read(tmp_path):
 
 def test_drift_3_wrong_event_date_source(tmp_path):
     """Test 2's drift: `filename` instead of `filename-prefix`."""
-    fm = VALID_TEMPLATE_A_FRONTMATTER.replace(
+    fm = VALID_EVENT_NOTE_FRONTMATTER.replace(
         "event_date_source: filename-prefix",
         "event_date_source: filename",
     )
@@ -182,7 +182,7 @@ def test_drift_3_wrong_event_date_source(tmp_path):
 
 
 def test_drift_3_wrong_scan_type(tmp_path):
-    fm = VALID_TEMPLATE_A_FRONTMATTER.replace(
+    fm = VALID_EVENT_NOTE_FRONTMATTER.replace(
         "scan_type: retro",
         "scan_type: fullscan",
     )
@@ -193,7 +193,7 @@ def test_drift_3_wrong_scan_type(tmp_path):
 
 
 def test_drift_3_wrong_file_type(tmp_path):
-    fm = VALID_TEMPLATE_A_FRONTMATTER.replace(
+    fm = VALID_EVENT_NOTE_FRONTMATTER.replace(
         "file_type: pdf",
         "file_type: document",  # not in the enum
     )
@@ -209,7 +209,7 @@ def test_drift_3_wrong_file_type(tmp_path):
 
 def test_drift_4_read_bytes_as_string(tmp_path):
     """YAML parses quoted numbers as strings — validator must catch the type error."""
-    fm = VALID_TEMPLATE_A_FRONTMATTER.replace(
+    fm = VALID_EVENT_NOTE_FRONTMATTER.replace(
         "read_bytes: 1024",
         'read_bytes: "1024"',
     )
@@ -222,7 +222,7 @@ def test_drift_4_read_bytes_as_string(tmp_path):
 
 def test_drift_4_sources_read_as_string(tmp_path):
     """sources_read must be a list, not a single string."""
-    fm = VALID_TEMPLATE_A_FRONTMATTER.replace(
+    fm = VALID_EVENT_NOTE_FRONTMATTER.replace(
         'sources_read:\n  - "/nas/test.pdf"',
         'sources_read: "/nas/test.pdf"',
     )
@@ -238,7 +238,7 @@ def test_drift_4_sources_read_as_string(tmp_path):
 
 def test_drift_5_invariant_empty_sources_high_confidence(tmp_path):
     """Empty sources_read but content_confidence: high — Template mismatch."""
-    fm = VALID_TEMPLATE_B_FRONTMATTER.replace(
+    fm = VALID_STUB_FRONTMATTER.replace(
         "content_confidence: metadata-only",
         "content_confidence: high",
     )
@@ -250,7 +250,7 @@ def test_drift_5_invariant_empty_sources_high_confidence(tmp_path):
 
 
 def test_drift_5_invariant_nonempty_sources_metadata_only(tmp_path):
-    fm = VALID_TEMPLATE_A_FRONTMATTER.replace(
+    fm = VALID_EVENT_NOTE_FRONTMATTER.replace(
         "content_confidence: high",
         "content_confidence: metadata-only",
     )
@@ -260,7 +260,7 @@ def test_drift_5_invariant_nonempty_sources_metadata_only(tmp_path):
 
 
 def test_drift_5_invariant_empty_sources_nonzero_bytes(tmp_path):
-    fm = VALID_TEMPLATE_B_FRONTMATTER.replace(
+    fm = VALID_STUB_FRONTMATTER.replace(
         "read_bytes: 0",
         "read_bytes: 500",
     )
@@ -301,7 +301,7 @@ sources_read:
 
 def test_drift_6_first_field_not_schema_version(tmp_path):
     """schema_version must be first so humans can spot the schema at a glance."""
-    fm = VALID_TEMPLATE_A_FRONTMATTER.replace(
+    fm = VALID_EVENT_NOTE_FRONTMATTER.replace(
         "schema_version: 1\nplugin: vault-bridge\n",
         "plugin: vault-bridge\nschema_version: 1\n",
     )
@@ -334,7 +334,7 @@ def test_malformed_yaml(tmp_path):
 
 def test_literal_schema_version_must_be_1(tmp_path):
     """schema_version: 2 passes type check but fails the literal check."""
-    fm = VALID_TEMPLATE_A_FRONTMATTER.replace(
+    fm = VALID_EVENT_NOTE_FRONTMATTER.replace(
         "schema_version: 1",
         "schema_version: 2",
     )
@@ -345,7 +345,7 @@ def test_literal_schema_version_must_be_1(tmp_path):
 
 
 def test_literal_plugin_must_be_vault_bridge(tmp_path):
-    fm = VALID_TEMPLATE_A_FRONTMATTER.replace(
+    fm = VALID_EVENT_NOTE_FRONTMATTER.replace(
         "plugin: vault-bridge",
         "plugin: other-plugin",
     )

@@ -102,7 +102,7 @@ note that honestly says so.
 
 - **`/vault-bridge:research`** — research a topic, write a grounded report with cited sources.
 
-- **Event-writer (v14)** — notes are event descriptions, not file dumps. `scripts/event_writer.py` turns raw extracted content + vision captions into a 100-200 word diary paragraph (Template A) or a deterministic metadata-only body (Template B when the file could not be read). A validator rejects stop-words, out-of-range word counts, and verbatim paste from the source; failures retry once then fall back to Template B.
+- **Event-writer (v14)** — notes are event descriptions, not file dumps. `scripts/event_writer.py` turns raw extracted content + vision captions into a 100-200 word diary paragraph (an **event note**) or a deterministic metadata-only body (a **metadata stub** when the file could not be read). A validator rejects stop-words, out-of-range word counts, and verbatim paste from the source; failures retry once then fall back to a metadata stub.
 
 - **Image pipeline** — transports archive images, extracts embedded ones from containers (PDF/DOCX/PPTX), compresses, **runs vision captioning over up to 20 candidates, embeds the 10 most relevant** via `scripts/image_vision.py::select_top_k`, writes to vault as binary attachments with wiki-embed references (`![[filename.jpg]]`). Obsidian Minimal-theme `img-grid` CSS class is applied when ≥3 images are embedded.
 
@@ -222,7 +222,7 @@ and the estimated API call count before anything gets written.
 ### Step 3 — check the output
 
 Open the resulting vault folder in Obsidian. Read a few notes. Every
-Template A note should feel accurate to what's in the source file — not
+event note should feel accurate to what's in the source file — not
 invented. If you see phrases about decisions that didn't happen or people
 who weren't involved, file an issue. (The fabrication firewall is aggressive
 but not perfect; feedback improves it.)
@@ -267,10 +267,10 @@ events — still useful, just less informative.
   folder, a standalone document, a batch of site photos. Not one note per
   file. The vault tracks what you did, not what's in a directory listing.
 
-- **Honest or nothing.** Every Template A note body is grounded in content
+- **Honest or nothing.** Every event-note body is grounded in content
   that was actually read via the NAS/file system. No inference from
   folder names. No invented architectural decisions. When content can't
-  be read, the note says so with a fixed metadata-only template.
+  be read, the note says so with a fixed metadata stub.
 
 - **Idempotent.** Re-running `/retro-scan` on the same folder skips
   already-scanned events (via the sha256-fingerprint index) and detects
@@ -301,7 +301,7 @@ your archive                         vault-bridge                    your vault
                                     │     - compute fingerprint
                                     │     - decide action
                                     │     - route to subfolder
-                                    │     - read content (or Template B)
+                                    │     - read content (or metadata stub)
                                     │     - build frontmatter
                                     │     - write note
                                     │     - VALIDATE ← hard stop

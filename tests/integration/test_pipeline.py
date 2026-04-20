@@ -277,7 +277,7 @@ def test_pipeline_4_compress_and_dedup(fixture_source, fixture_vault):
 # ---------------------------------------------------------------------------
 
 def test_pipeline_5_note_write_and_validate(fixture_source, fixture_vault, fixture_state_dir):
-    """Build a Template A note for the standalone PDF, write it, validate it."""
+    """Build an event note for the standalone PDF, write it, validate it."""
     pdf = fixture_source / "240909 memo.pdf"
 
     # Compute the frontmatter fields

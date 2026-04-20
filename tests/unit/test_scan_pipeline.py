@@ -1577,10 +1577,20 @@ class TestImageSubfolderAndGrid:
 
         img = tmp_path / "photo.jpg"
         _write_fake_jpeg(img)
-        compressed = tmp_path / "2026-04-19--photo--abc123ab.jpg"
-        _write_fake_jpeg(compressed)
-
         eleven_imgs = [img] * 11
+
+        # v14.3 (F2): each compressed file must have unique bytes so
+        # the content-hash dedup doesn't collapse them into one embed.
+        def make_unique(src_path, out_dir, event_date):
+            idx = make_unique.counter
+            make_unique.counter += 1
+            out = out_dir / f"2026-04-19--photo--{idx:08x}.jpg"
+            _write_fake_jpeg(out)
+            # Append unique bytes so each file hashes differently.
+            with out.open("ab") as f:
+                f.write(f"unique-{idx}".encode())
+            return out
+        make_unique.counter = 0
 
         captured_dsts = []
         def fake_write(vault_name, src_abs_path, vault_dst_path):
@@ -1588,7 +1598,7 @@ class TestImageSubfolderAndGrid:
             return {"ok": True}
 
         with mock.patch("scan_pipeline.file_type_handlers.extract_images", return_value=eleven_imgs):
-            with mock.patch("scan_pipeline.compress_images.compress_image", return_value=compressed):
+            with mock.patch("scan_pipeline.compress_images.compress_image", side_effect=make_unique):
                 with mock.patch("scan_pipeline.vault_binary.write_binary", side_effect=fake_write):
                     result = scan_pipeline.process_file(
                         source_path=str(img),
@@ -1630,13 +1640,22 @@ class TestImageSubfolderAndGrid:
         import scan_pipeline
         img = tmp_path / "photo.jpg"
         _write_fake_jpeg(img)
-        compressed = tmp_path / "2026-04-19--photo--abc123ab.jpg"
-        _write_fake_jpeg(compressed)
 
         three_imgs = [img] * 3
 
+        # v14.3 (F2): unique compressed bytes so dedup doesn't collapse them.
+        def make_unique(src_path, out_dir, event_date):
+            idx = make_unique.counter
+            make_unique.counter += 1
+            out = out_dir / f"2026-04-19--photo--{idx:08x}.jpg"
+            _write_fake_jpeg(out)
+            with out.open("ab") as f:
+                f.write(f"unique-{idx}".encode())
+            return out
+        make_unique.counter = 0
+
         with mock.patch("scan_pipeline.file_type_handlers.extract_images", return_value=three_imgs):
-            with mock.patch("scan_pipeline.compress_images.compress_image", return_value=compressed):
+            with mock.patch("scan_pipeline.compress_images.compress_image", side_effect=make_unique):
                 result = scan_pipeline.process_file(
                     source_path=str(img),
                     workdir=str(tmp_path),

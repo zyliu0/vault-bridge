@@ -1,16 +1,16 @@
 """Tests for scripts/event_writer.py.
 
 The event-writer is the keystone layer that turns raw scan output into an
-event diary note. It classifies Template A (prose, grounded in content) vs
-Template B (fixed bullets, fallback when no content was read), renders B
-deterministically in Python, and emits a structured prompt for A that the
-invoking Claude runs.
+event diary note. It classifies event note (prose, grounded in content)
+vs metadata stub (fixed bullets, fallback when no content was read),
+renders the stub deterministically in Python, and emits a structured
+prompt for the event note that the invoking Claude runs.
 
 Contract:
   compose_body(result, meta) -> ComposedBody
-    .template_kind: "A" | "B"
-    .body_text: str         # rendered for B; empty for A until LLM fills it
-    .prompt_text: str       # non-empty for A; empty for B
+    .note_kind: "event" | "stub"
+    .body_text: str         # rendered for stub; empty for event until LLM fills it
+    .prompt_text: str       # non-empty for event; empty for stub
     .validator: callable[[str], ValidationResult]
 """
 import pytest
@@ -69,65 +69,65 @@ def _meta(
 
 
 class TestClassification:
-    def test_skipped_no_content_routes_to_template_b(self):
+    def test_skipped_no_content_routes_to_stub(self):
         r = _FakeResult(skipped=True, skip_reason="no_content", handler_category="document-pdf")
         body = event_writer.compose_body(r, _meta())
-        assert body.template_kind == "B"
+        assert body.note_kind == "stub"
 
-    def test_skipped_unreadable_type_routes_to_template_b(self):
+    def test_skipped_unreadable_type_routes_to_stub(self):
         r = _FakeResult(skipped=True, skip_reason="unsupported", handler_category="video")
-        assert event_writer.compose_body(r, _meta(file_type="mp4")).template_kind == "B"
+        assert event_writer.compose_body(r, _meta(file_type="mp4")).note_kind == "stub"
 
-    def test_text_present_routes_to_template_a(self):
+    def test_text_present_routes_to_event_note(self):
         r = _FakeResult(text="Meeting with consultant on Aug 1. Discussed structural plan.", content_confidence="full")
-        assert event_writer.compose_body(r, _meta()).template_kind == "A"
+        assert event_writer.compose_body(r, _meta()).note_kind == "event"
 
-    def test_images_only_with_captions_routes_to_template_a(self):
+    def test_images_only_with_captions_routes_to_event_note(self):
         r = _FakeResult(
             attachments=["![[a.jpg]]"],
             images_embedded=1,
             image_captions=["A sketch of the elevation showing the entry canopy."],
             content_confidence="partial",
         )
-        assert event_writer.compose_body(r, _meta()).template_kind == "A"
+        assert event_writer.compose_body(r, _meta()).note_kind == "event"
 
-    def test_empty_everything_routes_to_template_b(self):
+    def test_empty_everything_routes_to_stub(self):
         r = _FakeResult(skipped=True, skip_reason="no_content")
-        assert event_writer.compose_body(r, _meta()).template_kind == "B"
+        assert event_writer.compose_body(r, _meta()).note_kind == "stub"
 
 
-class TestTemplateB:
-    """Template B is deterministic — rendered in Python, never calls an LLM."""
+class TestMetadataStub:
+    """The metadata stub is deterministic — rendered in Python, never calls an LLM."""
 
-    def test_b_body_contains_fixed_bullets(self):
+    def test_stub_body_contains_fixed_bullets(self):
         r = _FakeResult(skipped=True, skip_reason="no_content", handler_category="video")
         m = _meta(file_type="mp4", source_path="/nas/vids/opening.mp4")
         body = event_writer.compose_body(r, m)
-        assert body.template_kind == "B"
+        assert body.note_kind == "stub"
         assert body.body_text.strip() != ""
         # Metadata-only note must not make claims; it lists the source.
         assert "opening.mp4" in body.body_text or "source" in body.body_text.lower()
 
-    def test_b_body_never_fabricates(self):
-        """Template B body must not contain stop-words or quotes."""
+    def test_stub_body_never_fabricates(self):
+        """Metadata stub body must not contain stop-words or quotes."""
         r = _FakeResult(skipped=True, skip_reason="unsupported")
         body = event_writer.compose_body(r, _meta()).body_text
         # Fabrication firewall stop-words
         for phrase in ["the team said", "the review came back", "pulled the back wall in"]:
             assert phrase.lower() not in body.lower()
 
-    def test_b_prompt_is_empty(self):
+    def test_stub_prompt_is_empty(self):
         r = _FakeResult(skipped=True, skip_reason="no_content")
         body = event_writer.compose_body(r, _meta())
         assert body.prompt_text == ""
 
 
-class TestTemplateA:
-    def test_a_prompt_contains_event_metadata(self):
+class TestEventNote:
+    def test_event_prompt_contains_event_metadata(self):
         r = _FakeResult(text="Design review meeting. Decision: proceed with facade option B.")
         m = _meta()
         body = event_writer.compose_body(r, m)
-        assert body.template_kind == "A"
+        assert body.note_kind == "event"
         assert body.body_text == ""  # filled by invoking Claude
         assert body.prompt_text != ""
         # Prompt must carry enough context for the model
@@ -135,7 +135,7 @@ class TestTemplateA:
         assert m["project"] in body.prompt_text
         assert "Decision: proceed with facade option B." in body.prompt_text
 
-    def test_a_prompt_includes_captions_when_images_embedded(self):
+    def test_event_prompt_includes_captions_when_images_embedded(self):
         r = _FakeResult(
             text="Site visit notes.",
             attachments=["![[a.jpg]]", "![[b.jpg]]"],
@@ -149,7 +149,7 @@ class TestTemplateA:
         assert "Rebar laid on the south wall." in prompt
         assert "Timber formwork partially installed." in prompt
 
-    def test_a_prompt_includes_fabrication_firewall_rules(self):
+    def test_event_prompt_includes_fabrication_firewall_rules(self):
         r = _FakeResult(text="Short note.")
         prompt = event_writer.compose_body(r, _meta()).prompt_text
         # Must remind the writer to not fabricate
@@ -224,24 +224,60 @@ class TestValidator:
 
 
 class TestRenderFinalNote:
-    """After LLM fills in Template A body, the event-writer assembles the final
-    note body (body text + image block) with no blank lines between consecutive
-    image embeds (Minimal theme grid requirement)."""
+    """After the LLM fills in an event-note body, the event-writer assembles
+    the final note body (body text + image block). Embeds are chunked into
+    rows of IMAGE_GRID_ROW_SIZE so Minimal's img-grid CSS produces one grid
+    row per paragraph instead of a single flat strip (v14.3, F5)."""
 
-    def test_assemble_with_images_no_blank_lines_between_embeds(self):
+    def test_assemble_within_row_has_no_blank_lines(self):
+        """≤ row_size embeds all live in one paragraph."""
         body_text = "Diary paragraph about the meeting."
         attachments = ["![[a.jpg]]", "![[b.jpg]]", "![[c.jpg]]"]
         out = event_writer.assemble_note_body(body_text, attachments)
-        # No blank line between consecutive embeds
+        # No blank line between consecutive embeds within one row
         embeds_block = "![[a.jpg]]\n![[b.jpg]]\n![[c.jpg]]"
         assert embeds_block in out
         # Blank line before the embed block separates prose from grid
         assert "meeting.\n\n![[a.jpg]]" in out
+
+    def test_assemble_breaks_embeds_into_rows(self):
+        """> row_size embeds are split into paragraphs of row_size each.
+
+        This is the F5 fix: a single paragraph of 10 embeds would render
+        as one 10-column strip under Minimal's img-grid CSS. Blank lines
+        between rows open new paragraphs, each styled as its own grid row.
+        """
+        attachments = [f"![[{c}.jpg]]" for c in "abcdef"]
+        out = event_writer.assemble_note_body("Prose.", attachments, row_size=3)
+        # First row: a, b, c together
+        assert "![[a.jpg]]\n![[b.jpg]]\n![[c.jpg]]" in out
+        # Blank line breaks into the second row
+        assert "![[c.jpg]]\n\n![[d.jpg]]" in out
+        # Second row: d, e, f together
+        assert "![[d.jpg]]\n![[e.jpg]]\n![[f.jpg]]" in out
+
+    def test_assemble_row_size_honoured(self):
+        """Custom row_size produces matching chunks."""
+        attachments = [f"![[{i}.jpg]]" for i in range(8)]
+        out = event_writer.assemble_note_body("", attachments, row_size=2)
+        # 8 embeds at row_size=2 → 4 rows → 3 blank-line separators
+        assert out.count("\n\n") == 3
+
+    def test_assemble_uneven_last_row(self):
+        """The last row holds the remainder when len(attachments) % row_size != 0."""
+        attachments = [f"![[{i}.jpg]]" for i in range(7)]
+        out = event_writer.assemble_note_body("", attachments, row_size=3)
+        # 7 at row_size=3 → rows of 3, 3, 1
+        assert out.count("\n\n") == 2
+        assert out.endswith("![[6.jpg]]")
 
     def test_assemble_without_images(self):
         out = event_writer.assemble_note_body("Prose only.", [])
         assert out.strip() == "Prose only."
 
     def test_assemble_single_image(self):
+        """A single embed has no rows to break into."""
         out = event_writer.assemble_note_body("Prose.", ["![[only.jpg]]"])
         assert "![[only.jpg]]" in out
+        # No spurious blank lines
+        assert "\n\n\n" not in out

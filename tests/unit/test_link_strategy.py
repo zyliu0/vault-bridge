@@ -375,17 +375,17 @@ def test_append_related_notes_failure_returns_false(mock_vault, sample_orphan, s
 
 
 # ---------------------------------------------------------------------------
-# Template B wikilink injection — build_template_b_with_links
+# Metadata-stub wikilink injection — build_stub_with_links
 # ---------------------------------------------------------------------------
 
-def test_build_template_b_with_links_adds_section(sample_orphan):
-    """Template B body gets ## Related notes section appended."""
+def test_build_stub_with_links_adds_section(sample_orphan):
+    """Metadata-stub body gets ## Related notes section appended."""
     section = ls.build_related_notes_section([
         {"vault_path": "arch-projects/250507 COSMOS/SD/2025-05-09 visit.md",
          "event_date": "2025-05-09", "title": "2025-05-09 visit",
          "project": "250507 COSMOS", "file_type": "folder", "source_path": "/nas/visit"}
     ])
-    template_b_body = ls.TEMPLATE_B_BODY.format(
+    stub_body = ls.STUB_BODY.format(
         name="250508 概念方案.pdf",
         file_type="pdf",
         size="256.6 KB",
@@ -393,16 +393,16 @@ def test_build_template_b_with_links_adds_section(sample_orphan):
         reason="read limit reached (cache guard)",
         source_path="/nas/2505 COSMOS展厅/250508 概念方案.pdf",
     )
-    result = ls.build_template_b_with_links(template_b_body, section)
+    result = ls.build_stub_with_links(stub_body, section)
     assert "## Related notes" in result
     assert "[[2025-05-09 visit]]" in result
 
 
-def test_build_template_b_with_links_no_candidates():
-    """Empty candidates leaves template B unchanged."""
-    template_b_body = "**Metadata-only event.**\n\nNAS: `/path`"
-    result = ls.build_template_b_with_links(template_b_body, "")
-    assert result == template_b_body
+def test_build_stub_with_links_no_candidates():
+    """Empty candidates leaves the stub unchanged."""
+    stub_body = "**Metadata-only event.**\n\nNAS: `/path`"
+    result = ls.build_stub_with_links(stub_body, "")
+    assert result == stub_body
 
 
 # ---------------------------------------------------------------------------

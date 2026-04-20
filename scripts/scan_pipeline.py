@@ -34,6 +34,7 @@ from typing import List, Optional
 _HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(_HERE))
 
+import attachment_index
 import compress_images
 import file_type_handlers
 import vault_binary
@@ -58,6 +59,14 @@ IMAGE_SUBFOLDER_THRESHOLD = IMAGE_EMBED_CAP
 
 # Minimum number of images in a batch that triggers image-grid CSS class.
 IMAGE_GRID_MIN = 3
+
+# Size gate: compressed images under this many bytes are almost always
+# non-content (logos, UI chrome, divider lines, small icons). Events
+# routinely contain PDFs with a 6.6 KB client logo in the footer of
+# every page, which `pdfplumber` dutifully extracts — one per page.
+# A 10 KB cutoff catches logos and icons without touching legitimate
+# thumbnails or small product shots.
+IMAGE_MIN_BYTES = 10_000
 
 
 # ---------------------------------------------------------------------------
@@ -121,8 +130,20 @@ def _compute_confidence(text: str) -> str:
     return "high"
 
 
-def _make_skipped(source_path: str, reason: str, category: Optional[str] = None) -> ScanResult:
-    """Return a ScanResult marked as skipped."""
+def _make_skipped(
+    source_path: str,
+    reason: str,
+    category: Optional[str] = None,
+    *,
+    warnings: Optional[List[str]] = None,
+    errors: Optional[List[str]] = None,
+) -> ScanResult:
+    """Return a ScanResult marked as skipped.
+
+    Warnings and errors accumulated before the skip (e.g. size-gate drops,
+    compress failures) are preserved so the caller can surface them — the
+    memory report depends on this.
+    """
     return ScanResult(
         source_path=source_path,
         handler_category=category,
@@ -131,8 +152,8 @@ def _make_skipped(source_path: str, reason: str, category: Optional[str] = None)
         images_embedded=0,
         skipped=True,
         skip_reason=reason,
-        warnings=[],
-        errors=[],
+        warnings=list(warnings or []),
+        errors=list(errors or []),
         read_bytes=0,
         sources_read=0,
         content_confidence="none",
@@ -220,6 +241,8 @@ def _process_images(
     tmp_dir: Path,
     vault_name: str,
     dry_run: bool,
+    *,
+    att_index: Optional[attachment_index.AttachmentIndex] = None,
 ) -> tuple:
     """Extract, compress, and write images for a source file.
 
@@ -232,6 +255,15 @@ def _process_images(
       - Candidate compressed paths and one caption prompt per candidate are
         returned so the command spec can run vision over them and (optionally)
         re-curate via image_vision.select_top_k.
+
+    v14.3 additions (F2):
+      - Size gate: compressed images under IMAGE_MIN_BYTES are discarded
+        (client logos, UI chrome).
+      - Content-hash dedup: a shared AttachmentIndex maps sha256 → canonical
+        filename. A repeat hash causes the canonical filename to be embedded
+        instead of writing a duplicate vault attachment. When `att_index` is
+        None the caller is running in isolation (legacy callers, unit tests);
+        a local ephemeral index is used so per-event dedup still applies.
 
     Returns:
         (attachments, images_embedded, image_grid, "",
@@ -247,14 +279,36 @@ def _process_images(
     candidate_paths: List[str] = []
     caption_prompts: List[str] = []
 
+    # If the caller didn't pass a shared index, make a local one so
+    # in-event duplicates (same logo extracted from multiple PDF pages)
+    # still collapse to one embed.
+    if att_index is None:
+        att_index = attachment_index.AttachmentIndex()
+
     # Step 1: Extract images via handler registry, capped at IMAGE_CANDIDATE_CAP.
     try:
-        raw_images = file_type_handlers.extract_images(source_path)
+        raw_images = file_type_handlers.extract_images(source_path, workdir=workdir)
     except Exception as exc:
         errors.append(f"extract_images failed: {exc}")
         return attachments, images_embedded, False, "", warnings, errors, candidate_paths, caption_prompts
 
     if not raw_images:
+        # v14.3 (F1-d): readable-handler-but-empty-result is the worst failure
+        # mode — users cannot tell whether the file is empty or the handler
+        # is broken. Surface a warning so the memory report carries the hint.
+        cfg = file_type_handlers.get_handler(source_path)
+        if cfg is not None and cfg.category in (
+            "cad-dxf", "cad-dwg", "cad-3dm",
+            "vector-ai", "raster-psd",
+            "document-office-legacy", "spreadsheet-legacy",
+        ):
+            warnings.append(
+                f"no images rendered from {Path(source_path).name} "
+                f"(category {cfg.category}): the per-extension handler at "
+                f".vault-bridge/handlers/ may be missing, stale, or the "
+                f"required converter (e.g. ODA File Converter for DWG) "
+                f"may not be installed. Run /vault-bridge:setup → file types."
+            )
         return attachments, images_embedded, False, "", warnings, errors, candidate_paths, caption_prompts
 
     capped_raw = list(raw_images)[:IMAGE_CANDIDATE_CAP]
@@ -299,11 +353,47 @@ def _process_images(
         )
     attachments_root = _attachments_root(vault_project_path, "")
 
-    # Step 4: Write to vault
+    # Step 4: Size-gate + content-hash dedup, then write to vault.
+    # Track which filenames have been embedded in THIS event so that a
+    # single event does not embed the same canonical attachment twice
+    # when two compressed outputs both dedup to the same prior file.
+    embedded_names_this_event: set = set()
+
     for compressed in embed_set:
+        # Size gate — drop logos and UI chrome before they hit the vault.
+        try:
+            size = compressed.stat().st_size
+        except OSError:
+            size = 0
+        if size and size < IMAGE_MIN_BYTES:
+            warnings.append(
+                f"image under size gate ({size} < {IMAGE_MIN_BYTES} bytes): "
+                f"{compressed.name} — likely logo or UI chrome, skipped"
+            )
+            continue
+
+        # Content-hash lookup — is this byte-identical to a prior attachment?
+        try:
+            sha = attachment_index.sha256_of_file(compressed)
+        except OSError as exc:
+            warnings.append(f"hash failed for {compressed.name}: {exc}")
+            sha = ""
+
+        canonical = att_index.lookup(sha) if sha else None
+        if canonical:
+            if canonical in embedded_names_this_event:
+                continue  # already in this note's grid
+            attachments.append(f"![[{canonical}]]")
+            images_embedded += 1
+            embedded_names_this_event.add(canonical)
+            continue
+
         if dry_run:
             attachments.append(f"![[{compressed.name}]]")
             images_embedded += 1
+            embedded_names_this_event.add(compressed.name)
+            if sha:
+                att_index.record(sha, compressed.name)
             continue
 
         vault_dst = f"{attachments_root}/{compressed.name}"
@@ -320,6 +410,9 @@ def _process_images(
         if write_result.get("ok"):
             attachments.append(f"![[{compressed.name}]]")
             images_embedded += 1
+            embedded_names_this_event.add(compressed.name)
+            if sha:
+                att_index.record(sha, compressed.name)
         else:
             err = write_result.get("error", "unknown vault_binary error")
             errors.append(f"vault write failed for {compressed.name}: {err}")
@@ -342,6 +435,7 @@ def process_file(
     throughput_bps: Optional[float] = None,
     skip_on_no_content: bool = True,
     dry_run: bool = False,
+    att_index: Optional[attachment_index.AttachmentIndex] = None,
 ) -> ScanResult:
     """Process a single source file through the handler registry pipeline.
 
@@ -378,6 +472,7 @@ def process_file(
             throughput_bps=throughput_bps,
             skip_on_no_content=skip_on_no_content,
             dry_run=dry_run,
+            att_index=att_index,
         )
     except Exception as exc:
         logger.exception("process_file: unexpected error for %s: %s", source_path, exc)
@@ -409,6 +504,7 @@ def _process_file_inner(
     throughput_bps: Optional[float],
     skip_on_no_content: bool,
     dry_run: bool,
+    att_index: Optional[attachment_index.AttachmentIndex] = None,
 ) -> ScanResult:
     """Inner implementation — may raise; always wrapped by process_file."""
 
@@ -447,7 +543,7 @@ def _process_file_inner(
                 f"~{est:.0f}s at measured transport speed"
             )
         try:
-            text = file_type_handlers.read_text(source_path)
+            text = file_type_handlers.read_text(source_path, workdir=workdir)
             if text:
                 read_bytes = len(text.encode("utf-8"))
                 sources_read = 1
@@ -472,6 +568,7 @@ def _process_file_inner(
                 tmp_dir=tmp_dir,
                 vault_name=vault_name,
                 dry_run=dry_run,
+                att_index=att_index,
             )
             attachments.extend(img_attachments)
             images_embedded += img_embedded
@@ -483,9 +580,17 @@ def _process_file_inner(
             candidate_paths = img_candidates
             caption_prompts = img_prompts
 
-    # Step 5: Enforce no-meta-only rule — skip if nothing was extracted
+    # Step 5: Enforce no-meta-only rule — skip if nothing was extracted.
+    # Preserve warnings and errors so size-gate drops and other diagnostics
+    # survive into the memory report.
     if skip_on_no_content and text == "" and images_embedded == 0:
-        return _make_skipped(source_path, "no_content", category=handler.category)
+        return _make_skipped(
+            source_path,
+            "no_content",
+            category=handler.category,
+            warnings=warnings,
+            errors=errors,
+        )
 
     # Step 6: Compute content_confidence
     content_confidence = _compute_confidence(text)
@@ -522,6 +627,8 @@ def process_batch(
     throughput_bps: Optional[float] = None,
     skip_on_no_content: bool = True,
     dry_run: bool = False,
+    att_index: Optional[attachment_index.AttachmentIndex] = None,
+    persist_index: bool = True,
 ) -> List[ScanResult]:
     """Process a list of source files, with an optional text-read cap.
 
@@ -550,6 +657,12 @@ def process_batch(
     results: List[ScanResult] = []
     reads_done = 0
 
+    # Attachment dedup index — loaded once per batch so every event sees
+    # the same view of previously-written attachments. Skips the load when
+    # the caller passed one in (composite batches can share an index).
+    if att_index is None:
+        att_index = attachment_index.load(workdir) if not dry_run else attachment_index.AttachmentIndex()
+
     for path in source_paths:
         handler = file_type_handlers.get_handler(path)
 
@@ -560,7 +673,7 @@ def process_batch(
             # Text-read limit reached — check if render_pages-only processing is possible
             if handler is not None and (handler.extract_images or handler.render_pages):
                 # Has images: text is blocked, but images should still run
-                result = _process_images_only(path, workdir, vault_project_path, event_date, vault_name=vault_name, dry_run=dry_run, skip_on_no_content=skip_on_no_content)
+                result = _process_images_only(path, workdir, vault_project_path, event_date, vault_name=vault_name, dry_run=dry_run, skip_on_no_content=skip_on_no_content, att_index=att_index)
             else:
                 # Text-only file — skip entirely
                 result = ScanResult(
@@ -586,11 +699,21 @@ def process_batch(
                 throughput_bps=throughput_bps,
                 skip_on_no_content=skip_on_no_content,
                 dry_run=dry_run,
+                att_index=att_index,
             )
             if result.sources_read > 0:
                 reads_done += result.sources_read
 
         results.append(result)
+
+    # Persist index across runs so a future batch in the same workdir
+    # continues to dedup. Skipped on dry runs — the dry-run index is
+    # ephemeral by design.
+    if persist_index and not dry_run:
+        try:
+            att_index.persist(workdir)
+        except OSError as exc:
+            logger.warning("failed to persist attachment index: %s", exc)
 
     return results
 
@@ -604,6 +727,7 @@ def _process_images_only(
     vault_name: str,
     dry_run: bool,
     skip_on_no_content: bool = True,
+    att_index: Optional[attachment_index.AttachmentIndex] = None,
 ) -> ScanResult:
     """Process images for a file whose text extraction is blocked by the read limit."""
     handler = file_type_handlers.get_handler(source_path)
@@ -633,6 +757,7 @@ def _process_images_only(
                 tmp_dir=tmp_dir,
                 vault_name=vault_name,
                 dry_run=dry_run,
+                att_index=att_index,
             )
     except Exception as exc:
         errors.append(f"image-only processing error: {exc}")

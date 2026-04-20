@@ -52,6 +52,18 @@ EXPECTED_FILE_TYPES = {
     "jpg", "png", "psd", "ai", "dxf",
     "dwg", "rvt", "3dm", "mov", "mp4",
     "md", "txt", "html", "csv", "json",
+    # iWork
+    "key", "numbers", "pages",
+    # OpenDocument
+    "odt", "ods", "odp",
+    # Archives
+    "zip", "rar", "7z", "tar",
+    # Shortcuts
+    "url", "webloc",
+    # Email
+    "eml", "msg",
+    # Catch-all
+    "other",
 }
 
 EXPECTED_EVENT_DATE_SOURCES = {"filename-prefix", "parent-folder-prefix", "mtime"}
@@ -188,8 +200,8 @@ def test_every_literal_field_is_required():
 # check_invariants() — cross-field rules
 # ---------------------------------------------------------------------------
 
-def _valid_template_a_frontmatter():
-    """A minimal frontmatter dict that should pass all invariants (Template A)."""
+def _valid_event_note_frontmatter():
+    """A minimal frontmatter dict that should pass all invariants (event note)."""
     return {
         "schema_version": 2,
         "plugin": "vault-bridge",
@@ -208,8 +220,8 @@ def _valid_template_a_frontmatter():
     }
 
 
-def _valid_template_b_frontmatter():
-    """A minimal frontmatter dict that should pass all invariants (Template B)."""
+def _valid_stub_frontmatter():
+    """A minimal frontmatter dict that should pass all invariants (metadata stub)."""
     return {
         "schema_version": 2,
         "plugin": "vault-bridge",
@@ -228,18 +240,18 @@ def _valid_template_b_frontmatter():
     }
 
 
-def test_valid_template_a_has_zero_invariant_errors():
-    errors = schema.check_invariants(_valid_template_a_frontmatter())
+def test_valid_event_note_has_zero_invariant_errors():
+    errors = schema.check_invariants(_valid_event_note_frontmatter())
     assert errors == []
 
 
-def test_valid_template_b_has_zero_invariant_errors():
-    errors = schema.check_invariants(_valid_template_b_frontmatter())
+def test_valid_metadata_stub_has_zero_invariant_errors():
+    errors = schema.check_invariants(_valid_stub_frontmatter())
     assert errors == []
 
 
 def test_invariant_sources_read_nonempty_requires_content_confidence_high():
-    fm = _valid_template_a_frontmatter()
+    fm = _valid_event_note_frontmatter()
     fm["content_confidence"] = "metadata-only"  # wrong
     errors = schema.check_invariants(fm)
     assert len(errors) >= 1
@@ -247,7 +259,7 @@ def test_invariant_sources_read_nonempty_requires_content_confidence_high():
 
 
 def test_invariant_sources_read_empty_requires_content_confidence_metadata_only():
-    fm = _valid_template_b_frontmatter()
+    fm = _valid_stub_frontmatter()
     fm["content_confidence"] = "high"  # wrong
     errors = schema.check_invariants(fm)
     assert len(errors) >= 1
@@ -255,7 +267,7 @@ def test_invariant_sources_read_empty_requires_content_confidence_metadata_only(
 
 
 def test_invariant_empty_sources_read_requires_zero_read_bytes():
-    fm = _valid_template_b_frontmatter()
+    fm = _valid_stub_frontmatter()
     fm["read_bytes"] = 500  # wrong — no sources read but bytes claimed
     errors = schema.check_invariants(fm)
     assert len(errors) >= 1
@@ -264,13 +276,13 @@ def test_invariant_empty_sources_read_requires_zero_read_bytes():
 
 def test_invariants_returns_list_not_none_for_valid_input():
     """Invariants should always return a list, never None or raise."""
-    result = schema.check_invariants(_valid_template_a_frontmatter())
+    result = schema.check_invariants(_valid_event_note_frontmatter())
     assert isinstance(result, list)
 
 
 def test_invariants_collects_all_errors_not_just_first():
     """If multiple invariants are violated, all should be reported."""
-    fm = _valid_template_b_frontmatter()
+    fm = _valid_stub_frontmatter()
     fm["content_confidence"] = "high"  # violation 1
     fm["read_bytes"] = 500  # violation 2
     errors = schema.check_invariants(fm)
@@ -347,14 +359,14 @@ def test_new_file_types_for_research_and_content():
 
 
 def test_invariant_domain_must_not_contain_path_separator():
-    fm = _valid_template_a_frontmatter()
+    fm = _valid_event_note_frontmatter()
     fm["domain"] = "arch/projects"
     errors = schema.check_invariants(fm)
     assert any("domain" in e for e in errors)
 
 
 def test_invariant_domain_must_not_be_empty():
-    fm = _valid_template_a_frontmatter()
+    fm = _valid_event_note_frontmatter()
     fm["domain"] = ""
     errors = schema.check_invariants(fm)
     assert any("domain" in e for e in errors)
@@ -393,7 +405,7 @@ def test_images_embedded_appears_after_source_images():
 
 def test_invariant_images_embedded_positive_requires_matching_attachments():
     """images_embedded > 0 but attachments absent → invariant violation."""
-    fm = _valid_template_a_frontmatter()
+    fm = _valid_event_note_frontmatter()
     fm["images_embedded"] = 2
     # No attachments key
     errors = schema.check_invariants(fm)
@@ -402,7 +414,7 @@ def test_invariant_images_embedded_positive_requires_matching_attachments():
 
 def test_invariant_images_embedded_matches_attachments_length():
     """images_embedded: 2 but only 1 attachment → invariant violation."""
-    fm = _valid_template_a_frontmatter()
+    fm = _valid_event_note_frontmatter()
     fm["images_embedded"] = 2
     fm["attachments"] = ["only-one.jpg"]
     errors = schema.check_invariants(fm)
@@ -411,7 +423,7 @@ def test_invariant_images_embedded_matches_attachments_length():
 
 def test_invariant_images_embedded_matches_attachments_passes():
     """images_embedded: 2 with 2 attachments → no invariant violation."""
-    fm = _valid_template_a_frontmatter()
+    fm = _valid_event_note_frontmatter()
     fm["images_embedded"] = 2
     fm["attachments"] = ["file1.jpg", "file2.jpg"]
     errors = schema.check_invariants(fm)
@@ -422,7 +434,7 @@ def test_invariant_images_embedded_matches_attachments_passes():
 
 def test_invariant_images_embedded_zero_passes_without_attachments():
     """images_embedded: 0 with no attachments → no violation."""
-    fm = _valid_template_b_frontmatter()
+    fm = _valid_stub_frontmatter()
     fm["images_embedded"] = 0
     errors = schema.check_invariants(fm)
     img_errors = [e for e in errors if "images_embedded" in e]

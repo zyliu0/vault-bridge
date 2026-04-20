@@ -1,5 +1,124 @@
 # Changelog
 
+## v14.3.0 — field-report fixes (F1–F9)
+
+Addresses every issue flagged in the v14.1.0 field report from a
+41-event FGE scan. Eight of the nine items are fixed; F4 (project-index
+overview auto-generation) remains by-design.
+
+### F1 + F6 — CAD/vector dispatch gap + orphaned handlers dir
+- New `scripts/handler_dispatcher.py` loads per-extension handlers from
+  `<workdir>/.vault-bridge/handlers/<category>_<ext>.py` at runtime.
+- `file_type_handlers.read_text(path, workdir=...)` and
+  `extract_images(path, workdir=...)` now delegate to the dispatcher for
+  `cad-dxf`, `cad-dwg`, `cad-3dm`, `vector-ai`, `raster-psd`,
+  `document-office-legacy`, `spreadsheet-legacy`.
+- `scan_pipeline` threads the workdir through so scans actually hit the
+  per-extension handlers instead of silently returning `[]`.
+- When a delegated category yields no images, `_process_images` now
+  emits a warning pointing at `/vault-bridge:setup → file types` so the
+  failure mode is visible instead of a silent no_content skip.
+- `handlers/patterns/cad_dwg.py.tmpl` rewritten to use
+  `ezdxf.addons.odafc` (which shells out to ODA File Converter). The
+  previous template claimed native DWG support and failed on every
+  real file.
+
+### F2 — Attachment dedup + size gate
+- New `scripts/attachment_index.py` maintains a per-workdir
+  `sha256 → canonical filename` index persisted at
+  `.vault-bridge/attachment_hashes.tsv`.
+- `scan_pipeline._process_images` hashes each compressed image; content
+  duplicates across events embed the canonical filename instead of
+  writing a new vault file. Fixes the 19× client-logo repeat in the
+  field-report FGE scan.
+- New `IMAGE_MIN_BYTES = 10_000` size gate drops logos and UI chrome
+  before they reach `_Attachments/`. Emits a warning for each drop.
+- Diagnostics (size-gate drops, hash failures) now survive the
+  `skip_on_no_content` path — previously `_make_skipped` threw them away.
+
+### F3 — Post-hoc event-note audit
+- Extracted `event_writer.validate_event_note_body(body, raw_text=None)`
+  as the single source of truth for event-note validation.
+- New `scripts/validate_event_note.py` with `audit_body()` /
+  `audit_note_file()` / CLI (`python3 -m validate_event_note <path>`).
+  Skips metadata stubs; skips verbatim-paste (needs raw text).
+- `/vault-bridge:vault-health` gains Check 7 that runs the audit over
+  every event note in scope.
+
+### F5 — Image grid row structure
+- `event_writer.assemble_note_body(prose, attachments, row_size=3)` now
+  chunks embeds into blank-line-separated rows. The previous "no blank
+  lines between embeds" guidance produced one `<p>` of 10 embeds, which
+  Minimal's img-grid CSS collapses into a 10-column strip.
+- New `IMAGE_GRID_ROW_SIZE = 3` constant.
+- Retro-scan and heartbeat-scan commands updated to call
+  `assemble_note_body` instead of hand-concatenating embeds.
+
+### F7 — event_date precedence
+- `extract_event_date` no longer lets mtime override a parseable
+  filename or parent-folder prefix. The prefix is the user's deliberate
+  label; mtime is noise (NAS re-uploads, rsync, cloud-sync all rewrite
+  mtime). Previously a 2022-dated file with a 2026 mtime got a 2026
+  event_date.
+
+### F8 — project_index import
+- Confirmed `project_index.py` already uses `import vault_paths`
+  (the report referred to an older revision). No change needed.
+
+### F9 — file_type enum expansion
+- Added enum values: `key numbers pages`, `odt ods odp`,
+  `zip rar 7z tar`, `url webloc`, `eml msg`, `other`.
+- `upgrade_frontmatter._infer_file_type` maps real extensions to their
+  real enum value instead of shoehorning `.numbers` → `xlsx` etc.
+  Unknown extensions now return `other` (schema-valid) rather than
+  `folder` (silently wrong).
+
+### Migration
+None required. Existing notes are unaffected. The
+`.vault-bridge/attachment_hashes.tsv` file appears after the next scan;
+deleting it only forces one-time re-hashing.
+
+---
+
+## v14.2.0 — rename Template A / Template B to event note / metadata stub
+
+**Naming change:** the two note kinds produced by `event_writer.compose_body`
+were previously called "Template A" (grounded prose) and "Template B"
+(fixed metadata bullets). That was internal jargon leaking into
+user-facing scan output and docs. They are now:
+
+- **event note** — the 100-200 word diary paragraph, written when
+  content was actually read.
+- **metadata stub** — the deterministic bullet template, written when
+  the file was not readable.
+
+### Code
+
+- `ComposedBody.template_kind: 'A' | 'B'` → `ComposedBody.note_kind: 'event' | 'stub'`
+- `_render_template_a_prompt` → `_render_event_note_prompt`
+- `_render_template_b` → `_render_metadata_stub`
+- `_is_template_b` → `_is_stub`
+- `scripts/link_strategy.py`: `TEMPLATE_B_BODY` → `STUB_BODY`; `build_template_b_with_links` → `build_stub_with_links`
+- Template files: `templates/event_writer/template-a.prompt.md` → `event-note.prompt.md`; `template-b.body.md` → `metadata-stub.body.md`
+
+### Scan-time output
+
+Each scan now prints a one-line "what will happen" line per event so the
+user sees the routing decision without reading the post-run summary:
+
+```
+→ 250415 schematic review memo.txt — reading text + 4 images, writing event note
+→ walkthrough.mp4 — video, writing metadata stub (no prose)
+→ empty.pdf — readable but no content extracted, skipping
+```
+
+### Migration
+
+No vault-note migration needed. The rename is code-internal. Frontmatter
+is unchanged. Previously-written notes remain valid.
+
+---
+
 ## v14.1.0 — fix upgrade_frontmatter clobbering event_date with today
 
 **Bug fix:** `/vault-bridge:reconcile --migrate-v2` (and any other caller of

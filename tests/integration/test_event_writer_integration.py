@@ -3,7 +3,7 @@
 Asserts the grand-goal behavior in one test:
 1. A source with 15 extractable images produces 15 caption-prompt candidates.
 2. A fake captioner returns 15 captions; image_vision.select_top_k picks 10.
-3. event_writer.compose_body yields a Template A prompt whose text includes
+3. event_writer.compose_body yields an event-note prompt whose text includes
    those 10 captions (so the note body can reference what was actually seen).
 4. The final assembled body has no blank lines between consecutive image embeds
    (Minimal theme grid requirement) and uses the 10 curated attachments.
@@ -37,12 +37,22 @@ def test_full_pipeline_path_cap_curation_and_body(tmp_path):
     # 1. Simulate a source with 15 extractable images.
     img_src = tmp_path / "deck.pdf"
     img_src.write_bytes(b"%PDF-1.4 stub")
-    compressed = tmp_path / "2024-08-01--deck--abc12345.jpg"
-    _write_fake_jpeg(compressed)
     fifteen = [img_src] * 15
 
+    # v14.3 (F2): each compressed image must be byte-unique so the
+    # content-hash dedup does not collapse them into one attachment.
+    def make_unique(src_path, out_dir, event_date):
+        idx = make_unique.counter
+        make_unique.counter += 1
+        out = out_dir / f"2024-08-01--deck--{idx:08x}.jpg"
+        _write_fake_jpeg(out)
+        with out.open("ab") as f:
+            f.write(f"u-{idx}".encode())
+        return out
+    make_unique.counter = 0
+
     with mock.patch("scan_pipeline.file_type_handlers.extract_images", return_value=fifteen):
-        with mock.patch("scan_pipeline.compress_images.compress_image", return_value=compressed):
+        with mock.patch("scan_pipeline.compress_images.compress_image", side_effect=make_unique):
             result = scan_pipeline.process_file(
                 source_path=str(img_src),
                 workdir=str(tmp_path),
@@ -76,7 +86,7 @@ def test_full_pipeline_path_cap_curation_and_body(tmp_path):
     result.image_captions = final_captions
     # (Attachments already capped at 10 upstream.)
 
-    # 3. Compose body — Template A because text is empty but captions exist.
+    # 3. Compose body — event note because text is empty but captions exist.
     result.text = "Design review meeting. Decision: proceed with facade option B."
     meta = {
         "source_path": str(img_src),
@@ -87,7 +97,7 @@ def test_full_pipeline_path_cap_curation_and_body(tmp_path):
         "file_type": "pdf",
     }
     composed = event_writer.compose_body(result, meta)
-    assert composed.template_kind == "A"
+    assert composed.note_kind == "event"
     # Captions present in the prompt so the writer can reference them.
     assert "Rebar laid on the south wall." in composed.prompt_text
     assert "arch-projects" in composed.prompt_text or "2408 Sample" in composed.prompt_text
@@ -106,11 +116,15 @@ def test_full_pipeline_path_cap_curation_and_body(tmp_path):
         "schedule once the owner returns from travel next week with a longer note."
     )
     assembled = event_writer.assemble_note_body(prose, result.attachments)
-    # Consecutive embeds joined without blank lines.
-    embed_block = "\n".join(result.attachments)
-    assert embed_block in assembled
+    # Every embed appears in the assembled body.
+    for embed in result.attachments:
+        assert embed in assembled
     # Blank line between prose and embeds.
     assert "next week with a longer note.\n\n![[" in assembled
+    # 10 embeds at row_size=3 → rows of 3, 3, 3, 1 → 3 blank-line
+    # separators inside the grid (v14.3, F5).
+    grid = assembled.split("\n\n", 1)[1]
+    assert grid.count("\n\n") == 3
 
     # 5. Vault path has the domain prefix.
     path = vault_paths.event_note_path(
@@ -120,8 +134,8 @@ def test_full_pipeline_path_cap_curation_and_body(tmp_path):
     assert path.startswith("arch-projects/")
 
 
-def test_template_b_path_when_nothing_readable(tmp_path):
-    """Heartbeat-style autonomous fallback: unreadable file -> Template B body."""
+def test_metadata_stub_path_when_nothing_readable(tmp_path):
+    """Heartbeat-style autonomous fallback: unreadable file -> metadata stub."""
     import scan_pipeline
     import event_writer
 
@@ -146,8 +160,8 @@ def test_template_b_path_when_nothing_readable(tmp_path):
         "subfolder": "Short-form",
         "file_type": "mp4",
     })
-    assert composed.template_kind == "B"
+    assert composed.note_kind == "stub"
     assert composed.body_text.strip() != ""
     assert composed.prompt_text == ""
-    # Template B body references the source filename.
+    # Stub body references the source filename.
     assert "clip.mp4" in composed.body_text

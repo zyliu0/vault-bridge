@@ -242,9 +242,15 @@ def test_file_type_preserved_from_existing():
     assert fm["file_type"] == "pptx"
 
 
-def test_file_type_unknown_extension_defaults_to_folder():
+def test_file_type_unknown_extension_defaults_to_other():
+    """Unknown extensions map to 'other' (F9-c), not 'folder'.
+
+    Mapping an unknown file to 'folder' silently misrepresents its shape.
+    'other' preserves the fact that a real file was seen whose type the
+    plugin does not yet model explicitly.
+    """
     fm = _upgrade(existing_fm={"source_path": "/archive/project/something.xyz"})
-    assert fm["file_type"] == "folder"
+    assert fm["file_type"] == "other"
 
 
 # ---------------------------------------------------------------------------

@@ -47,38 +47,44 @@ re-store them in the vault.
 
 The `event_writer` layer (`scripts/event_writer.py`) is where this
 translation happens. Scan commands call `event_writer.compose_body(result, meta)`
-which classifies the event and either:
-- Renders **Template B** deterministically for unreadable events (video,
-  audio, archive, unknown extensions, or readable files that extracted
-  nothing). No LLM call.
-- Emits a **Template A** prompt for the invoking Claude to execute. The
-  prompt carries the raw-text excerpt, the curated image captions, and
-  the fabrication-firewall rules. The returned body is validated (stop
-  words, 100-200 word range, verbatim-paste detection); on validator
-  failure the command retries once, then falls back to Template B.
+which classifies the event into one of two **note kinds** and either:
+- Renders a **metadata stub** deterministically for unreadable events
+  (video, audio, archive, unknown extensions, or readable files that
+  extracted nothing). No LLM call.
+- Emits an **event-note** prompt for the invoking Claude to execute.
+  The prompt carries the raw-text excerpt, the curated image captions,
+  and the fabrication-firewall rules. The returned body is validated
+  (stop words, 100-200 word range, verbatim-paste detection); on
+  validator failure the command retries once, then falls back to a
+  metadata stub.
+
+The `ComposedBody.note_kind` field is `"event"` or `"stub"`. There is no
+user-facing choice here — the pipeline classifies each event
+automatically based on what content was actually extracted.
 
 Images are curated, not dumped. The pipeline compresses up to
 `IMAGE_CANDIDATE_CAP = 20` candidates per event; vision runs over every
 candidate; `image_vision.select_top_k` picks the top `IMAGE_EMBED_CAP = 10`
 by relevance; only those are embedded. The captions feed back into the
-Template A prompt so the note body reflects what was actually seen.
+event-note prompt so the note body reflects what was actually seen.
 
 ## Core principle: the fabrication firewall
 
 vault-bridge writes vault notes from a user's file archive. The greatest
 risk is **writing diary-style prose about file content that was never
-actually read**. Every Template A note body MUST be grounded in content
+actually read**. Every event-note body MUST be grounded in content
 that was actually read. Every claim about decisions, people, dates,
 amounts, dimensions, or relationships must be something the model literally
 saw in the extracted text. If the source was not read, the note uses
-Template B verbatim — fixed bullet template, no prose.
+the metadata stub verbatim — fixed bullet template, no prose.
 
 **No-content enforcement (v13+):** When `scan_pipeline.process_file()` is
 called on a readable file type (PDF, Office, image, text, CAD) and extraction
 yields neither text nor images, the result has `skipped=True,
-skip_reason="no_content"`. No note is written. Template B is reserved only
-for genuinely non-readable types (video, audio, archive, unknown extension).
-Callers may pass `skip_on_no_content=False` to override.
+skip_reason="no_content"`. No note is written. Metadata stubs are
+reserved only for genuinely non-readable types (video, audio, archive,
+unknown extension). Callers may pass `skip_on_no_content=False` to
+override.
 
 The stop-word list that enforces this:
 - "pulled the back wall in"
@@ -395,7 +401,7 @@ Existing v1 notes (without `domain` or `tags`) remain valid. Use
 
 ## Highlights, callouts, and canvas diagrams
 
-Template A notes use Obsidian-native formatting to surface important info:
+Event notes use Obsidian-native formatting to surface important info:
 
 **Highlights** (`==text==`) — for key facts literally read from the source:
 dates, amounts, dimensions, named decision-makers, status changes.
@@ -412,7 +418,7 @@ when an event involves 3+ parties, multi-step processes, or interrelated
 deliverables. Uses Obsidian JSON Canvas format. Max 15 nodes. Linked from
 the note body: `[[YYYY-MM-DD topic.canvas|Event diagram]]`.
 
-Template B (metadata-only) events NEVER get highlights, callouts, or canvases.
+Metadata stubs NEVER get highlights, callouts, or canvases.
 
 ## Image handling
 
@@ -444,7 +450,7 @@ list/validate registered modules.
 **Wiki-embed syntax:** always `![[filename.jpg]]` — never `![](path)`.
 Obsidian renders the vault attachment inline.
 
-**Template B fallback:** when image extraction or vision fails (empty result
+**Metadata-stub fallback:** when image extraction or vision fails (empty result
 or vision returns < 10 chars), fall back to:
 ```
 > [!info] Images referenced but not embedded
@@ -542,7 +548,7 @@ files per batch (e.g. for throttling on large archives). Files with
 regardless of any max_reads cap.
 
 Key `ScanResult` fields (v14):
-- `image_grid: bool` — True when ≥3 images embedded; caller sets `cssclasses: [img-grid]` and renders embeds with no blank lines (Minimal theme grid)
+- `image_grid: bool` — True when ≥3 images embedded; caller sets `cssclasses: [img-grid]` and delegates body assembly to `event_writer.assemble_note_body`, which chunks embeds into rows of `IMAGE_GRID_ROW_SIZE = 3` (blank line between rows, consecutive lines within). Minimal's img-grid CSS styles each paragraph as one grid row; a single paragraph of 10 embeds collapses into a 10-column strip. Reading view only (v14.3, F5).
 - `image_candidate_paths: list[str]` — every compressed candidate image path before the embed cap is applied; used by the command spec to run vision captioning over every candidate
 - `image_caption_prompts: list[str]` — one caption prompt per candidate, aligned by index; the invoking Claude runs each prompt and feeds the returned captions into `image_vision.select_top_k` to pick which images to embed
 - `image_captions: list[str]` — populated by the command after vision returns; passed to `event_writer.compose_body` so the note body can reference what was seen

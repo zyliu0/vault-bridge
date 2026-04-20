@@ -35,7 +35,9 @@ from schema import (  # noqa: E402
 )
 from extract_event_date import extract_event_date, parse_date_prefix  # noqa: E402
 
-# Extensions that map to known file_type enum values
+# Extensions that map to known file_type enum values.
+# Unknown extensions fall through to "other" (F9-c); callers that want
+# folder-level behaviour pass an empty source_path instead.
 _EXT_TO_FILE_TYPE = {
     ".pdf": "pdf",
     ".docx": "docx",
@@ -55,6 +57,32 @@ _EXT_TO_FILE_TYPE = {
     ".gif": "jpg",  # GIFs get converted to JPEG by compress_images
     ".webp": "jpg",
     ".bmp": "jpg",
+    ".md": "md",
+    ".txt": "txt",
+    ".html": "html",
+    ".htm": "html",
+    ".csv": "csv",
+    ".json": "json",
+    # iWork — keep as their real type; do NOT flatten to Microsoft equivalents
+    ".key": "key",
+    ".numbers": "numbers",
+    ".pages": "pages",
+    # OpenDocument
+    ".odt": "odt",
+    ".ods": "ods",
+    ".odp": "odp",
+    # Archives — `folder`-like semantics but preserved as their own type
+    # so the frontmatter reflects that the source is an archive, not a folder.
+    ".zip": "zip",
+    ".rar": "rar",
+    ".7z": "7z",
+    ".tar": "tar",
+    # Shortcuts
+    ".url": "url",
+    ".webloc": "webloc",
+    # Email
+    ".eml": "eml",
+    ".msg": "msg",
 }
 
 # Regex to extract a NAS path from the note body.
@@ -236,11 +264,19 @@ def _infer_source_path_from_body(body: str) -> str:
 
 
 def _infer_file_type(source_path: str) -> str:
-    """Infer file_type enum value from the source path's extension."""
+    """Infer file_type enum value from the source path's extension.
+
+    - empty source_path OR no extension → "folder" (folder-like semantics)
+    - known extension → mapped value
+    - unknown extension → "other" (F9-c), so the frontmatter stays
+      schema-valid without silently misrepresenting the source type.
+    """
     if not source_path:
         return "folder"
     ext = Path(source_path).suffix.lower()
-    return _EXT_TO_FILE_TYPE.get(ext, "folder")
+    if not ext:
+        return "folder"
+    return _EXT_TO_FILE_TYPE.get(ext, "other")
 
 
 def _extract_date_from_filename(

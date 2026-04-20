@@ -71,7 +71,7 @@ def _success_vault_runner(cmd):
         "ok": True,
         "bytes_written": probe_bytes,
         "sha256": "abc123",
-        "vault_path": "_Attachments/_probe/test.png",
+        "vault_path": "_vb-probe/test.png",
     })
     result.stderr = ""
     return result

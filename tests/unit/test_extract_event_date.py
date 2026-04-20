@@ -1,13 +1,15 @@
-"""Tests for scripts/extract_event_date.py — event_date extraction with
-filename-vs-mtime conflict resolution.
+"""Tests for scripts/extract_event_date.py — event_date extraction.
 
 Priority order (per design doc):
 1. YYMMDD or YYYY-MM-DD prefix on the filename/folder name
 2. YYMMDD or YYYY-MM-DD prefix on the PARENT folder
 3. NAS file mtime (fallback)
 
-Conflict rule: if the filename-prefix date and the mtime differ by > 7 days,
-use mtime and set event_date_source=mtime. Within 7 days, trust the prefix.
+v14.3 (F7): a parseable date prefix ALWAYS beats mtime. The prefix is
+the user's deliberate label; mtime is noise (NAS re-uploads, rsync,
+cloud-sync all rewrite mtime). Previous 7-day-conflict behaviour broke
+retro-scans of archives where files were authored in 2022 but uploaded
+in 2026.
 """
 import sys
 from datetime import datetime
@@ -104,11 +106,11 @@ def test_priority_3_mtime_fallback_when_neither():
 
 
 # ---------------------------------------------------------------------------
-# The conflict rule — the most important test
+# Filename prefix always beats mtime (F7 — v14.3)
 # ---------------------------------------------------------------------------
 
-def test_conflict_rule_within_7_days_uses_filename():
-    """Filename says 2024-09-09, mtime is 2024-09-15 (6 days) → filename wins."""
+def test_filename_prefix_wins_when_mtime_close():
+    """Filename says 2024-09-09, mtime is 2024-09-15 → filename wins."""
     result = eed.extract_event_date(
         filename="240909 memo.pdf",
         parent_folder_name="Docs",
@@ -117,64 +119,59 @@ def test_conflict_rule_within_7_days_uses_filename():
     assert result == ("2024-09-09", "filename-prefix")
 
 
-def test_conflict_rule_exactly_7_days_uses_filename():
-    """Boundary: exactly 7 days = still filename."""
+def test_filename_prefix_wins_over_far_future_mtime():
+    """Archive re-upload case: 2022 filename + 2026 mtime → filename wins.
+
+    This is the F7 scenario — a file authored in 2022 but touched by a
+    NAS re-upload in 2026. mtime is meaningless; the filename prefix is
+    the user's deliberate label.
+    """
     result = eed.extract_event_date(
-        filename="240909 memo.pdf",
-        parent_folder_name="Docs",
-        mtime_unix=_mtime(2024, 9, 16),  # 7 days
+        filename="220318 设计条件.docx",
+        parent_folder_name="0_Admin",
+        mtime_unix=_mtime(2026, 4, 21),
     )
-    assert result == ("2024-09-09", "filename-prefix")
+    assert result == ("2022-03-18", "filename-prefix")
 
 
-def test_conflict_rule_over_7_days_uses_mtime():
-    """Filename says 2024-09-09, mtime is 2024-09-17 (8 days) → mtime wins."""
-    result = eed.extract_event_date(
-        filename="240909 memo.pdf",
-        parent_folder_name="Docs",
-        mtime_unix=_mtime(2024, 9, 17),
-    )
-    assert result == ("2024-09-17", "mtime")
-
-
-def test_conflict_rule_huge_gap_uses_mtime():
-    """The Test 2 canonical example: 251001 PDF re-saved on 2026-01-14 (105 days)."""
+def test_filename_prefix_wins_over_huge_gap_mtime():
+    """251001 PDF re-saved on 2026-01-14 — filename wins, not mtime."""
     result = eed.extract_event_date(
         filename="251001 西风腰施工图.pdf",
         parent_folder_name="260121 方案修改",
         mtime_unix=_mtime(2026, 1, 14),
     )
-    assert result == ("2026-01-14", "mtime")
+    assert result == ("2025-10-01", "filename-prefix")
 
 
-def test_conflict_rule_backwards_difference_also_counts():
-    """|mtime - prefix| > 7, even when mtime is BEFORE the prefix date."""
+def test_filename_prefix_wins_over_earlier_mtime():
+    """Filename is later than mtime — still filename wins."""
     result = eed.extract_event_date(
         filename="240920 memo.pdf",
         parent_folder_name="Docs",
-        mtime_unix=_mtime(2024, 9, 1),  # 19 days before
+        mtime_unix=_mtime(2024, 9, 1),
     )
-    assert result == ("2024-09-01", "mtime")
+    assert result == ("2024-09-20", "filename-prefix")
 
 
 # ---------------------------------------------------------------------------
-# Parent-folder prefix with conflict rule
+# Parent folder prefix also always wins over mtime
 # ---------------------------------------------------------------------------
 
-def test_parent_folder_prefix_also_subject_to_conflict_rule():
-    """If the parent folder prefix diverges from mtime by > 7 days, use mtime."""
+def test_parent_folder_prefix_wins_over_distant_mtime():
+    """Parent folder prefix 240101, mtime 2024-02-15 — folder wins."""
     result = eed.extract_event_date(
         filename="meeting-notes.pdf",
         parent_folder_name="240101 kickoff",
-        mtime_unix=_mtime(2024, 2, 15),  # 45 days later
+        mtime_unix=_mtime(2024, 2, 15),
     )
-    assert result == ("2024-02-15", "mtime")
+    assert result == ("2024-01-01", "parent-folder-prefix")
 
 
-def test_parent_folder_prefix_within_7_days_wins():
+def test_parent_folder_prefix_wins_when_close_to_mtime():
     result = eed.extract_event_date(
         filename="notes.pdf",
         parent_folder_name="240909 concept",
-        mtime_unix=_mtime(2024, 9, 12),  # 3 days
+        mtime_unix=_mtime(2024, 9, 12),
     )
     assert result == ("2024-09-09", "parent-folder-prefix")

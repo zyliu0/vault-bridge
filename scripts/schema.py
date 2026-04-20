@@ -146,6 +146,29 @@ ENUMS = {
         "html",
         "csv",
         "json",
+        # iWork
+        "key",
+        "numbers",
+        "pages",
+        # OpenDocument
+        "odt",
+        "ods",
+        "odp",
+        # Archives
+        "zip",
+        "rar",
+        "7z",
+        "tar",
+        # Shortcuts
+        "url",
+        "webloc",
+        # Email
+        "eml",
+        "msg",
+        # Catch-all for unclassified readable/non-readable types.
+        # Use `other` rather than shoehorning an unknown extension into an
+        # unrelated enum value (e.g. .numbers → xlsx loses that it's iWork).
+        "other",
     },
     "event_date_source": {
         "filename-prefix",

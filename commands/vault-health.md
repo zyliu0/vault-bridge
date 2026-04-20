@@ -173,6 +173,26 @@ exist in `_Attachments/`, flag it:
 Note: this check only validates that the attachment file exists in the
 vault. It does NOT verify the file is non-empty or uncorrupted.
 
+### Check 7 — Fabrication-firewall audit (v14.3, F3)
+
+For every event-note body (not metadata stubs), run the post-hoc validator:
+
+```bash
+obsidian read vault="$VAULT_NAME" path="<note-path>" | \
+  python3 ${CLAUDE_PLUGIN_ROOT}/scripts/validate_event_note.py /dev/stdin --json
+```
+
+Or, when iterating many notes, import `audit_body` directly from
+`scripts/validate_event_note.py` and feed each body through it. The
+validator flags stop-word hits, word-count violations, and recognises
+metadata stubs (which are exempt).
+
+This check does NOT run verbatim-paste detection — that needs the
+original source text, which the vault does not preserve. It is strictly
+a surface audit: stop-words and length bounds. A careless scan that
+bypassed the write-time validator will still show up here as a
+multi-note pattern of failures.
+
 ## Step 5 — write the health report to the WORKING FOLDER (not the vault)
 
 **Do NOT write the report into the vault.** The vault is reserved for real
