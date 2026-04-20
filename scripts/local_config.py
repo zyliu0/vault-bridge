@@ -133,9 +133,12 @@ def _upgrade_v1_to_v2(config: dict) -> dict:
 
 
 def is_setup(workdir) -> bool:
-    """Return True if the project has a local settings file."""
+    """Return True if the project has a v4 config.json or legacy settings.json."""
     _migrate_legacy(workdir)
-    return settings_path(workdir).exists()
+    if settings_path(workdir).exists():
+        return True
+    # v4+ setup writes `<workdir>/.vault-bridge/config.json` only.
+    return (local_dir(workdir) / "config.json").exists()
 
 
 def load_local_config(workdir):

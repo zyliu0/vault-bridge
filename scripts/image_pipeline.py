@@ -131,8 +131,13 @@ def process_source_for_images(
 
         result["compressed_paths"].append(compressed)
 
-        # Write to vault
-        vault_dst = f"{project_vault_path}/_Attachments/{compressed.name}"
+        # Write to vault at <project_root>/_Attachments/ (strip routing subfolder
+        # if present). This keeps attachments grouped per-project rather than
+        # scattered across each subfolder, matching scan_pipeline behaviour.
+        parent = str(Path(project_vault_path).parent)
+        if parent in (".", ""):
+            parent = project_vault_path.rstrip("/") or project_vault_path
+        vault_dst = f"{parent}/_Attachments/{compressed.name}"
         write_result = vault_binary.write_binary(
             vault_name=vault_name,
             src_abs_path=compressed,

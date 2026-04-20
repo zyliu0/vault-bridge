@@ -97,7 +97,7 @@ def run_probe(
         # ------------------------------------------------------------------
         check2 = _run_check(
             "check_transport_fetch",
-            lambda: _check_transport_fetch(workdir, sample_used, tmpdir_path),
+            lambda: _check_transport_fetch(workdir, sample_used, tmpdir_path, transport_name=transport_name),
         )
         checks.append(check2)
         if not check2["ok"]:
@@ -222,10 +222,19 @@ def _check_transport_fetch(
     workdir: Path,
     archive_path: str,
     tmpdir: Path,
+    transport_name: Optional[str] = None,
 ) -> Dict:
-    """Check 2: fetch a file via transport.fetch_to_local."""
+    """Check 2: fetch a file via transport.fetch_to_local.
+
+    When `transport_name` is given, use the 3-arg form that picks the named
+    transport explicitly. Without it, falls back to the legacy 2-arg form
+    (relies on the single-transport convention).
+    """
     try:
-        local = transport_loader.fetch_to_local(workdir, archive_path)
+        if transport_name:
+            local = transport_loader.fetch_to_local(workdir, transport_name, archive_path)
+        else:
+            local = transport_loader.fetch_to_local(workdir, archive_path)
         return {
             "ok": True,
             "detail": f"fetched to {local}",

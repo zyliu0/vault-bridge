@@ -1334,6 +1334,14 @@ class TestVaultNamePropagation:
         assert scan_pipeline._attachments_root("content/YouTube Series/Published") == \
             "content/YouTube Series/_Attachments"
 
+    def test_attachments_root_single_segment_stays_in_project(self, tmp_path):
+        """Single-segment vault_project_path must not leak attachments to vault root."""
+        import scan_pipeline
+        # Must be the project's own _Attachments/, never "./_Attachments/".
+        assert scan_pipeline._attachments_root("Proj") == "Proj/_Attachments"
+        assert scan_pipeline._attachments_root("Proj", "2026-04-19--foo") == \
+            "Proj/_Attachments/2026-04-19--foo"
+
 
 # ---------------------------------------------------------------------------
 # Transport speed helpers

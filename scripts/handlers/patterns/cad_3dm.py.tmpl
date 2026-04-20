@@ -54,13 +54,6 @@ def read_text(path: str) -> str:
                 lines.append(f"ApplicationName: {{app_name}}")
         except Exception:
             pass
-        # Notes
-        try:
-            notes = model.Notes
-            if notes and notes.strip():
-                lines.append(f"Notes: {{notes.strip()}}")
-        except Exception:
-            pass
         # Object counts by type
         try:
             counts = {{

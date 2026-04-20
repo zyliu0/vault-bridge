@@ -75,8 +75,8 @@ same structure — the data model does not vary by profession.
 - **Domain** — a top-level vault folder that groups related projects
   (e.g., `arch-projects/`, `photography/`, `content/`). Each domain has
   its own archive root, routing rules, and default tags.
-- **Project** — a folder within a domain (e.g., `arch-projects/2408 Sample Project/`)
-- **Event** — a single diary note within a project, representing a milestone
+- **Project** — a folder within a domain (e.g., `arch-projects/2408 Sample Project/`). A project is a **container**, not an event. Never write one note per project.
+- **Event** — a single diary note within a project, representing one dated leaf folder or one standalone document (PDF/DOCX/PPTX/XLSX/DWG). Files and folders UNDER the project are events; the project itself is not. One project → many events → many notes.
 
 ## Multi-domain configuration
 
@@ -291,7 +291,7 @@ Heartbeat is optimized for small deltas. When the delta exceeds a
 threshold (>50 changed files, or a brand-new archive subfolder with >20
 files), heartbeat STOPS autonomous processing, writes an escalation
 marker at `.vault-bridge/reports/{timestamp}_escalation.json`, logs to
-`~/.vault-bridge/heartbeat.log`, and exits 0. The user picks up the
+`<workdir>/.vault-bridge/heartbeat.log`, and exits 0. The user picks up the
 marker on next interactive session and runs
 `/vault-bridge:retro-scan <path>` for full interactive handling
 (structure discovery + project-rename detection).

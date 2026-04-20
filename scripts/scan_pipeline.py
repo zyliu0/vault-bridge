@@ -126,15 +126,23 @@ def _make_skipped(source_path: str, reason: str, category: Optional[str] = None)
 def _attachments_root(vault_project_path: str, batch_folder: str = "") -> str:
     """Return the project-root/_Attachments path for a given vault_project_path.
 
-    vault_project_path is expected to be <project>/<subfolder> (e.g.
+    vault_project_path is normally <project>/<subfolder> (e.g.
     "arch-projects/2408 Sample/SD"). Attachments are written one level up
     from the subfolder so they land at <project>/_Attachments/, matching
     the vault structure documented in the README.
+
+    When vault_project_path has no separator (single segment — caller passed
+    a project root with no subfolder), treat the whole value as the project
+    root instead of stripping to vault root. This prevents attachments from
+    leaking into a vault-wide `_Attachments/` when routing produces no
+    subfolder.
 
     When batch_folder is non-empty (used when images_count > IMAGE_SUBFOLDER_THRESHOLD),
     attachments go into _Attachments/{batch_folder}/ for per-event organisation.
     """
     parent = str(Path(vault_project_path).parent)
+    if parent in (".", ""):
+        parent = vault_project_path.rstrip("/") or vault_project_path
     if batch_folder:
         return f"{parent}/_Attachments/{batch_folder}"
     return f"{parent}/_Attachments"

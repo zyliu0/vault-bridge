@@ -172,7 +172,7 @@ def test_jpeg_source_pipeline(integration_env, tmp_path):
 
     # Verify file was written to fake vault
     attachment_name = result["attachments"][0]
-    vault_file = env["fake_vault"] / "TestProject" / "SD" / "_Attachments" / attachment_name
+    vault_file = env["fake_vault"] / "TestProject" / "_Attachments" / attachment_name
     assert vault_file.exists(), f"Expected vault file: {vault_file}"
 
     # Verify it's a valid JPEG

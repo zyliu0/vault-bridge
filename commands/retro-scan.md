@@ -600,34 +600,49 @@ continuing to Step 5.
 
 ## Step 5 — detect events
 
-The unit of scanning is an EVENT, not a file. The fundamental rules:
+The unit of scanning is an EVENT, not a project. Events are the
+**files and folders UNDER a project**. A project is a container, never
+an event.
 
-> **A folder in the archive = one event. Images and files are attachments
-> within an event, never separate events.**
+> **Files and folders under a project folder are EVENTS.** A PDF, DOCX,
+> PPTX, XLSX, DWG, or dated leaf folder under the project root is its
+> own event and gets its own note.
 >
-> **Related folders may be combined into a single event.** If multiple folders
-> share the same date prefix, project, or purpose, they can be merged into one
-> note instead of generating separate notes for each.
+> **The project folder itself is NEVER one event.** Do not collapse a
+> whole project into a single "consolidated" note. Do not write one
+> summary note per project. One project → many events → many notes.
 >
-> **Standalone files without a parent folder are not independent events.** If
-> a file is related to an existing event or folder, link it to that event or
-> group it in. Only create a standalone event for an orphan file if it truly
-> stands alone with no connections.
+> **A dated leaf folder = one event.** Images and loose files inside
+> that one leaf folder are attachments of that event, not separate events.
+> This applies only to the leaf folder — never to parent folders, phase
+> folders (`SD/`, `DD/`, `CA/`, `Admin/`), or the project root itself.
 
-Event detection rules:
+Event detection rules — apply strictly, no consolidation across rules:
 
-- **Any folder** → 1 event (the folder itself). Images inside are embedded
-  as attachments via the image pipeline (sampled up to 10 if >10).
-- **Related folders** (same date prefix, sequential naming, shared purpose)
-  → consider combining into 1 event. Use judgment: if the user would
-  naturally think of them as one work session, merge them.
-- **Standalone PDF, DOCX, PPTX, XLSX** not inside a date-stamped folder →
-  1 event
-- **Standalone image file** (jpg, png, etc.) with no parent folder context →
-  SKIP — images without a containing folder have no event context to write
-  about. Link into an existing related event if one exists nearby.
-- **Standalone DWG, RVT, 3dm, SketchUp file** → 1 metadata-only event
-- **`_embedded_files` folders** → SKIP
+- **Dated leaf folder** (e.g. `260410 现场会议/`, `2024-09-09 client review/`)
+  → 1 event. Images and files inside are attachments of that event.
+- **Phase / category folder** (`SD/`, `DD/`, `CD/`, `CA/`, `Admin/`,
+  `Meetings/`, `Selects/`, `Raw/`, etc.) → NOT an event. Recurse into
+  it and detect events among its children.
+- **Project root folder** → NOT an event. Recurse into it.
+- **Standalone PDF, DOCX, PPTX, XLSX** anywhere under the project →
+  1 event per file.
+- **Standalone DWG, RVT, 3dm, SketchUp file** → 1 metadata-only event.
+- **Standalone image file** (jpg, png, etc.) directly under a phase or
+  project folder with no dated-folder context → link into the nearest
+  dated-folder event, or SKIP if no sibling event exists.
+- **`_embedded_files`, `_Attachments`, `.thumbs`** folders → SKIP.
+
+**Merging is the exception, not the default.** Only merge two folders
+into one event when they are obvious duplicates of the same real-world
+event — e.g. `foo/` and `foo-v2/` with the same date and overlapping
+contents. Different dates, different parent phases, or distinct work
+products are always separate events.
+
+**Sanity check before processing:** if your detected event count is
+less than the number of dated subfolders plus standalone documents
+under a project, you are under-detecting. Re-run detection without
+merging before continuing.
 
 If `--dry-run`, print the list of detected events and their estimated counts,
 then STOP before processing. No file reads, no note writes, no index updates.

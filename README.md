@@ -235,8 +235,9 @@ If you want new files to automatically appear as vault notes without
 manual intervention, set up a cron job:
 
 ```cron
-# Every 4 hours, scan for new/modified files and write vault notes
-0 */4 * * * claude -p "Run /vault-bridge:heartbeat-scan" >> ~/.vault-bridge/heartbeat.log 2>&1
+# Every 4 hours, scan for new/modified files and write vault notes.
+# All state (logs, reports, memory) lives under <workdir>/.vault-bridge/.
+0 */4 * * * cd /path/to/your/workdir && claude -p "Run /vault-bridge:heartbeat-scan" >> .vault-bridge/heartbeat.log 2>&1
 ```
 
 ## LibreDWG setup for DWG reads on macOS

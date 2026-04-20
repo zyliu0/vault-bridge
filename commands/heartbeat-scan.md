@@ -45,7 +45,7 @@ try:
 except SetupNeeded:
     import sys; sys.exit(1)
 " || {
-  echo "vault-bridge not configured, heartbeat skipping — run /vault-bridge:setup from this working directory" >> ~/.vault-bridge/heartbeat.log
+  echo "vault-bridge not configured, heartbeat skipping — run /vault-bridge:setup from this working directory" >> $(pwd)/.vault-bridge/heartbeat.log
   exit 0
 }
 ```
@@ -68,7 +68,7 @@ except (transport_loader.TransportMissing, transport_loader.TransportInvalid) as
 ```
 
 If exit code is non-zero, log "vault-bridge heartbeat: transport missing or
-invalid — run /vault-bridge:setup" to `~/.vault-bridge/heartbeat.log` and
+invalid — run /vault-bridge:setup" to `$(pwd)/.vault-bridge/heartbeat.log` and
 EXIT 0 (cron-friendly — do not error the cron job).
 
 Check vault reachability (non-interactive: skip if vault is unreachable):
@@ -84,7 +84,7 @@ print(cfg.vault_name)
 ")
 if [ -n "$VAULT_NAME" ]; then
   obsidian vaults | grep -q "$VAULT_NAME" || {
-    echo "vault-bridge: vault '$VAULT_NAME' not visible, heartbeat skipping" >> ~/.vault-bridge/heartbeat.log
+    echo "vault-bridge: vault '$VAULT_NAME' not visible, heartbeat skipping" >> $(pwd)/.vault-bridge/heartbeat.log
     exit 0
   }
 fi
@@ -105,7 +105,7 @@ try:
     cfg = load_config(Path.cwd())
 except SetupNeeded:
     # Log and exit silently — cron job should not alarm
-    with open(Path.home() / '.vault-bridge/heartbeat.log', 'a') as f:
+    with open(Path.cwd() / '.vault-bridge/heartbeat.log', 'a') as f:
         f.write('vault-bridge not configured, heartbeat skipping\n')
     import sys; sys.exit(0)
 ```
@@ -207,7 +207,7 @@ as errors):
 
 If either threshold fires, STOP processing the delta. Write an escalation
 marker to `.vault-bridge/reports/` so the user sees it on next interactive
-session, log a line to `~/.vault-bridge/heartbeat.log`, and exit 0.
+session, log a line to `$(pwd)/.vault-bridge/heartbeat.log`, and exit 0.
 
 ```bash
 python3 -c "
@@ -232,7 +232,7 @@ print(marker)
 " VB_REASON="delta-exceeds-threshold" VB_DELTA="$DELTA_COUNT" VB_SAMPLE="$NEW_FILES_JSON" VB_NEXT="run /vault-bridge:retro-scan $AFFECTED_PATH"
 ```
 
-Log a single line to `~/.vault-bridge/heartbeat.log`:
+Log a single line to `$(pwd)/.vault-bridge/heartbeat.log`:
 
 ```
 {timestamp} vault-bridge heartbeat: escalated — {DELTA_COUNT} delta files
@@ -310,7 +310,7 @@ for domain_name in os.environ['VB_DOMAINS'].split(','):
 ```
 
 Write `duplicates_pending: [...]` into the Step 8 memory report.
-Log a line to `~/.vault-bridge/heartbeat.log` for each group found:
+Log a line to `$(pwd)/.vault-bridge/heartbeat.log` for each group found:
 `"{timestamp} vault-bridge heartbeat: duplicate projects detected — '{canonical}' and '{aliases}'. Run /vault-bridge:reconcile --resolve-duplicates to merge."`
 
 ## Step 4.6 — autonomous project-rename detection (non-destructive)
@@ -322,7 +322,7 @@ sees it next time they run an interactive command.
 
 For each top-level archive subfolder touched by the delta, sample up to
 10 files and call `project_rename.detect_project_rename`. If a rename is
-detected, log to `~/.vault-bridge/heartbeat.log`:
+detected, log to `$(pwd)/.vault-bridge/heartbeat.log`:
 
 ```
 {timestamp} vault-bridge heartbeat: project-rename detected —
@@ -549,7 +549,7 @@ Heartbeat must never exit non-zero due to calendar issues.
 6. On any failure (MCP unavailable, auth error, network error):
    - Add a warning to the stats: `"calendar-sync-skipped: {note_name}: {reason}"`
    - Do NOT block, retry, or fail the scan
-   - Log to `~/.vault-bridge/heartbeat.log`: `"heartbeat: calendar sync skipped for {note_name}: {reason}"`
+   - Log to `$(pwd)/.vault-bridge/heartbeat.log`: `"heartbeat: calendar sync skipped for {note_name}: {reason}"`
 
 **Counts update:** Add `calendar_events_created: N` to the Step 8 stats JSON,
 where N is the number of events successfully created this run.
@@ -585,7 +585,7 @@ in content you actually read:
 
 ## Step 6 — write a heartbeat log
 
-Append to `~/.vault-bridge/heartbeat.log` a single line with:
+Append to `$(pwd)/.vault-bridge/heartbeat.log` a single line with:
 - Timestamp
 - Files scanned total
 - Delta: N new, M modified, R removed
@@ -603,8 +603,8 @@ python3 ${CLAUDE_PLUGIN_ROOT}/scripts/vault_scan.py release-lock --workdir "$(pw
 ## Step 8 — write a memory report
 
 Write a per-scan report into the working directory's
-`.vault-bridge/reports/` folder. This is the per-project counterpart to
-the global `~/.vault-bridge/heartbeat.log`:
+`.vault-bridge/reports/` folder. This is the per-scan counterpart to
+the workdir-local `.vault-bridge/heartbeat.log`:
 
 ```bash
 python3 ${CLAUDE_PLUGIN_ROOT}/scripts/memory_report.py heartbeat \

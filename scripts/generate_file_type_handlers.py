@@ -66,6 +66,18 @@ _DEFAULT_CATEGORIES: Dict[str, _CategoryDef] = {
     "archive":         _CategoryDef(extract_text=False, extract_images=False, compress=False, run_vision=False),
 }
 
+# Extensions explicitly skipped by default. Users can still re-add these via
+# `file_type_config.extra_extensions` if they want handling, but by default
+# we do NOT generate handlers for render passes, mesh exchange formats, HDR
+# images, Grasshopper scripts, JSON config, or Rhino backups.
+_DEFAULT_SKIP_EXTENSIONS: List[str] = [
+    "exr", "hdr",       # HDR / OpenEXR render passes — no readable content
+    "gh", "ghx",        # Rhino Grasshopper definitions — binary scripts
+    "obj", "stl",       # 3D mesh exchange — geometry only, no narrative
+    "json",             # machine-readable config; not diary-worthy
+    "3dmbak",           # Rhino backup files; alias redundant with .3dm
+]
+
 # Default extensions per category (mirrors file_type_handlers.py HANDLERS)
 _DEFAULT_EXTENSIONS: Dict[str, List[str]] = {
     "document-pdf":    ["pdf"],
@@ -136,8 +148,11 @@ def _apply_config(
             if ext_clean:
                 ext_map[ext_clean] = cat_name
 
-    # 3. skip_extensions — remove extensions entirely
-    for ext in (file_type_config.get("skip_extensions") or []):
+    # 3. skip_extensions — remove extensions entirely. Merges built-in
+    # defaults with any user-supplied skips from config.
+    skip_list = list(_DEFAULT_SKIP_EXTENSIONS)
+    skip_list.extend(file_type_config.get("skip_extensions") or [])
+    for ext in skip_list:
         ext_clean = str(ext).lower().lstrip(".")
         ext_map.pop(ext_clean, None)
 
@@ -227,7 +242,7 @@ def _render_source(
         "To regenerate after changing config, run /vault-bridge:setup or:",
         "    python scripts/generate_file_type_handlers.py",
         '"""',
-        "import importlib",
+        "import importlib.util",
         "import logging",
         "from dataclasses import dataclass, field",
         "from pathlib import Path",
@@ -302,6 +317,75 @@ def _render_source(
         "    return HANDLERS.get(ext)",
         "",
         "",
+        "# ---------------------------------------------------------------------------",
+        "# Installed-handler loader",
+        "# ---------------------------------------------------------------------------",
+        "",
+        "# Resolve handler stubs relative to the workdir root. This generated file",
+        "# lives at <workdir>/scripts/file_type_handlers.py, so parent.parent is",
+        "# the workdir. Handler stubs live under <workdir>/.vault-bridge/handlers/.",
+        "try:",
+        "    _WORKDIR_ROOT = Path(__file__).resolve().parent.parent",
+        "except NameError:",
+        "    # exec()'d without __file__ — fall back to cwd (test harness only).",
+        "    _WORKDIR_ROOT = Path.cwd()",
+        "_HANDLERS_SUBDIR = _WORKDIR_ROOT / '.vault-bridge' / 'handlers'",
+        "",
+        "_HANDLER_MOD_CACHE: Dict[str, object] = {}",
+        "",
+        "",
+        "def _resolve_handler_path(raw: str) -> Optional[Path]:",
+        "    \"\"\"Resolve a stored handler identifier to an absolute file path.",
+        "",
+        "    Accepts all of: bare stub filename ('cad_3dm_3dm.py'),",
+        "    workdir-relative path ('.vault-bridge/handlers/cad_3dm_3dm.py'),",
+        "    or legacy dotted module name ('handlers.cad_3dm_3dm').",
+        "    \"\"\"",
+        "    if not raw:",
+        "        return None",
+        "    # Dotted module name (no slash, no .py suffix) → extract last segment.",
+        "    if '/' not in raw and not raw.endswith('.py'):",
+        "        leaf = raw.rsplit('.', 1)[-1] if '.' in raw else raw",
+        "        candidate = _HANDLERS_SUBDIR / f'{leaf}.py'",
+        "        return candidate if candidate.exists() else None",
+        "    # Path form: absolute, workdir-relative, or bare filename.",
+        "    clean = raw.lstrip('./')",
+        "    p = Path(clean)",
+        "    if p.is_absolute():",
+        "        return p if p.exists() else None",
+        "    if clean.startswith('.vault-bridge/'):",
+        "        candidate = _WORKDIR_ROOT / clean",
+        "    else:",
+        "        candidate = _HANDLERS_SUBDIR / Path(clean).name",
+        "    return candidate if candidate.exists() else None",
+        "",
+        "",
+        "def _load_installed(ext: str):",
+        "    \"\"\"Load the installed handler module for an extension. Cached per ext.\"\"\"",
+        "    if ext in _HANDLER_MOD_CACHE:",
+        "        return _HANDLER_MOD_CACHE[ext]",
+        "    raw = _INSTALLED_READERS.get(ext)",
+        "    abs_path = _resolve_handler_path(raw) if raw else None",
+        "    if abs_path is None:",
+        "        if raw:",
+        "            logger.debug('Installed handler for %s not found (stored: %r)', ext, raw)",
+        "        _HANDLER_MOD_CACHE[ext] = None",
+        "        return None",
+        "    try:",
+        "        mod_name = f'vb_handler_{ext}_{abs_path.stem}'",
+        "        spec = importlib.util.spec_from_file_location(mod_name, abs_path)",
+        "        if spec is None or spec.loader is None:",
+        "            raise ImportError(f'could not build spec for {abs_path}')",
+        "        mod = importlib.util.module_from_spec(spec)",
+        "        spec.loader.exec_module(mod)",
+        "        _HANDLER_MOD_CACHE[ext] = mod",
+        "        return mod",
+        "    except Exception as exc:",
+        "        logger.debug('Failed to load handler %s: %s', abs_path, exc)",
+        "        _HANDLER_MOD_CACHE[ext] = None",
+        "        return None",
+        "",
+        "",
         "def _pdf_read_text(path: str) -> str:",
         "    try:",
         "        import PyPDF2",
@@ -361,13 +445,14 @@ def _render_source(
         "    if not p.exists():",
         '        return ""',
         "    ext = p.suffix.lstrip('.').lower()",
-        "    _mod_path = _INSTALLED_READERS.get(ext)",
-        "    if _mod_path:",
+        "    _mod = _load_installed(ext)",
+        "    if _mod is not None and hasattr(_mod, 'read_text'):",
         "        try:",
-        "            _mod = importlib.import_module(_mod_path)",
-        "            return _mod.read_text(path)",
+        "            _text = _mod.read_text(path)",
+        "            if _text:",
+        "                return _text",
         "        except Exception as _exc:",
-        '            logger.debug("Installed reader %s failed for %s: %s", _mod_path, path, _exc)',
+        '            logger.debug("Installed reader for %s failed on %s: %s", ext, path, _exc)',
         '    if cfg.category == "document-pdf":',
         "        return _pdf_read_text(path)",
         '    elif cfg.category == "document-office":',
@@ -401,13 +486,14 @@ def _render_source(
         "    if not p.exists():",
         "        return []",
         "    ext = p.suffix.lstrip('.').lower()",
-        "    _mod_path = _INSTALLED_READERS.get(ext)",
-        "    if _mod_path:",
+        "    _mod = _load_installed(ext)",
+        "    if _mod is not None and hasattr(_mod, 'extract_images'):",
         "        try:",
-        "            _mod = importlib.import_module(_mod_path)",
-        "            return [Path(x) for x in _mod.extract_images(path, str(p.parent))]",
+        "            _imgs = _mod.extract_images(path, str(p.parent))",
+        "            if _imgs:",
+        "                return [Path(x) for x in _imgs]",
         "        except Exception as _exc:",
-        '            logger.debug("Installed image extractor %s failed for %s: %s", _mod_path, path, _exc)',
+        '            logger.debug("Installed image extractor for %s failed on %s: %s", ext, path, _exc)',
         '    if cfg.category in ("image-raster", "image-vector"):',
         "        return [p]",
         '    elif cfg.category in ("document-pdf", "document-office"):',

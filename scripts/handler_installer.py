@@ -187,13 +187,15 @@ def _stub_filename(ext: str, spec) -> str:
 
 
 def _handler_module_name(ext: str, spec) -> str:
-    """Return dotted module path for the stub (e.g. handlers.document_pdf_pdfplumber)."""
-    ext_clean = ext.lstrip(".").lower()
-    pip_slug = spec.pip_name.replace("-", "_").replace(".", "_").lower()
-    category_slug = spec.category.replace("-", "_")
-    if pip_slug:
-        return f"handlers.{category_slug}_{ext_clean}_{pip_slug}"
-    return f"handlers.{category_slug}_{ext_clean}"
+    """Return the stub filename (e.g. 'document_pdf_pdf.py').
+
+    Stored in `file_type_config.installed_packages[ext]`. The generated
+    `file_type_handlers.py` resolves this filename against
+    `<workdir>/.vault-bridge/handlers/` at runtime via
+    `importlib.util.spec_from_file_location`, so stubs do NOT need to be
+    on `sys.path` as a package.
+    """
+    return _stub_filename(ext, spec)
 
 
 # ---------------------------------------------------------------------------
