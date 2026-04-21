@@ -1,5 +1,41 @@
 # Changelog
 
+## v14.7.0 — stage-based scan pipeline (C from design review)
+
+`_process_file_inner` used to be a 120-line function inlining handler
+lookup → text extraction → image extraction → skip-on-no-content →
+result finalization. Testing one step in isolation required mocking
+every upstream call. Split into small stage functions that each
+mutate a `_ScanContext` dataclass; the pipeline is a list iterated
+by the orchestrator.
+
+### What changed
+
+- New `_ScanContext` dataclass holds inputs + mutable working state.
+- Stage functions: `_stage_handler_lookup`, `_stage_extract_text`,
+  `_stage_extract_images`, `_stage_skip_on_no_content`. Each is
+  ~20-30 lines. A stage can set `ctx.done=True` to short-circuit
+  the loop — used for unknown file types and skip-on-no-content.
+- `_PIPELINE = [...]` is the ordered stage list. Adding a new stage
+  (e.g. metadata enrichment, topic classification) = one function
+  plus one line in `_PIPELINE`.
+- `_build_result(ctx)` materializes the final `ScanResult` (or a
+  skipped one when `ctx.done`).
+- `_process_file_inner` is now a 20-line orchestrator.
+- No changes to public API: `process_file` / `process_batch`
+  signatures are unchanged.
+
+### Testing
+
+- New `tests/unit/test_scan_pipeline_stages.py` (18 tests) — each
+  stage is tested with plain `_ScanContext` inputs, no subprocess /
+  vault mocks.
+- Existing `test_scan_pipeline.py` continues to pass end-to-end.
+
+All 1761 tests pass.
+
+---
+
 ## v14.6.0 — pipeline simplification (A, B, D from design review)
 
 Three targeted simplifications from an internal pipeline review,

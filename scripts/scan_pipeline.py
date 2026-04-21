@@ -518,6 +518,181 @@ def process_file(
         )
 
 
+# ---------------------------------------------------------------------------
+# Stage-based pipeline (v14.7)
+#
+# `_process_file_inner` used to be a 120-line function that did handler
+# lookup, text extraction, image extraction, skip-on-no-content, and
+# result finalization inline. Testing one stage in isolation required
+# mocking the previous stages. Each stage is now a small function that
+# mutates a `ScanContext` in place; the pipeline is a simple loop.
+#
+# A stage can signal "stop here and emit a skipped result" by setting
+# `ctx.done = True` (optionally with `ctx.skip_reason` / `ctx.skip_category`).
+# The loop short-circuits and `_build_result(ctx)` returns.
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class _ScanContext:
+    """Working state for one file going through the pipeline.
+
+    Inputs are set once from `process_file` kwargs; mutable state
+    (text, attachments, warnings, …) is filled in by stages.
+    """
+    # Inputs (do not mutate)
+    source_path: str
+    workdir: str
+    vault_project_path: str
+    event_date: str
+    vault_name: str
+    throughput_bps: Optional[float]
+    skip_on_no_content: bool
+    dry_run: bool
+    att_index: Optional[attachment_index.AttachmentIndex]
+    strict_handlers: bool
+
+    # Working state (stages fill these in)
+    handler: Optional[file_type_handlers.HandlerConfig] = None
+    text: str = ""
+    read_bytes: int = 0
+    sources_read: int = 0
+    attachments: List[str] = field(default_factory=list)
+    images_embedded: int = 0
+    image_grid: bool = False
+    candidate_paths: List[str] = field(default_factory=list)
+    caption_prompts: List[str] = field(default_factory=list)
+    warnings: List[str] = field(default_factory=list)
+    errors: List[str] = field(default_factory=list)
+
+    # Pipeline control
+    done: bool = False        # stage sets True to short-circuit the loop
+    skip_reason: str = ""
+    skip_category: Optional[str] = None
+
+
+def _stage_handler_lookup(ctx: _ScanContext) -> None:
+    """Resolve the file's handler; skip if unknown or non-extractable category."""
+    ctx.handler = file_type_handlers.get_handler(ctx.source_path)
+    if ctx.handler is None:
+        ctx.done = True
+        ctx.skip_reason = "unknown file type"
+        return
+    if ctx.handler.category in _SKIP_CATEGORIES:
+        ctx.done = True
+        ctx.skip_reason = (
+            f"skipped: category '{ctx.handler.category}' has no extractable content"
+        )
+        ctx.skip_category = ctx.handler.category
+
+
+def _stage_extract_text(ctx: _ScanContext) -> None:
+    """Extract text if the handler supports it. Populates text / read_bytes / sources_read."""
+    h = ctx.handler
+    if h is None or not h.extract_text:
+        return
+
+    file_size = _safe_file_size(ctx.source_path)
+    est = _estimate_read_secs(file_size, ctx.throughput_bps)
+    if est is not None and est > _SLOW_READ_WARN_SECS:
+        ctx.warnings.append(
+            f"large file ({file_size // 1_048_576} MB): estimated read "
+            f"~{est:.0f}s at measured transport speed"
+        )
+    try:
+        text = file_type_handlers.read_text(ctx.source_path, workdir=ctx.workdir)
+    except Exception as exc:
+        ctx.errors.append(f"text extraction error: {exc}")
+        return
+    if text:
+        ctx.text = text
+        ctx.read_bytes = len(text.encode("utf-8"))
+        ctx.sources_read = 1
+
+
+def _stage_extract_images(ctx: _ScanContext) -> None:
+    """Run the image sub-pipeline if the handler supports images."""
+    h = ctx.handler
+    if h is None or not (h.extract_images or h.render_pages):
+        return
+
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp_dir = Path(tmp_str)
+        (
+            img_attachments, img_embedded, img_grid,
+            img_warnings, img_errors, img_candidates, img_prompts,
+        ) = _process_images(
+            source_path=ctx.source_path,
+            workdir=ctx.workdir,
+            vault_project_path=ctx.vault_project_path,
+            event_date=ctx.event_date,
+            tmp_dir=tmp_dir,
+            vault_name=ctx.vault_name,
+            dry_run=ctx.dry_run,
+            att_index=ctx.att_index,
+            strict_handlers=ctx.strict_handlers,
+        )
+    ctx.attachments.extend(img_attachments)
+    ctx.images_embedded += img_embedded
+    if img_grid:
+        ctx.image_grid = True
+    ctx.warnings.extend(img_warnings)
+    ctx.errors.extend(img_errors)
+    ctx.candidate_paths = img_candidates
+    ctx.caption_prompts = img_prompts
+
+
+def _stage_skip_on_no_content(ctx: _ScanContext) -> None:
+    """Enforce the no-meta-only rule after both extract stages have run."""
+    if not ctx.skip_on_no_content:
+        return
+    if ctx.text != "" or ctx.images_embedded > 0:
+        return
+    ctx.done = True
+    ctx.skip_reason = "no_content"
+    if ctx.handler is not None:
+        ctx.skip_category = ctx.handler.category
+
+
+# Pipeline order matters: handler lookup → text → images → no-content gate.
+_PIPELINE: List = [
+    _stage_handler_lookup,
+    _stage_extract_text,
+    _stage_extract_images,
+    _stage_skip_on_no_content,
+]
+
+
+def _build_result(ctx: _ScanContext) -> ScanResult:
+    """Materialize a ScanResult from the context."""
+    if ctx.done:
+        return _make_skipped(
+            ctx.source_path,
+            ctx.skip_reason,
+            category=ctx.skip_category,
+            warnings=ctx.warnings,
+            errors=ctx.errors,
+        )
+    return ScanResult(
+        source_path=ctx.source_path,
+        handler_category=ctx.handler.category if ctx.handler else None,
+        text=ctx.text,
+        attachments=ctx.attachments,
+        images_embedded=ctx.images_embedded,
+        skipped=False,
+        skip_reason="",
+        warnings=ctx.warnings,
+        errors=ctx.errors,
+        read_bytes=ctx.read_bytes,
+        sources_read=ctx.sources_read,
+        content_confidence=_compute_confidence(ctx.text),
+        image_grid=ctx.image_grid,
+        image_candidate_paths=ctx.candidate_paths,
+        image_caption_prompts=ctx.caption_prompts,
+        image_captions=[],
+    )
+
+
 def _process_file_inner(
     source_path: str,
     workdir: str,
@@ -531,112 +706,29 @@ def _process_file_inner(
     att_index: Optional[attachment_index.AttachmentIndex] = None,
     strict_handlers: bool = False,
 ) -> ScanResult:
-    """Inner implementation — may raise; always wrapped by process_file."""
+    """Run the scan pipeline for one file.
 
-    # Step 1: Look up handler
-    handler = file_type_handlers.get_handler(source_path)
-
-    if handler is None:
-        return _make_skipped(source_path, "unknown file type")
-
-    # Step 2: Check if this category should be skipped entirely
-    if handler.category in _SKIP_CATEGORIES:
-        return _make_skipped(
-            source_path,
-            f"skipped: category '{handler.category}' has no extractable content",
-            category=handler.category,
-        )
-
-    # Prepare result accumulators
-    text = ""
-    read_bytes = 0
-    sources_read = 0
-    attachments: List[str] = []
-    images_embedded = 0
-    image_grid = False
-    warnings: List[str] = []
-    errors: List[str] = []
-
-    # Step 3: Extract text (if supported by handler)
-    if handler.extract_text:
-        file_size = _safe_file_size(source_path)
-        est = _estimate_read_secs(file_size, throughput_bps)
-        if est is not None and est > _SLOW_READ_WARN_SECS:
-            warnings.append(
-                f"large file ({file_size // 1_048_576} MB): estimated read "
-                f"~{est:.0f}s at measured transport speed"
-            )
-        try:
-            text = file_type_handlers.read_text(source_path, workdir=workdir)
-            if text:
-                read_bytes = len(text.encode("utf-8"))
-                sources_read = 1
-        except Exception as exc:
-            errors.append(f"text extraction error: {exc}")
-            text = ""
-
-    # Step 4: Extract / process images (if supported by handler)
-    candidate_paths: List[str] = []
-    caption_prompts: List[str] = []
-    if handler.extract_images or handler.render_pages:
-        with tempfile.TemporaryDirectory() as tmp_str:
-            tmp_dir = Path(tmp_str)
-            (
-                img_attachments, img_embedded, img_grid,
-                img_warnings, img_errors, img_candidates, img_prompts,
-            ) = _process_images(
-                source_path=source_path,
-                workdir=workdir,
-                vault_project_path=vault_project_path,
-                event_date=event_date,
-                tmp_dir=tmp_dir,
-                vault_name=vault_name,
-                dry_run=dry_run,
-                att_index=att_index,
-                strict_handlers=strict_handlers,
-            )
-            attachments.extend(img_attachments)
-            images_embedded += img_embedded
-            if img_grid:
-                image_grid = True
-            warnings.extend(img_warnings)
-            errors.extend(img_errors)
-            candidate_paths = img_candidates
-            caption_prompts = img_prompts
-
-    # Step 5: Enforce no-meta-only rule — skip if nothing was extracted.
-    # Preserve warnings and errors so size-gate drops and other diagnostics
-    # survive into the memory report.
-    if skip_on_no_content and text == "" and images_embedded == 0:
-        return _make_skipped(
-            source_path,
-            "no_content",
-            category=handler.category,
-            warnings=warnings,
-            errors=errors,
-        )
-
-    # Step 6: Compute content_confidence
-    content_confidence = _compute_confidence(text)
-
-    return ScanResult(
+    Thin orchestrator: build a `_ScanContext`, run each stage in
+    `_PIPELINE`, short-circuit when a stage sets `ctx.done`, then
+    materialize the result. See `_PIPELINE` for the stage list.
+    """
+    ctx = _ScanContext(
         source_path=source_path,
-        handler_category=handler.category,
-        text=text,
-        attachments=attachments,
-        images_embedded=images_embedded,
-        skipped=False,
-        skip_reason="",
-        warnings=warnings,
-        errors=errors,
-        read_bytes=read_bytes,
-        sources_read=sources_read,
-        content_confidence=content_confidence,
-        image_grid=image_grid,
-        image_candidate_paths=candidate_paths,
-        image_caption_prompts=caption_prompts,
-        image_captions=[],
+        workdir=workdir,
+        vault_project_path=vault_project_path,
+        event_date=event_date,
+        vault_name=vault_name,
+        throughput_bps=throughput_bps,
+        skip_on_no_content=skip_on_no_content,
+        dry_run=dry_run,
+        att_index=att_index,
+        strict_handlers=strict_handlers,
     )
+    for stage in _PIPELINE:
+        stage(ctx)
+        if ctx.done:
+            break
+    return _build_result(ctx)
 
 
 def process_batch(
