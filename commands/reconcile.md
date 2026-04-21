@@ -650,16 +650,51 @@ for every project in the domain to create or refresh the MOC index notes.
 
 ```bash
 python3 -c "
-import os, sys, json
+import os, re, subprocess, sys, json
 from pathlib import Path
 from datetime import date
 sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
 import project_index as pi
 import vault_scan
+import event_writer
 
 workdir = Path(os.getcwd())
 vault_name = os.environ['VB_VAULT']
 domain = os.environ['VB_DOMAIN']
+
+def _read_body_and_parties(note_path: str) -> tuple:
+    '''Read the note via obsidian CLI; return (abstract_callout, parties_list).'''
+    try:
+        r = subprocess.run(
+            ['obsidian', 'read', f'vault={vault_name}', f'path={note_path}'],
+            capture_output=True, text=True, timeout=20,
+        )
+        if r.returncode != 0 or not r.stdout:
+            return '', []
+    except Exception:
+        return '', []
+    text = r.stdout
+    # Split frontmatter from body
+    body = text
+    parties = []
+    if text.startswith('---'):
+        fm_match = re.match(r'^---\n(.*?)\n---\n', text, re.DOTALL)
+        if fm_match:
+            body = text[fm_match.end():]
+            fm_text = fm_match.group(1)
+            # Minimal parties parse — handles YAML list form:
+            #   parties:
+            #     - Alice
+            #     - 'Bob Ltd.'
+            plist_match = re.search(r'^parties:\s*\n((?:\s+-.*\n?)+)', fm_text, re.MULTILINE)
+            if plist_match:
+                for line in plist_match.group(1).splitlines():
+                    m = re.match(r'\s+-\s*(.*)', line)
+                    if m:
+                        v = m.group(1).strip().strip(\"'\\\"\")
+                        if v:
+                            parties.append(v)
+    return event_writer.extract_abstract_callout(body), parties
 
 # Gather all events per project from the scan index
 by_path, _ = vault_scan.load_index(workdir)
@@ -670,15 +705,16 @@ for src, (fp, note_path) in by_path.items():
         proj = parts[1]
         if proj not in projects:
             projects[proj] = []
-        import re
         fname = parts[-1]
         date_m = re.match(r'^(\d{4}-\d{2}-\d{2})', fname)
+        hint, parties = _read_body_and_parties(note_path)
         ev = pi.ProjectIndexEvent(
             event_date=date_m.group(1) if date_m else '',
             note_filename=fname.replace('.md', ''),
             subfolder=parts[2] if len(parts) > 3 else '',
             content_confidence='',
-            summary_hint='',
+            summary_hint=hint,
+            parties=parties,
         )
         projects[proj].append(ev)
 

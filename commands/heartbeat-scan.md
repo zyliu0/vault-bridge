@@ -533,6 +533,10 @@ jpg, png, psd, ai, dxf, dwg, rvt, 3dm, mov, mp4, image-folder.
 After the per-event loop completes, update the MOC index for each project
 touched in this heartbeat run.
 
+Each event entry MUST populate `summary_hint` from the just-written
+note body (via `event_writer.extract_abstract_callout`). Pass `parties`
+from the event frontmatter when present.
+
 ```bash
 python3 -c "
 import os, sys, json
@@ -540,6 +544,7 @@ from pathlib import Path
 from datetime import date
 sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
 import project_index as pi
+import event_writer
 
 events_json = json.loads(os.environ['VB_EVENTS_JSON'])
 events = [pi.ProjectIndexEvent(**e) for e in events_json]
@@ -555,6 +560,11 @@ print(json.dumps(result))
 " VB_PROJECT=\"$PROJECT_NAME\" VB_DOMAIN=\"$DOMAIN_NAME\" \
   VB_VAULT=\"$VAULT_NAME\" VB_EVENTS_JSON=\"$EVENTS_JSON\"
 ```
+
+Inside the per-event loop (after the note is written in Step 5), derive
+`summary_hint` by reading the body back through obsidian CLI and calling
+`event_writer.extract_abstract_callout(body)`. See retro-scan Step 7b for
+the exact snippet.
 
 Rules:
 - Index updates do not read source files — they are never rate-limited.

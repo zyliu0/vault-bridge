@@ -58,37 +58,23 @@ cssclasses:
 
 # {{project_name}}
 
-> [!abstract] Overview
-> _No overview yet. Edit this note to add one._
-
 ## Status
 ==Current status==: {{status}}
 Timeline: =={{timeline_start}}== → ==ongoing==
-
-## Substructures
-_No substructures yet._
 
 ## Timeline (all events)
 _No events yet._
 
 ## Subfolders
 _None._
-
-## Parties
-_Not recorded._
-
-## Budget
-_Not recorded._
-
-## Key Decisions
-_None recorded yet._
-
-## Open Items
-_None recorded yet._
-
-## Related Projects
-_None._
 """
+# Sections that are intentionally absent from the template:
+#   - Overview: only appears once the user has written one by hand.
+#   - Parties / Budget / Key Decisions / Open Items / Related Projects:
+#     appear automatically when there is structured data (Parties, from
+#     event frontmatter) or user-edited content. Emitting empty
+#     placeholders in every fresh index added noise without value
+#     (v14.4, field-agent review).
 
 
 # ---------------------------------------------------------------------------
@@ -97,12 +83,29 @@ _None._
 
 @dataclass
 class ProjectIndexEvent:
-    """A single event to be listed in the project index."""
-    event_date: str          # YYYY-MM-DD
-    note_filename: str       # stem only, for wikilinks e.g. "2024-08-15 kickoff"
-    subfolder: str           # routing subfolder e.g. "SD"
-    content_confidence: str  # "high"|"low"|"none"
-    summary_hint: str        # content of [!abstract] callout if present, else ""
+    """A single event to be listed in the project index.
+
+    Attributes:
+        event_date: ISO `YYYY-MM-DD` string for this event.
+        note_filename: wikilink stem (no `.md`), e.g. `"2024-08-15 kickoff"`.
+        subfolder: routing subfolder name (`"SD"`, `"Meetings"`, etc.).
+        content_confidence: `"high" | "low" | "none"`.
+        summary_hint: one-sentence event summary extracted from the note's
+            leading `> [!abstract] Overview` callout. Callers derive this
+            by reading the just-written note body via the obsidian CLI and
+            passing it to `event_writer.extract_abstract_callout`. Empty
+            string when no abstract callout is present — stub notes and
+            legacy notes written before v14.4 never have one.
+        parties: optional list of parties from event frontmatter (e.g.
+            `["ClientCo", "ArchFirm"]`). Used to aggregate a project-level
+            Parties list without fabrication. Empty when unknown.
+    """
+    event_date: str
+    note_filename: str
+    subfolder: str
+    content_confidence: str
+    summary_hint: str = ""
+    parties: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -122,14 +125,27 @@ class ProjectIndexStatus:
 def infer_status(events: List[ProjectIndexEvent], today: date) -> ProjectIndexStatus:
     """Infer project status from the list of events.
 
-    Rules (applied in order):
-    1. If any summary_hint contains "completed", "cancelled", or "archived"
-       → override with that status.
-    2. Date-based:
-       - Latest event ≤90 days ago → "active"
-       - 90 < days ≤365 → "on-hold"
-       - >365 days → "completed"
-    3. timeline_start = min(event_date), timeline_end = "" unless completed.
+    Pure date-based inference (v14.4+):
+      - Latest event ≤90 days ago → "active"
+      - 90 < days ≤365 → "on-hold"
+      - >365 days → "completed"
+
+    Previous versions sniffed `summary_hint` for keywords like
+    "completed" / "cancelled" / "archived" to override the date rule.
+    That override was brittle — almost no caller populated `summary_hint`
+    so the check almost never fired, and when it did it was as likely
+    to hit a false-positive (e.g. an event note about *reviewing*
+    another project that was cancelled) as a real signal. The user can
+    always override by editing `status:` in the index frontmatter
+    directly; the index generator preserves it across regenerations.
+
+    `timeline_start` is the earliest event; `timeline_end` is the latest
+    event when status is "completed", empty otherwise.
+
+    `parties` on the returned `ProjectIndexStatus` aggregates the union
+    of every event's `parties` list, preserving first-seen order. This
+    is zero-fabrication: it only surfaces parties that were already
+    recorded as structured frontmatter on event notes.
     """
     if not events:
         return ProjectIndexStatus(
@@ -138,21 +154,6 @@ def infer_status(events: List[ProjectIndexEvent], today: date) -> ProjectIndexSt
             timeline_end="",
         )
 
-    # Check override keywords in summary hints
-    override_status: Optional[str] = None
-    for ev in events:
-        hint_lower = ev.summary_hint.lower()
-        if "completed" in hint_lower:
-            override_status = "completed"
-            break
-        if "cancelled" in hint_lower or "canceled" in hint_lower:
-            override_status = "archived"
-            break
-        if "archived" in hint_lower:
-            override_status = "archived"
-            break
-
-    # Sort events by date
     sorted_events = sorted(events, key=lambda e: e.event_date)
     timeline_start = sorted_events[0].event_date
     latest_event_date_str = sorted_events[-1].event_date
@@ -163,10 +164,7 @@ def infer_status(events: List[ProjectIndexEvent], today: date) -> ProjectIndexSt
     except ValueError:
         days_ago = 0
 
-    if override_status:
-        status = override_status
-        timeline_end = latest_event_date_str
-    elif days_ago <= 90:
+    if days_ago <= 90:
         status = "active"
         timeline_end = ""
     elif days_ago <= 365:
@@ -176,10 +174,18 @@ def infer_status(events: List[ProjectIndexEvent], today: date) -> ProjectIndexSt
         status = "completed"
         timeline_end = latest_event_date_str
 
+    # Aggregate parties across events, preserving first-seen order.
+    parties_seen: List[str] = []
+    for ev in events:
+        for p in ev.parties:
+            if p and p not in parties_seen:
+                parties_seen.append(p)
+
     return ProjectIndexStatus(
         status=status,
         timeline_start=timeline_start,
         timeline_end=timeline_end,
+        parties=parties_seen,
     )
 
 
@@ -285,20 +291,36 @@ def _parse_fm_simple(fm_text: str) -> dict:
 # generate_index
 # ---------------------------------------------------------------------------
 
+def _format_timeline_entry(ev: ProjectIndexEvent, *, include_hint: bool) -> str:
+    """Render one timeline bullet.
+
+    With `include_hint=True` the one-sentence `summary_hint` is appended
+    after an em-dash so the reader can scan events without opening each
+    note. `include_hint=False` produces the compact `- ==DATE== — [[note]]`
+    form used by the flat Timeline section.
+    """
+    line = f"- =={ev.event_date}== — [[{ev.note_filename}]]"
+    if include_hint and ev.summary_hint:
+        line += f" — {ev.summary_hint.strip()}"
+    return line
+
+
 def _generate_substructure_nav(
     events: List[ProjectIndexEvent],
     all_subfolders: List[str],
 ) -> str:
-    """Generate a per-subfolder navigation block for the index note.
+    """Generate a per-subfolder navigation block with summary one-liners.
 
-    Groups events by subfolder and emits a mini-index for each:
+    Groups events by subfolder and emits a mini-index for each, each
+    event carrying its `summary_hint` for scan-at-a-glance navigation:
 
         ### SD/
-        - ==2024-08-15== — [[2024-08-15 sd-drawing]]
-        - ==2024-09-01== — [[2024-09-01 sd-revision]]
+        - ==2024-08-15== — [[2024-08-15 sd-drawing]] — 3-story schematic drawings frozen with client.
+        - ==2024-09-01== — [[2024-09-01 sd-revision]] — Roofline revision after fire-dept comment.
 
-    Returns an empty string when there is only one (or zero) subfolder,
-    since a flat Timeline section is sufficient in that case.
+    Returns an empty string when there is only one (or zero) subfolder —
+    the flat Timeline view alone is sufficient and duplicating it under
+    a single `### Foo/` heading is noise.
     """
     active_subfolders = [sf for sf in all_subfolders if sf]
     if len(active_subfolders) <= 1:
@@ -319,7 +341,7 @@ def _generate_substructure_nav(
             continue
         lines.append(f"### {sf}/")
         for ev in group_events:
-            lines.append(f"- =={ev.event_date}== — [[{ev.note_filename}]]")
+            lines.append(_format_timeline_entry(ev, include_hint=True))
         lines.append("")
 
     return "\n".join(lines).rstrip()
@@ -335,13 +357,37 @@ def generate_index(
 ) -> str:
     """Generate the project index MOC note.
 
-    Fabrication firewall rules:
-    - Timeline: auto-derived from events (safe).
-    - Subfolders: auto-derived from events + subfolders arg (safe).
-    - Overview: preserved from existing; placeholder if none.
-    - Parties/Budget/Key Decisions/Open Items/Related Projects:
-      preserved from existing; placeholder if none — NEVER auto-generated.
-    - User sections: appended verbatim if present in existing.
+    Section layout (v14.4):
+
+    - `# <project_name>` heading
+    - `> [!abstract] Overview` — verbatim from existing; only present when
+      the user has edited it away from the default placeholder.
+    - `## Status` — auto-derived: status + start/end timeline.
+    - `## Substructures` — only when the project spans ≥2 subfolders.
+      Per-subfolder list of events with their one-sentence
+      `summary_hint` for scan-at-a-glance navigation.
+    - `## Timeline (all events)` — flat chronological. Compact when
+      Substructures is already present (dates + link only); rich when
+      no Substructures section exists (dates + link + hint).
+    - `## Subfolders` — flat list of routing folders seen.
+    - `## Parties` — union of every event's `parties` frontmatter list,
+      or verbatim existing content if the user has edited it. Omitted
+      entirely when neither source has anything.
+    - `## Budget`, `## Key Decisions`, `## Open Items`,
+      `## Related Projects` — verbatim from existing when non-empty;
+      OMITTED when there is nothing to show. Previous versions emitted
+      `_Not recorded._` placeholder text for each, which was noise in
+      every freshly-generated index.
+    - User-authored sections: appended verbatim if present in existing.
+
+    Fabrication firewall:
+    - Timeline, Substructures, Subfolders, Status → safe (derived from
+      `events` and `subfolders`).
+    - Overview → preserved verbatim. Never synthesised.
+    - Parties → aggregated from structured `events[].parties` or
+      preserved from existing. Never synthesised from prose.
+    - Budget / Key Decisions / Open Items / Related Projects → only
+      surface what the user has typed. No LLM inference.
     """
     status_obj = infer_status(events, today)
 
@@ -363,28 +409,68 @@ def generate_index(
         related_projects_content = ""
         user_sections = ""
 
-    overview_text = overview if overview else "_No overview yet. Edit this note to add one._"
-    parties_text = parties_content if parties_content else "_Not recorded._"
-    budget_text = budget_content if budget_content else "_Not recorded._"
-    key_decisions_text = key_decisions_content if key_decisions_content else "_None recorded yet._"
-    open_items_text = open_items_content if open_items_content else "_None recorded yet._"
-    related_projects_text = related_projects_content if related_projects_content else "_None._"
+    # `_No overview yet…` from previous versions is treated as the
+    # "no overview" sentinel so a freshly generated index does not
+    # block the next regeneration from dropping the section cleanly.
+    _EMPTY_OVERVIEW_SENTINELS = {
+        "_No overview yet. Edit this note to add one._",
+        "_no overview yet. edit this note to add one._",
+    }
+    if overview in _EMPTY_OVERVIEW_SENTINELS:
+        overview = ""
 
-    # --- Build timeline ---
+    # Same sentinels for preserved placeholder sections — if the user
+    # never replaced them, treat the section as empty and omit it.
+    _PLACEHOLDER_SENTINELS = {
+        "_Not recorded._", "_None._",
+        "_None recorded yet._", "_No events yet._",
+    }
+    if parties_content in _PLACEHOLDER_SENTINELS:
+        parties_content = ""
+    if budget_content in _PLACEHOLDER_SENTINELS:
+        budget_content = ""
+    if key_decisions_content in _PLACEHOLDER_SENTINELS:
+        key_decisions_content = ""
+    if open_items_content in _PLACEHOLDER_SENTINELS:
+        open_items_content = ""
+    if related_projects_content in _PLACEHOLDER_SENTINELS:
+        related_projects_content = ""
+
+    # --- Build timeline + substructure ---
     sorted_events = sorted(events, key=lambda e: e.event_date)
-    timeline_lines = []
-    for ev in sorted_events:
-        timeline_lines.append(f"- =={ev.event_date}== — [[{ev.note_filename}]]")
-
-    # --- Build substructure navigation ---
     all_subfolders = list(dict.fromkeys(
         [ev.subfolder for ev in sorted_events] + subfolders
     ))
     subfolder_lines = [f"- {sf}" for sf in all_subfolders if sf]
     substructure_nav = _generate_substructure_nav(sorted_events, all_subfolders)
 
+    # Timeline rendering depends on whether Substructures is already
+    # carrying the summary hints: if yes, keep Timeline compact so the
+    # two sections don't duplicate each other verbatim.
+    include_hint_in_timeline = not bool(substructure_nav)
+    timeline_lines = [
+        _format_timeline_entry(ev, include_hint=include_hint_in_timeline)
+        for ev in sorted_events
+    ]
+
+    # --- Parties aggregation (v14.4) ---
+    # Prefer explicit user-edited Parties content. Otherwise fall back
+    # to the union of event-note frontmatter parties. Only surface the
+    # section when at least one of those produced content.
+    parties_text = parties_content
+    if not parties_text and status_obj.parties:
+        parties_text = "\n".join(f"- {p}" for p in status_obj.parties)
+
     # --- Frontmatter ---
     timeline_end_val = status_obj.timeline_end if status_obj.timeline_end else ""
+    # Render aggregated parties into the YAML list when present so
+    # dataviews/bases can query them without re-parsing the body.
+    if status_obj.parties:
+        parties_yaml = "parties:\n" + "\n".join(
+            f"  - {_yaml_quote(p)}" for p in status_obj.parties
+        )
+    else:
+        parties_yaml = "parties: []"
     fm_lines = [
         "---",
         "schema_version: 2",
@@ -395,7 +481,7 @@ def generate_index(
         f"status: {status_obj.status}",
         f'timeline_start: "{status_obj.timeline_start}"',
         f'timeline_end: "{timeline_end_val}"',
-        "parties: []",
+        parties_yaml,
         'budget: ""',
         "tags:",
         f"  - {domain}",
@@ -406,19 +492,28 @@ def generate_index(
     ]
 
     # --- Body ---
-    body_parts = [
+    body_parts: List[str] = [
         f"# {project_name}",
         "",
-        "> [!abstract] Overview",
-        f"> {overview_text}",
-        "",
+    ]
+
+    # Overview callout only when there's real content.
+    if overview:
+        body_parts += [
+            "> [!abstract] Overview",
+            *(f"> {line}" for line in overview.splitlines()),
+            "",
+        ]
+
+    body_parts += [
         "## Status",
         f"==Current status==: {status_obj.status}  ",
         f"Timeline: =={status_obj.timeline_start}== → =={status_obj.timeline_end or 'ongoing'}==",
         "",
     ]
 
-    # Substructure navigation (grouped by subfolder) — only when there are subfolders
+    # Substructure navigation (grouped by subfolder, with hints) —
+    # only when there are ≥2 subfolders.
     if substructure_nav:
         body_parts += ["## Substructures", ""]
         body_parts.append(substructure_nav)
@@ -426,33 +521,42 @@ def generate_index(
 
     body_parts += ["## Timeline (all events)"]
     body_parts.extend(timeline_lines if timeline_lines else ["_No events yet._"])
-    body_parts += [
-        "",
-        "## Subfolders",
-    ]
+    body_parts += ["", "## Subfolders"]
     body_parts.extend(subfolder_lines if subfolder_lines else ["_None._"])
-    body_parts += [
-        "",
-        "## Parties",
-        parties_text,
-        "",
-        "## Budget",
-        budget_text,
-        "",
-        "## Key Decisions",
-        key_decisions_text,
-        "",
-        "## Open Items",
-        open_items_text,
-        "",
-        "## Related Projects",
-        related_projects_text,
-    ]
+
+    # Only emit these sections when they have content — hiding empty
+    # placeholders is the whole point of the v14.4 change.
+    if parties_text:
+        body_parts += ["", "## Parties", parties_text]
+    if budget_content:
+        body_parts += ["", "## Budget", budget_content]
+    if key_decisions_content:
+        body_parts += ["", "## Key Decisions", key_decisions_content]
+    if open_items_content:
+        body_parts += ["", "## Open Items", open_items_content]
+    if related_projects_content:
+        body_parts += ["", "## Related Projects", related_projects_content]
 
     if user_sections:
         body_parts += ["", user_sections]
 
     return "\n".join(fm_lines) + "\n\n" + "\n".join(body_parts) + "\n"
+
+
+def _yaml_quote(s: str) -> str:
+    """Minimal YAML string quoting for party names.
+
+    Uses double-quoted scalar when the string contains characters that
+    plain YAML would misparse (`:`, `#`, leading/trailing whitespace,
+    `"`, `\\`). Otherwise returns the string unquoted.
+    """
+    if not s:
+        return '""'
+    needs_quote = any(c in s for c in ':#"\\') or s != s.strip()
+    if not needs_quote:
+        return s
+    escaped = s.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
 
 
 # ---------------------------------------------------------------------------
@@ -502,6 +606,25 @@ def update_index(
     today: Optional[date] = None,
 ) -> dict:
     """Orchestrate reading, generating, and writing the project index note.
+
+    Callers supply one `ProjectIndexEvent` per event note written in
+    the current scan. The critical fields to populate are:
+
+    - `event_date`, `note_filename`, `subfolder`, `content_confidence`
+      — all structural, always required.
+    - `summary_hint` — pass the one-sentence event summary extracted
+      from the note's `> [!abstract] Overview` callout. The caller
+      should read the just-written note back via
+      `obsidian read vault="$VAULT" path="$NOTE"`, take the body below
+      the `---` fence, and pass it to
+      `event_writer.extract_abstract_callout(body)`. Empty string is
+      acceptable (stub notes, legacy notes without an abstract) — the
+      index will render those events without the one-liner.
+    - `parties` — pass the `parties` list from the event's frontmatter
+      if present (v14.4 events that carry structured parties data).
+      Empty list is the default and safe — the Parties section only
+      appears when at least one event has a non-empty list OR the
+      user has edited the index directly.
 
     Steps:
     1. Derive vault paths for the index note and .base file.

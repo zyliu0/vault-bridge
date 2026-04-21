@@ -10,6 +10,9 @@ import validate_event_note as ven  # noqa: E402
 
 def _valid_body() -> str:
     return (
+        "> [!abstract] Overview\n"
+        "> Reviewed SD with the client and agreed on facade option B.\n"
+        "\n"
         "Today we reviewed the schematic design with the client and agreed "
         "to proceed with facade option B after a short discussion about the "
         "material cost and delivery timing. Several smaller questions came "

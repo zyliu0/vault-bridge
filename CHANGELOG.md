@@ -1,5 +1,74 @@
 # Changelog
 
+## v14.4.0 — project-index MOC fixes from field-agent review
+
+Addresses the v14.3.0 field-agent review of `project_index.py`. The
+MOC went from "glorified `ls`" to a scannable, navigable summary that
+callers actually feed real data into.
+
+### Abstract-callout contract (event_writer)
+- Event-note prompt now REQUIRES a leading `> [!abstract] Overview\n> <sentence>`
+  callout on every event note. The validator rejects notes without it and
+  flags abstract callouts shorter than 5 words or longer than 25.
+- New `event_writer.extract_abstract_callout(body)` — canonical helper for
+  turning a written note's body into a `summary_hint`.
+- New `event_writer.validate_event_note_body` constants:
+  `ABSTRACT_CALLOUT_MIN_WORDS = 5`, `ABSTRACT_CALLOUT_MAX_WORDS = 25`.
+  Word-count bounds now apply to the PROSE (excluding the abstract).
+
+### project_index: summary_hint is now live data
+- `ProjectIndexEvent.summary_hint` is rendered:
+  - in Substructures — every bullet carries the one-liner, so users
+    can scan SD/DD/CA etc. without opening each note.
+  - in Timeline — when no Substructures section exists (single
+    subfolder projects) so the MOC stays useful.
+  - Substructures + Timeline no longer duplicate each other verbatim:
+    when both are present, Timeline stays compact (date + link only)
+    and Substructures carries the hints.
+
+### project_index: Parties aggregation from event frontmatter
+- `ProjectIndexEvent.parties: list[str]` (new, optional) lets callers
+  pass a note's `parties:` frontmatter through. `infer_status` unions
+  them across events (preserving first-seen order) and emits the
+  `## Parties` section + the `parties: [...]` YAML list. Zero
+  fabrication — only surfaces what was already structured data.
+
+### project_index: empty sections are omitted, not placeholder-filled
+- Six `_Not recorded._` placeholders in a freshly-generated MOC were
+  noise (field-agent review). `## Parties`, `## Budget`,
+  `## Key Decisions`, `## Open Items`, `## Related Projects`, and
+  `> [!abstract] Overview` now appear only when real content exists
+  (either user-edited or — for Parties — aggregated from event
+  frontmatter). Previously-saved placeholders are recognised as
+  sentinels on re-read so the next regeneration cleanly drops them.
+
+### project_index: status inference simplified
+- Dropped the keyword-sniffing on `summary_hint` that tried to force
+  `completed`/`archived` status from words in prose. It was brittle
+  (almost no caller populated `summary_hint`) and it was as likely to
+  hit a false positive as a real signal. Status is now pure-date-based;
+  users override by editing `status:` in the index frontmatter directly.
+
+### Caller updates (retro-scan, heartbeat-scan, reconcile)
+- Scan commands now read each just-written note via obsidian CLI,
+  pull the abstract callout with `event_writer.extract_abstract_callout`,
+  and pass it as `summary_hint` into `update_index`. `--rebuild-indexes`
+  in reconcile loops over the scan index reading bodies to re-derive.
+- Commands also forward `parties:` frontmatter into
+  `ProjectIndexEvent.parties` when present.
+
+### Migration
+
+Existing indexes: on next regeneration, placeholder-only sections will
+collapse away; user-edited content is preserved verbatim.
+
+Existing event notes without an abstract callout: the validator will
+reject them on re-scan. Regenerate via `/vault-bridge:reconcile --migrate-v2`
+(the regeneration reads raw text and rewrites the body with a fresh
+abstract callout).
+
+---
+
 ## v14.3.0 — field-report fixes (F1–F9)
 
 Addresses every issue flagged in the v14.1.0 field report from a

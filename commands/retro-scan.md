@@ -1208,7 +1208,13 @@ Gather the set of `project_name` values from all notes written in this run.
 
 ### 7b — update indexes
 
-For each touched project, call `project_index.update_index()`:
+For each touched project, call `project_index.update_index()`. Each event's
+JSON entry MUST populate `summary_hint` with the one-sentence abstract
+callout from the just-written note body. Use `event_writer.extract_abstract_callout`
+to pull it from the content you just wrote — do NOT pass an empty string
+or the project index will render events without their one-liner preview.
+If the event carries a `parties` frontmatter list, pass it through so
+the MOC can aggregate a project-level Parties section.
 
 ```bash
 python3 -c "
@@ -1217,8 +1223,12 @@ from pathlib import Path
 from datetime import date
 sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
 import project_index as pi
+import event_writer
 
 events_json = json.loads(os.environ['VB_EVENTS_JSON'])
+# Each entry must include: event_date, note_filename, subfolder,
+# content_confidence, summary_hint (from extract_abstract_callout on
+# the note's body), and optionally parties (from the note's frontmatter).
 events = [pi.ProjectIndexEvent(**e) for e in events_json]
 result = pi.update_index(
     project_name=os.environ['VB_PROJECT'],
@@ -1231,6 +1241,27 @@ result = pi.update_index(
 print(json.dumps(result))
 " VB_PROJECT=\"$PROJECT_NAME\" VB_DOMAIN=\"$DOMAIN_NAME\" \
   VB_VAULT=\"$VAULT_NAME\" VB_EVENTS_JSON=\"$EVENTS_JSON\"
+```
+
+**How to derive `summary_hint` per event**, inside the scan loop right
+after step 6j writes the note:
+
+```bash
+NOTE_BODY=$(obsidian read vault="$VAULT_NAME" path="$VAULT_FOLDER/$NOTE_NAME.md")
+HINT=$(python3 -c "
+import os, sys
+sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
+import event_writer
+body = sys.stdin.read()
+# Strip frontmatter — everything after the closing ---
+if body.startswith('---'):
+    _, _, rest = body[3:].partition('\n---\n')
+    body = rest
+print(event_writer.extract_abstract_callout(body))
+" <<< \"$NOTE_BODY\")
+# Append to the EVENTS_JSON entry for this event:
+#   {\"event_date\": ..., \"note_filename\": ..., \"subfolder\": ...,
+#    \"content_confidence\": ..., \"summary_hint\": \"$HINT\", \"parties\": []}
 ```
 
 ### 7c — add backlinks to event notes

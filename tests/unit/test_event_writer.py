@@ -159,11 +159,18 @@ class TestEventNote:
         assert "100" in prompt and "200" in prompt
 
 
+_ABSTRACT_CALLOUT = (
+    "> [!abstract] Overview\n"
+    "> Met the consultant to confirm SD revisions and schedule next review.\n"
+    "\n"
+)
+
+
 class TestValidator:
     def test_validator_passes_clean_prose(self):
         r = _FakeResult(text="raw content")
         body = event_writer.compose_body(r, _meta())
-        clean = (
+        clean = _ABSTRACT_CALLOUT + (
             "On August 1 we met with the consultant at the SD review in the afternoon. "
             "We walked through the latest floor-plan revision, agreed on moving the entry "
             "to the east elevation, and flagged the stair detail for further study. The "
@@ -181,7 +188,7 @@ class TestValidator:
     def test_validator_rejects_stop_word(self):
         r = _FakeResult(text="raw content")
         body = event_writer.compose_body(r, _meta())
-        bad = (
+        bad = _ABSTRACT_CALLOUT + (
             "On August 1 the review came back with several changes. Everyone was happy. "
             "We moved on. " * 10
         )
@@ -198,7 +205,7 @@ class TestValidator:
         r = _FakeResult(text=raw)
         body = event_writer.compose_body(r, _meta())
         # Body contains a 60+ char run from the raw text — should be flagged as paste.
-        pasted = (
+        pasted = _ABSTRACT_CALLOUT + (
             "At the meeting we discussed the design. "
             + raw[:120]
             + " And then we went for lunch."
@@ -210,17 +217,93 @@ class TestValidator:
     def test_validator_rejects_too_short(self):
         r = _FakeResult(text="raw")
         body = event_writer.compose_body(r, _meta())
-        result = body.validator("Too short.")
+        result = body.validator(_ABSTRACT_CALLOUT + "Too short.")
         assert not result.ok
         assert any("word" in reason.lower() for reason in result.reasons)
 
     def test_validator_rejects_too_long(self):
         r = _FakeResult(text="raw")
         body = event_writer.compose_body(r, _meta())
-        long_text = " ".join(["word"] * 400)
+        long_text = _ABSTRACT_CALLOUT + " ".join(["word"] * 400)
         result = body.validator(long_text)
         assert not result.ok
         assert any("word" in reason.lower() for reason in result.reasons)
+
+    def test_validator_rejects_missing_abstract_callout(self):
+        """Event notes MUST start with > [!abstract] Overview (v14.4)."""
+        r = _FakeResult(text="raw")
+        body = event_writer.compose_body(r, _meta())
+        # Same prose as the clean-prose test, BUT without the abstract callout.
+        no_abstract = (
+            "On August 1 we met with the consultant at the SD review in the afternoon. "
+            "We walked through the latest floor-plan revision, agreed on moving the entry "
+            "to the east elevation, and flagged the stair detail for further study. The "
+            "mechanical scope stays unchanged from the prior package. Next step is to "
+            "update the set before the next coordination meeting at the end of the month. "
+            "This is a deliberately padded paragraph to cross the minimum-word floor "
+            "cleanly and land safely inside the allowed range for a diary note body. "
+            "We left the office feeling productive and agreed to circle back before "
+            "Friday to finalise the dimensions and confirm the revised floor plate. "
+            "Everyone seemed aligned; the owner sent a thumbs up after the call ended."
+        )
+        result = body.validator(no_abstract)
+        assert not result.ok
+        assert any("abstract" in reason.lower() for reason in result.reasons)
+
+    def test_validator_rejects_abstract_callout_too_short(self):
+        r = _FakeResult(text="raw")
+        body = event_writer.compose_body(r, _meta())
+        # Abstract has 3 words — below ABSTRACT_CALLOUT_MIN_WORDS (5)
+        too_short_abs = (
+            "> [!abstract] Overview\n"
+            "> Met client today.\n"
+            "\n"
+            + " ".join(["word"] * 150)
+        )
+        result = body.validator(too_short_abs)
+        assert not result.ok
+        assert any("abstract" in r.lower() and "short" in r.lower() for r in result.reasons)
+
+
+class TestExtractAbstractCallout:
+    def test_extracts_single_line_abstract(self):
+        body = (
+            "> [!abstract] Overview\n"
+            "> SD 80% phase freeze with client on August 1.\n"
+            "\nRest of the diary paragraph here."
+        )
+        assert event_writer.extract_abstract_callout(body) == (
+            "SD 80% phase freeze with client on August 1."
+        )
+
+    def test_extracts_multi_line_abstract(self):
+        body = (
+            "> [!abstract] Overview\n"
+            "> First half of the sentence,\n"
+            "> and the second half after the line break.\n"
+            "\nDiary paragraph."
+        )
+        hint = event_writer.extract_abstract_callout(body)
+        assert "First half" in hint
+        assert "second half" in hint
+        # Joined into one line
+        assert "\n" not in hint
+
+    def test_returns_empty_when_no_abstract(self):
+        body = "Just a diary paragraph with no callout at the top."
+        assert event_writer.extract_abstract_callout(body) == ""
+
+    def test_returns_empty_on_empty_body(self):
+        assert event_writer.extract_abstract_callout("") == ""
+
+    def test_ignores_non_abstract_callouts(self):
+        body = (
+            "> [!important] Something else\n"
+            "> Not an abstract callout.\n"
+            "\n"
+            "Diary."
+        )
+        assert event_writer.extract_abstract_callout(body) == ""
 
 
 class TestRenderFinalNote:

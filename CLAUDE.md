@@ -264,26 +264,41 @@ vault-bridge maintains a **project index note** (Map of Content) at the
 root of each vault project folder, named `{project_name}.md`. This is a
 navigable overview that aggregates all event notes for the project.
 
-`scripts/project_index.py` generates and updates these notes. The index
-has fixed sections; only two are auto-derived — the rest require actual
-source content to populate and are never fabricated:
+`scripts/project_index.py` generates and updates these notes. Sections
+appear only when they have real content — empty placeholders like
+`_Not recorded._` are no longer emitted.
 
 - **Overview** — a `> [!abstract]` callout preserved verbatim across
-  updates; the user writes this by hand.
-- **Status** — inferred from event recency (`active`, `stalled`, `closed`,
-  `archived`). Updated automatically.
+  updates. The user writes this by hand. Omitted entirely when empty.
+- **Status** — inferred from event recency (`active` ≤90 days,
+  `on-hold` 90–365 days, `completed` >365 days). v14.4 dropped the
+  brittle keyword-sniffing of `summary_hint`; override by editing the
+  index `status:` frontmatter directly.
 - **Substructures** (v13+) — auto-derived when a project has events in ≥2
-  distinct subfolders. Groups events under `### SF/` headings so the user
-  can navigate to SD, DD, Meetings etc. without scrolling through all events.
-  Omitted when all events are in a single subfolder.
+  distinct subfolders. Groups events under `### SF/` headings with each
+  event's one-sentence `summary_hint` alongside its link, so the user can
+  scan SD, DD, Meetings etc. without opening every note. Omitted when
+  all events share a single subfolder.
 - **Timeline (all events)** — auto-derived: links to all event notes in
-  date order regardless of subfolder. This is the only section vault-bridge
-  writes prose for — it links, not describes.
+  date order regardless of subfolder. Renders `summary_hint` inline
+  when Substructures is absent (so one place carries the hint); stays
+  compact (dates + link only) when Substructures already carries it.
 - **Subfolders** — auto-derived: lists vault subfolders that contain events.
-- **Parties**, **Budget**, **Key Decisions**, **Open Items**, **Related
-  Projects** — placeholder sections; vault-bridge never fills these in.
-  They exist so the user has a consistent place to record the information
-  manually.
+- **Parties** — v14.4: aggregated from `events[].parties` frontmatter
+  lists, de-duplicated first-seen, rendered as `- <name>` bullets AND
+  as a YAML list in frontmatter. User-edited content in an existing
+  Parties section wins over aggregation. Omitted when both sources
+  are empty.
+- **Budget**, **Key Decisions**, **Open Items**, **Related Projects** —
+  surfaced only from user-edited existing content; never synthesised.
+  Omitted when empty.
+
+**`summary_hint` contract:** every event-note body MUST start with
+`> [!abstract] Overview\n> <one sentence, 5–25 words>`. The event-writer
+prompt enforces this at write time; the validator rejects notes without
+it. Callers (retro-scan, heartbeat-scan, reconcile) derive the
+`ProjectIndexEvent.summary_hint` by reading the just-written note body
+via the obsidian CLI and passing it to `event_writer.extract_abstract_callout`.
 
 A companion `{project_name}.base` (Obsidian Bases file) is generated
 alongside the index note, providing a tabular event table filtered to the

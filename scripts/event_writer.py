@@ -16,6 +16,7 @@ The fabrication firewall lives inside `EventBodyValidator`.
 
 Python 3.9 compatible.
 """
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, List, Optional, Protocol
@@ -33,8 +34,18 @@ STOP_WORDS = [
 VERBATIM_PASTE_MIN_CHARS = 60
 
 # Word count bounds for event-note bodies.
+# The abstract callout is NOT counted — it's a separate structured
+# field for MOC builders and does not contribute to the diary prose.
 MIN_WORDS = 100
 MAX_WORDS = 200
+
+# Abstract-callout contract. Every event-note body MUST start with a
+# `> [!abstract] Overview` callout whose content is a single sentence
+# (5-25 words) summarising what happened at the event. project_index
+# extracts this sentence as the `summary_hint` for each event; without
+# it the MOC cannot render a one-line preview.
+ABSTRACT_CALLOUT_MIN_WORDS = 5
+ABSTRACT_CALLOUT_MAX_WORDS = 25
 
 # Image-grid integration: the note body writer joins embeds with a single
 # newline (no blank line) so Obsidian's Minimal theme renders them as a grid.
@@ -127,6 +138,52 @@ def _render_event_note_prompt(result, meta: dict) -> str:
     )
 
 
+_ABSTRACT_CALLOUT_RE = re.compile(
+    # Matches `> [!abstract] <optional title>` followed by any number of
+    # continuation lines starting with `> ` (blockquote) or `>`.
+    r"^\s*>\s*\[!abstract\][^\n]*\n((?:\s*>[^\n]*\n?)*)",
+    re.MULTILINE,
+)
+
+
+def extract_abstract_callout(body: str) -> str:
+    """Return the content of the first `> [!abstract] ...` callout in body.
+
+    Strips the `> ` prefix from each line and collapses the resulting
+    lines into a single space-joined sentence. Returns '' when no
+    abstract callout is present.
+
+    This is the canonical way to derive `ProjectIndexEvent.summary_hint`
+    from an event note. Callers (retro-scan, heartbeat-scan, reconcile)
+    read the written note back via obsidian CLI and pass the body to
+    this helper.
+    """
+    m = _ABSTRACT_CALLOUT_RE.search(body or "")
+    if m is None:
+        return ""
+    raw_lines = m.group(1).splitlines()
+    cleaned = []
+    for line in raw_lines:
+        stripped = line.lstrip()
+        if stripped.startswith("> "):
+            cleaned.append(stripped[2:])
+        elif stripped.startswith(">"):
+            cleaned.append(stripped[1:])
+        else:
+            cleaned.append(stripped)
+    text = " ".join(part.strip() for part in cleaned if part.strip())
+    return text.strip()
+
+
+def _body_without_abstract(body: str) -> str:
+    """Return the body with the leading abstract callout removed.
+
+    Used for word-count validation — the abstract is a structured field
+    and does not count toward the diary prose length.
+    """
+    return _ABSTRACT_CALLOUT_RE.sub("", body or "", count=1).lstrip()
+
+
 def validate_event_note_body(
     body: str,
     raw_text: Optional[str] = None,
@@ -136,6 +193,15 @@ def validate_event_note_body(
     This is the single source of truth for what counts as a valid
     event-note body. Both the write-time closure (via `_make_validator`)
     and the post-hoc auditor (`scripts/validate_event_note.py`) call it.
+
+    Checks:
+    - Leading `> [!abstract] Overview` callout is present, with a
+      single sentence of `ABSTRACT_CALLOUT_MIN_WORDS..MAX_WORDS` words.
+      The MOC relies on this to populate `summary_hint`.
+    - Body word count (excluding the abstract) within `MIN_WORDS..MAX_WORDS`.
+    - No `STOP_WORDS` phrases present.
+    - No verbatim-paste run ≥ `VERBATIM_PASTE_MIN_CHARS` chars from
+      `raw_text`. Skipped when `raw_text` is None (post-hoc audits).
 
     Args:
         body: the note body text, without frontmatter.
@@ -148,9 +214,30 @@ def validate_event_note_body(
         ValidationResult.ok is True when no fabrication indicators fire.
     """
     reasons: List[str] = []
-    stripped = body.strip()
-    # Word count
-    words = stripped.split()
+    stripped = (body or "").strip()
+
+    # Abstract-callout requirement
+    abstract = extract_abstract_callout(stripped)
+    if not abstract:
+        reasons.append(
+            "missing `> [!abstract] Overview` callout at the top of the body"
+        )
+    else:
+        abs_words = len(abstract.split())
+        if abs_words < ABSTRACT_CALLOUT_MIN_WORDS:
+            reasons.append(
+                f"abstract callout too short ({abs_words} words; "
+                f"min {ABSTRACT_CALLOUT_MIN_WORDS})"
+            )
+        elif abs_words > ABSTRACT_CALLOUT_MAX_WORDS:
+            reasons.append(
+                f"abstract callout too long ({abs_words} words; "
+                f"max {ABSTRACT_CALLOUT_MAX_WORDS})"
+            )
+
+    # Word count — of the prose body, excluding the abstract callout
+    prose = _body_without_abstract(stripped) if abstract else stripped
+    words = prose.split()
     n = len(words)
     if n < MIN_WORDS:
         reasons.append(f"word count {n} below minimum {MIN_WORDS}")

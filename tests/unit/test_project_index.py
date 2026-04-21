@@ -105,32 +105,48 @@ def test_infer_status_exactly_90_days():
     assert status.status == "active"
 
 
-def test_infer_status_override_completed_in_hint():
-    today = date(2024, 9, 1)
+def test_infer_status_hint_keywords_no_longer_override_date_rule():
+    """v14.4: keyword-sniffing on summary_hint was removed.
+
+    Previously hints containing "completed"/"cancelled"/"archived" forced a
+    matching status regardless of date. The check almost never fired
+    because callers rarely populated summary_hint, and when it did fire
+    it was as likely to be a false positive (e.g. a note about reviewing
+    a *different* project that was cancelled) as a real signal. Status
+    is now pure-date-based; users override by editing the index directly.
+    """
+    today = date(2024, 9, 1)  # 17 days after the event → well within "active"
     events = _make_events(
         ("2024-08-15", "note", "SD", "high", "Project completed successfully."),
     )
     status = pi.infer_status(events, today)
-    assert status.status == "completed"
+    # Date rule wins: event is recent → active, not "completed".
+    assert status.status == "active"
 
 
-def test_infer_status_override_cancelled_in_hint():
-    today = date(2024, 9, 1)
-    events = _make_events(
-        ("2024-08-15", "note", "SD", "high", "Project cancelled due to budget."),
-    )
-    status = pi.infer_status(events, today)
-    # cancelled maps to "archived" or similar — check spec says "archived"
-    assert status.status in ("archived", "cancelled")
-
-
-def test_infer_status_override_archived_in_hint():
-    today = date(2024, 9, 1)
-    events = _make_events(
-        ("2024-08-15", "note", "SD", "high", "Project archived for future reference."),
-    )
-    status = pi.infer_status(events, today)
-    assert status.status == "archived"
+def test_infer_status_aggregates_parties_from_events():
+    """parties on each ProjectIndexEvent are unioned into ProjectIndexStatus.parties."""
+    events = [
+        pi.ProjectIndexEvent(
+            event_date="2024-08-15",
+            note_filename="n1",
+            subfolder="SD",
+            content_confidence="high",
+            summary_hint="",
+            parties=["Alice", "Bob"],
+        ),
+        pi.ProjectIndexEvent(
+            event_date="2024-09-01",
+            note_filename="n2",
+            subfolder="DD",
+            content_confidence="high",
+            summary_hint="",
+            parties=["Bob", "Carol"],
+        ),
+    ]
+    status = pi.infer_status(events, date(2024, 10, 1))
+    # De-duplicated, first-seen order
+    assert status.parties == ["Alice", "Bob", "Carol"]
 
 
 def test_infer_status_timeline_start_is_min_date():
@@ -360,10 +376,17 @@ def test_generate_index_subfolders_section():
     assert "- CA" in text
 
 
-def test_generate_index_placeholder_overview_when_no_existing():
+def test_generate_index_omits_overview_section_when_no_existing():
+    """v14.4: empty Overview section is omitted, not placeholder-filled.
+
+    Previously the index emitted `_No overview yet. Edit this note…_`
+    for every fresh project, which was noise. The section only appears
+    once the user has typed an overview.
+    """
     events = _make_events(("2024-08-15", "n", "SD"))
     text = pi.generate_index("Proj", "arch", events, ["SD"], None, date(2024, 10, 1))
-    assert "_No overview yet" in text or "No overview" in text
+    assert "> [!abstract] Overview" not in text
+    assert "_No overview yet" not in text
 
 
 def test_generate_index_preserves_existing_overview():
@@ -388,26 +411,35 @@ def test_generate_index_preserves_existing_key_decisions():
     assert "structural system" in text
 
 
-def test_generate_index_fabrication_firewall_no_auto_parties():
-    """Parties section must not be auto-generated from event content."""
+def test_generate_index_fabrication_firewall_no_auto_parties_from_prose():
+    """Parties are NEVER extracted from prose in summary_hint.
+
+    v14.4: parties come only from structured `event.parties` lists (from
+    frontmatter) or user-edited existing content. A name appearing in
+    prose never seeds a Parties line.
+    """
     events = _make_events(
         ("2024-08-15", "n", "SD", "high", "Meeting with John and Sarah about budget."),
     )
     text = pi.generate_index("Proj", "arch", events, ["SD"], None, date(2024, 10, 1))
-    # No existing parties → placeholder, NOT auto-extracted names
-    parties_section = text.split("## Parties")[1].split("##")[0] if "## Parties" in text else ""
-    assert "John" not in parties_section
-    assert "Sarah" not in parties_section
+    # Parties section should NOT exist at all — no structured data, no existing.
+    assert "## Parties" not in text
 
 
 def test_generate_index_fabrication_firewall_no_auto_budget():
-    """Budget must not be auto-extracted from event summary hints."""
+    """Budget section is never synthesised from summary-hint prose.
+
+    v14.4: the summary_hint IS surfaced on Timeline rows (that is the
+    point), so a hint containing "¥5M" will appear there. What the
+    firewall forbids is extracting that figure INTO a `## Budget`
+    section as if it were structured data.
+    """
     events = _make_events(
         ("2024-08-15", "n", "SD", "high", "Budget approved at ¥5M."),
     )
     text = pi.generate_index("Proj", "arch", events, ["SD"], None, date(2024, 10, 1))
-    budget_section = text.split("## Budget")[1].split("##")[0] if "## Budget" in text else ""
-    assert "5M" not in budget_section
+    # Budget section must be absent — no structured budget, no user-edited content.
+    assert "## Budget" not in text
 
 
 def test_generate_index_user_sections_appended():
@@ -431,10 +463,65 @@ def test_generate_index_tags_include_domain_and_index():
     assert "index" in text
 
 
-def test_generate_index_placeholder_parties_when_no_existing():
+def test_generate_index_omits_empty_placeholder_sections():
+    """v14.4: Parties / Budget / Key Decisions / Open Items / Related Projects
+    sections are omitted entirely when empty, instead of emitting
+    `_Not recorded._` × 6 for every freshly-generated index.
+    """
     events = _make_events(("2024-08-15", "n", "SD"))
     text = pi.generate_index("Proj", "arch", events, ["SD"], None, date(2024, 10, 1))
-    assert "_Not recorded" in text or "Not recorded" in text
+    for section in (
+        "## Parties",
+        "## Budget",
+        "## Key Decisions",
+        "## Open Items",
+        "## Related Projects",
+    ):
+        assert section not in text, f"{section} should be omitted when empty"
+    assert "_Not recorded._" not in text
+
+
+def test_generate_index_renders_aggregated_parties_from_events():
+    """When events carry parties frontmatter, Parties section is rendered."""
+    events = [
+        pi.ProjectIndexEvent(
+            event_date="2024-08-15", note_filename="n1", subfolder="SD",
+            content_confidence="high", summary_hint="",
+            parties=["Alice", "Bob"],
+        ),
+    ]
+    text = pi.generate_index("Proj", "arch", events, ["SD"], None, date(2024, 10, 1))
+    assert "## Parties" in text
+    assert "- Alice" in text
+    assert "- Bob" in text
+
+
+def test_generate_index_timeline_includes_summary_hint_when_single_subfolder():
+    """Timeline rows show the one-liner hint when there is no Substructures."""
+    events = _make_events(
+        ("2024-08-15", "n1", "SD", "high", "SD 80% phase freeze with client."),
+    )
+    text = pi.generate_index("Proj", "arch", events, ["SD"], None, date(2024, 10, 1))
+    assert "## Timeline (all events)" in text
+    assert "## Substructures" not in text
+    # Hint appears on the timeline line
+    assert "SD 80% phase freeze with client." in text
+
+
+def test_generate_index_timeline_compact_when_substructures_present():
+    """Timeline rows stay compact (no hint) when Substructures carries hints."""
+    events = _make_events(
+        ("2024-08-15", "n1", "SD", "high", "SD-phase kickoff."),
+        ("2024-09-15", "n2", "DD", "high", "DD-phase review."),
+    )
+    text = pi.generate_index("Proj", "arch", events, ["SD", "DD"], None, date(2024, 10, 1))
+    assert "## Substructures" in text
+    # The Substructures block holds the hints …
+    assert "SD-phase kickoff." in text
+    # … and the Timeline (all events) block stays compact.
+    tl_block = text.split("## Timeline (all events)", 1)[1].split("## Subfolders", 1)[0]
+    assert "SD-phase kickoff." not in tl_block
+    assert "DD-phase review." not in tl_block
 
 
 def test_generate_index_idempotent():
