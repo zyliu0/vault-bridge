@@ -1,5 +1,52 @@
 # Changelog
 
+## v14.6.0 — pipeline simplification (A, B, D from design review)
+
+Three targeted simplifications from an internal pipeline review,
+shipped together because they are independent and small.
+
+### A — handler dispatch is now table-driven
+
+`scripts/file_type_handlers.read_text()` and `extract_images()` used
+to be if/elif chains on `cfg.category`. Adding a new category (e.g.
+audio transcription, video thumbnail extraction) required editing
+both chains. Replaced with `_TEXT_DISPATCH` and `_IMAGE_DISPATCH`
+dicts keyed on category → dispatch function. New category = one
+line in each table. Delegated categories (CAD, vector-ai, etc.)
+continue to go through `handler_dispatcher` as a default branch.
+
+No public API change. `file_type_handlers.HANDLERS` and
+`package_registry.BUILTIN_REGISTRY` are untouched — they serve
+different concerns (install-time vs runtime dispatch).
+
+### B — `image_pipeline.py` merged into `scan_pipeline`
+
+`scripts/image_pipeline.py` predated the v14 scan-pipeline
+unification and kept its own code paths. Two code paths, two test
+suites, one actual behaviour. Deleted the module + 746 lines of
+tests; migrated `reconcile.md --re-read` to call
+`transport_loader.fetch_to_local` followed by
+`scan_pipeline.process_file` directly. Coverage is preserved by
+the existing `test_scan_pipeline.py` suite (which already tested
+extract + compress + vault-write).
+
+### D — `ScanResult.attachments_subfolder` removed
+
+Field had been `""` since v14.0 (the per-event subfolder layout
+was dropped then, but the field stayed for v13-serialisation
+compat). Every caller set it to `""`; every test fixture set it
+to `""`. Removed the field, the parameter, and all references.
+
+### Totals
+- Net LOC removed: ~995 (231 image_pipeline + 746 tests + ~15 attachments_subfolder + small touches elsewhere).
+- Files deleted: `scripts/image_pipeline.py`, `tests/unit/test_image_pipeline.py`, `tests/integration/test_image_pipeline_integration.py`.
+- API changes: none public; `ScanResult.attachments_subfolder` removed
+  (no in-tree callers read it).
+
+All 1743 tests pass.
+
+---
+
 ## v14.5.1 — ghost-note guard (llm_wiki research follow-up)
 
 Applied one pattern from a review of nashsu/llm_wiki's ingest pipeline:

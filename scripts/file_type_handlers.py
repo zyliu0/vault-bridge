@@ -376,62 +376,64 @@ def _plain_read_text(path: str) -> str:
         return ""
 
 
-# Categories that support text extraction, mapped to their reader helper.
-_TEXT_READERS = {
-    "document-pdf": _pdf_read_text,
-    "document-office": None,  # dispatched per sub-format below
-    "text-plain": _plain_read_text,
+# ---------------------------------------------------------------------------
+# Dispatch tables (v14.8 unification)
+# ---------------------------------------------------------------------------
+#
+# Before v14.8, read_text() and extract_images() were long if/elif chains on
+# `cfg.category`. Adding a new category required editing both chains AND
+# the registry AND (for delegated types) the handler_dispatcher module.
+#
+# Now the dispatch is table-driven. Each category has two entries:
+#
+#   _TEXT_DISPATCH[category] = (needs_ext: bool, fn)
+#     fn(path, workdir, ext) -> str — same signature regardless of needs
+#     When not needs_ext, `ext` is ignored.
+#
+#   _IMAGE_DISPATCH[category] = fn
+#     fn(path, workdir, ext) -> List[Path] — same uniform signature.
+#
+# Adding a new category is one entry in each table. Categories that should
+# fall through to `handler_dispatcher` (CAD, vector-ai, raster-psd, etc.)
+# do NOT need entries — they are handled by the default branch that checks
+# `handler_dispatcher.is_delegated`.
+
+
+def _extract_text_pdf(path, workdir, ext): return _pdf_read_text(path)
+def _extract_text_plain(path, workdir, ext): return _plain_read_text(path)
+
+
+def _extract_text_office(path, workdir, ext):
+    if ext in ("docx", "doc"):
+        return _docx_read_text(path)
+    if ext in ("pptx", "ppt"):
+        return _pptx_read_text(path)
+    # xlsx/xls — no text extraction wired yet
+    return ""
+
+
+def _extract_images_passthrough(path, workdir, ext):
+    return [Path(path)]
+
+
+def _extract_images_container(path, workdir, ext):
+    return _delegate_extract_images(Path(path), ext)
+
+
+_TEXT_DISPATCH = {
+    "document-pdf": _extract_text_pdf,
+    "document-office": _extract_text_office,
+    "text-plain": _extract_text_plain,
 }
 
 
-def read_text(path: str, workdir: Optional[str] = None) -> str:
-    """Extract text from path according to its file type.
+_IMAGE_DISPATCH = {
+    "image-raster": _extract_images_passthrough,
+    "image-vector": _extract_images_passthrough,
+    "document-pdf": _extract_images_container,
+    "document-office": _extract_images_container,
+}
 
-    When `workdir` is provided and the file's category is delegated
-    (CAD, legacy Office, etc.), the per-extension handler module at
-    `<workdir>/.vault-bridge/handlers/<category>_<ext>.py` is loaded
-    and its `read_text` is called. Falls back to '' if the handler
-    is missing or fails.
-
-    Returns:
-        Extracted text as a string, or '' when:
-        - the file type doesn't support text extraction
-        - the file doesn't exist
-        - any extraction error occurs
-        Never raises.
-    """
-    cfg = get_handler(path)
-    if cfg is None or not cfg.extract_text:
-        return ""
-
-    p = Path(path)
-    if not p.exists():
-        return ""
-
-    ext = p.suffix.lstrip(".").lower()
-
-    if cfg.category == "document-pdf":
-        return _pdf_read_text(path)
-    elif cfg.category == "document-office":
-        if ext in ("docx", "doc"):
-            return _docx_read_text(path)
-        elif ext in ("pptx", "ppt"):
-            return _pptx_read_text(path)
-        else:
-            # xlsx/xls — no text extraction
-            return ""
-    elif cfg.category == "text-plain":
-        return _plain_read_text(path)
-    elif handler_dispatcher.is_delegated(cfg.category):
-        return handler_dispatcher.read_text(workdir, cfg.category, path)
-    else:
-        return ""
-
-
-# ---------------------------------------------------------------------------
-# _delegate_extract_images — thin wrapper around extract_embedded_images
-# so tests can mock it cleanly
-# ---------------------------------------------------------------------------
 
 def _delegate_extract_images(src_path: Path, file_type: str) -> List[Path]:
     """Delegate to extract_embedded_images.extract for container types."""
@@ -444,19 +446,40 @@ def _delegate_extract_images(src_path: Path, file_type: str) -> List[Path]:
         return []
 
 
+def read_text(path: str, workdir: Optional[str] = None) -> str:
+    """Extract text from `path` according to its file type.
+
+    Looks up the category via `get_handler()`, then dispatches via
+    `_TEXT_DISPATCH`. Unknown categories that are declared delegated
+    (CAD, legacy Office, etc.) go to `handler_dispatcher`, which loads
+    the per-extension module from `<workdir>/.vault-bridge/handlers/`.
+    Everything else returns '' without raising.
+    """
+    cfg = get_handler(path)
+    if cfg is None or not cfg.extract_text:
+        return ""
+
+    p = Path(path)
+    if not p.exists():
+        return ""
+
+    ext = p.suffix.lstrip(".").lower()
+
+    fn = _TEXT_DISPATCH.get(cfg.category)
+    if fn is not None:
+        return fn(path, workdir, ext)
+    if handler_dispatcher.is_delegated(cfg.category):
+        return handler_dispatcher.read_text(workdir, cfg.category, path)
+    return ""
+
+
 def extract_images(path: str, workdir: Optional[str] = None) -> List[Path]:
-    """Extract or return images for the given file path.
+    """Return the images for `path` according to its file type.
 
-    - image-raster / image-vector → returns [Path(path)] (passthrough).
-    - document-pdf / document-office → delegates to extract_embedded_images.
-    - CAD / legacy-office / vector-ai / raster-psd (v14.3, F1) → dispatches
-      to per-extension handler at `<workdir>/.vault-bridge/handlers/`. When
-      `workdir` is None the dispatch is a no-op — the caller (scan_pipeline)
-      is responsible for threading workdir through; tests and direct library
-      use that don't need these types work unchanged.
-    - Everything else (video, audio, text-plain, archive, nonexistent) → [].
-
-    Never raises.
+    Same dispatch shape as `read_text`: `_IMAGE_DISPATCH` handles the
+    core categories; delegated categories (CAD, vector-ai, raster-psd,
+    legacy-office, 3dm) go through `handler_dispatcher` so the
+    per-extension workdir handler can render pages.
     """
     cfg = get_handler(path)
     if cfg is None or not cfg.extract_images:
@@ -468,14 +491,12 @@ def extract_images(path: str, workdir: Optional[str] = None) -> List[Path]:
 
     ext = p.suffix.lstrip(".").lower()
 
-    if cfg.category in ("image-raster", "image-vector"):
-        return [p]
-    elif cfg.category in ("document-pdf", "document-office"):
-        return _delegate_extract_images(p, ext)
-    elif handler_dispatcher.is_delegated(cfg.category):
+    fn = _IMAGE_DISPATCH.get(cfg.category)
+    if fn is not None:
+        return fn(path, workdir, ext)
+    if handler_dispatcher.is_delegated(cfg.category):
         return handler_dispatcher.extract_images(workdir, cfg.category, path)
-    else:
-        return []
+    return []
 
 
 def handle(path: str, workdir: Optional[str] = None) -> HandlerResult:

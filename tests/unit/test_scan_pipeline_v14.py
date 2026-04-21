@@ -107,7 +107,6 @@ class TestImageCaps:
                         vault_name="V",
                         dry_run=False,
                     )
-        assert result.attachments_subfolder == ""
         for dst in captured:
             # No `--slug/` between `_Attachments/` and the jpeg filename.
             assert "_Attachments/2026-04-19--" not in dst or dst.rsplit("/", 1)[1].startswith("2026-04-19--")

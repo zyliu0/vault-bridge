@@ -34,7 +34,6 @@ class _FakeResult:
         sources_read=None,
         read_bytes=0,
         image_grid=False,
-        attachments_subfolder="",
     ):
         self.text = text
         self.attachments = attachments or []
@@ -47,7 +46,6 @@ class _FakeResult:
         self.sources_read = sources_read or []
         self.read_bytes = read_bytes
         self.image_grid = image_grid
-        self.attachments_subfolder = attachments_subfolder
 
 
 def _meta(

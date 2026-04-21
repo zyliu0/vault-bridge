@@ -66,7 +66,6 @@ def test_full_pipeline_path_cap_curation_and_body(tmp_path):
     assert len(result.image_caption_prompts) == 15
     assert result.images_embedded == 10
     assert len(result.attachments) == 10
-    assert result.attachments_subfolder == ""  # Flat layout, no subfolder
     assert result.image_grid is True
 
     # 2. Fake vision — return a caption that references the project for some.

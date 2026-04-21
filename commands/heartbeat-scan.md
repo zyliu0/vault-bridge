@@ -451,7 +451,6 @@ For each delta file, follow the same per-event pipeline as retro-scan:
    - `result.read_bytes` — use for `read_bytes` frontmatter field
    - `result.image_grid` — True when ≥3 images embedded; set `cssclasses: [img-grid]` and call `event_writer.assemble_note_body` (row-chunked embeds; v14.3 F5)
    - `result.image_candidate_paths` / `result.image_caption_prompts` — run vision over each prompt, feed captions to `image_vision.select_top_k` to choose ≤10 embeds
-   - `result.attachments_subfolder` — deprecated in v14, always empty
    - `result.warnings` / `result.errors` — log these for the heartbeat memory report
 
    **No-content enforcement:** readable files yielding no text and no images return `skipped=True, skip_reason="no_content"`. No metadata stub is written for them.

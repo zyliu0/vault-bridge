@@ -796,7 +796,6 @@ print(json.dumps({
     'warnings': result.warnings,
     'errors': result.errors,
     'image_grid': result.image_grid,
-    'attachments_subfolder': result.attachments_subfolder,
 }))
 ```
 
@@ -813,7 +812,7 @@ The registry automatically handles routing:
 
 **No-content enforcement (`skip_on_no_content=True`, the default):** If `result.text == ""` AND `result.images_embedded == 0` for a readable file type, the result has `skipped=True, skip_reason="no_content"`. No note is written. This is the fabrication firewall — readable files that yield nothing are dropped, not mocked up as metadata-only notes.
 
-**Image caps (v14):** `IMAGE_CANDIDATE_CAP = 20` bounds how many images are compressed per event; `IMAGE_EMBED_CAP = 10` bounds how many are embedded. Extra images are dropped — notes are event descriptions, not photographic records. `result.attachments_subfolder` is always `""` (the v13 subfolder split was removed).
+**Image caps (v14):** `IMAGE_CANDIDATE_CAP = 20` bounds how many images are compressed per event; `IMAGE_EMBED_CAP = 10` bounds how many are embedded. Extra images are dropped — notes are event descriptions, not photographic records. Attachments always land flat under `<project>/_Attachments/` (the v13 subfolder split was removed in v14, and the `attachments_subfolder` field was dropped from `ScanResult` in v14.6).
 
 **Image grid:** When `result.image_grid == True` (≥3 images embedded), set `cssclasses: [img-grid]` in frontmatter and call `event_writer.assemble_note_body(prose, attachments)`, which chunks embeds into rows of 3 with a blank line between rows. The Minimal theme renders each paragraph as its own grid row; a single paragraph of 10 embeds collapses into one 10-column strip, which is why the row chunking matters (v14.3, F5). Image grids render only in Reading view — toggle with Cmd/Ctrl+E if the layout looks wrong.
 
@@ -832,7 +831,6 @@ Use the returned `ScanResult` fields to populate note body and frontmatter:
 - `ScanResult.read_bytes` — use for `read_bytes` frontmatter field
 - `ScanResult.image_grid` — True when ≥3 images embedded; set `cssclasses: [img-grid]` and use `event_writer.assemble_note_body` (chunks embeds into rows of 3; Reading view only)
 - `ScanResult.image_candidate_paths` / `ScanResult.image_caption_prompts` — run vision over every prompt (see 6e-image), then pick ≤10 via `image_vision.select_top_k`
-- `ScanResult.attachments_subfolder` — deprecated in v14; always empty
 
 Use `process_batch(source_paths, ...)` to process all events at once (no
 limit by default), or call `process_file` in a loop for single-file control.

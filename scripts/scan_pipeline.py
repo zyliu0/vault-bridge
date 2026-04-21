@@ -109,7 +109,6 @@ class ScanResult:
     sources_read: int
     content_confidence: str
     image_grid: bool = False            # True when images_embedded >= IMAGE_GRID_MIN
-    attachments_subfolder: str = ""     # v14: always "" — kept for v13 callers.
     # v14: every compressed candidate image and the prompt the caller runs to
     # caption it (order-aligned). Populated even when images_embedded is
     # capped at IMAGE_EMBED_CAP, so the caller can see everything that was
@@ -163,7 +162,6 @@ def _make_skipped(
         sources_read=0,
         content_confidence="none",
         image_grid=False,
-        attachments_subfolder="",
         image_candidate_paths=[],
         image_caption_prompts=[],
         image_captions=[],
@@ -272,7 +270,7 @@ def _process_images(
         a local ephemeral index is used so per-event dedup still applies.
 
     Returns:
-        (attachments, images_embedded, image_grid, "",
+        (attachments, images_embedded, image_grid,
          warnings, errors, candidate_paths, caption_prompts)
     """
     # Lazy import — avoid cycles.
@@ -296,7 +294,7 @@ def _process_images(
         raw_images = file_type_handlers.extract_images(source_path, workdir=workdir)
     except Exception as exc:
         errors.append(f"extract_images failed: {exc}")
-        return attachments, images_embedded, False, "", warnings, errors, candidate_paths, caption_prompts
+        return attachments, images_embedded, False, warnings, errors, candidate_paths, caption_prompts
 
     if not raw_images:
         # v14.3 (F1-d) + v14.5 (field-review Issue 1): readable-handler-
@@ -323,7 +321,7 @@ def _process_images(
                 if strict_handlers:
                     errors.append(msg)
                     return (
-                        attachments, images_embedded, False, "",
+                        attachments, images_embedded, False,
                         warnings, errors, candidate_paths, caption_prompts,
                     )
             else:
@@ -334,7 +332,7 @@ def _process_images(
                     f"for DWG, libheif for HEIC) or inspect the file manually."
                 )
             warnings.append(msg)
-        return attachments, images_embedded, False, "", warnings, errors, candidate_paths, caption_prompts
+        return attachments, images_embedded, False, warnings, errors, candidate_paths, caption_prompts
 
     capped_raw = list(raw_images)[:IMAGE_CANDIDATE_CAP]
     if len(raw_images) > IMAGE_CANDIDATE_CAP:
@@ -357,7 +355,7 @@ def _process_images(
             warnings.append(f"compress error for {img_path}: {exc}")
 
     if not compressed_paths:
-        return attachments, images_embedded, False, "", warnings, errors, candidate_paths, caption_prompts
+        return attachments, images_embedded, False, warnings, errors, candidate_paths, caption_prompts
 
     # Record candidates + caption prompts for every compressed image — even
     # beyond the embed cap, so the caller can run vision over them and
@@ -443,7 +441,7 @@ def _process_images(
             errors.append(f"vault write failed for {compressed.name}: {err}")
 
     image_grid = images_embedded >= IMAGE_GRID_MIN
-    return attachments, images_embedded, image_grid, "", warnings, errors, candidate_paths, caption_prompts
+    return attachments, images_embedded, image_grid, warnings, errors, candidate_paths, caption_prompts
 
 
 # ---------------------------------------------------------------------------
@@ -517,7 +515,6 @@ def process_file(
             sources_read=0,
             content_confidence="none",
             image_grid=False,
-            attachments_subfolder="",
         )
 
 
@@ -557,7 +554,6 @@ def _process_file_inner(
     attachments: List[str] = []
     images_embedded = 0
     image_grid = False
-    attachments_subfolder = ""
     warnings: List[str] = []
     errors: List[str] = []
 
@@ -586,7 +582,7 @@ def _process_file_inner(
         with tempfile.TemporaryDirectory() as tmp_str:
             tmp_dir = Path(tmp_str)
             (
-                img_attachments, img_embedded, img_grid, img_subfolder,
+                img_attachments, img_embedded, img_grid,
                 img_warnings, img_errors, img_candidates, img_prompts,
             ) = _process_images(
                 source_path=source_path,
@@ -603,7 +599,6 @@ def _process_file_inner(
             images_embedded += img_embedded
             if img_grid:
                 image_grid = True
-            attachments_subfolder = img_subfolder
             warnings.extend(img_warnings)
             errors.extend(img_errors)
             candidate_paths = img_candidates
@@ -638,7 +633,6 @@ def _process_file_inner(
         sources_read=sources_read,
         content_confidence=content_confidence,
         image_grid=image_grid,
-        attachments_subfolder=attachments_subfolder,
         image_candidate_paths=candidate_paths,
         image_caption_prompts=caption_prompts,
         image_captions=[],
@@ -720,7 +714,6 @@ def process_batch(
                     sources_read=0,
                     content_confidence="none",
                     image_grid=False,
-                    attachments_subfolder="",
                 )
         else:
             result = process_file(
@@ -768,7 +761,6 @@ def _process_images_only(
     attachments: List[str] = []
     images_embedded = 0
     image_grid = False
-    attachments_subfolder = ""
     warnings: List[str] = []
     errors: List[str] = []
     candidate_paths: List[str] = []
@@ -778,7 +770,7 @@ def _process_images_only(
         with tempfile.TemporaryDirectory() as tmp_str:
             tmp_dir = Path(tmp_str)
             (
-                attachments, images_embedded, image_grid, attachments_subfolder,
+                attachments, images_embedded, image_grid,
                 warnings, errors, candidate_paths, caption_prompts,
             ) = _process_images(
                 source_path=source_path,
@@ -809,7 +801,6 @@ def _process_images_only(
             sources_read=0,
             content_confidence="none",
             image_grid=False,
-            attachments_subfolder="",
             image_candidate_paths=candidate_paths,
             image_caption_prompts=caption_prompts,
             image_captions=[],
@@ -829,7 +820,6 @@ def _process_images_only(
         sources_read=0,
         content_confidence="none",
         image_grid=image_grid,
-        attachments_subfolder=attachments_subfolder,
         image_candidate_paths=candidate_paths,
         image_caption_prompts=caption_prompts,
         image_captions=[],

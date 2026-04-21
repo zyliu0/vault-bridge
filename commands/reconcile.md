@@ -471,23 +471,36 @@ the filename):
 
 ```bash
 python3 -c "
-import sys, json, tempfile
+import sys, json
 from pathlib import Path
 sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
-import image_pipeline
+import scan_pipeline, transport_loader
 
-# Only process if source_path is image-bearing
-with tempfile.TemporaryDirectory() as tmpdir:
-    result = image_pipeline.process_source_for_images(
-        workdir=Path.cwd(),
-        vault_name='$VAULT_NAME',
-        archive_path='$SOURCE_PATH',
-        file_type='$FILE_TYPE',
-        event_date='$EVENT_DATE',
-        project_vault_path='$PROJECT_PATH',
-        out_tempdir=Path(tmpdir),
-    )
-    print(json.dumps(result))
+# v14.7: image_pipeline was merged into scan_pipeline. Fetch the source
+# via the domain's transport, then process through the unified pipeline
+# which handles extraction + compression + attachment dedup + vault write.
+try:
+    local_path = transport_loader.fetch_to_local(Path.cwd(), '$SOURCE_PATH')
+except Exception as exc:
+    print(json.dumps({'source_images': ['$SOURCE_PATH'], 'attachments': [], 'images_embedded': 0, 'warnings': [], 'errors': [f'transport failed: {exc}']}))
+    sys.exit(0)
+
+result = scan_pipeline.process_file(
+    source_path=str(local_path),
+    workdir=str(Path.cwd()),
+    vault_project_path='$PROJECT_PATH',
+    event_date='$EVENT_DATE',
+    vault_name='$VAULT_NAME',
+    skip_on_no_content=False,  # reconcile --re-read wants to surface re-reads even if empty
+)
+
+print(json.dumps({
+    'source_images': ['$SOURCE_PATH'],
+    'attachments': [a[3:-2] for a in result.attachments if a.startswith('![[') and a.endswith(']]')],
+    'images_embedded': result.images_embedded,
+    'warnings': list(result.warnings),
+    'errors': list(result.errors),
+}))
 "
 ```
 

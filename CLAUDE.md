@@ -446,7 +446,10 @@ Each stage is implemented in a dedicated script:
 - `extract_embedded_images.py` — extracts images from PDF/DOCX/PPTX containers
 - `compress_images.py` — compresses to JPEG, strips EXIF, deduplicates by content hash
 - `vault_binary.py` — writes binary files to Obsidian vault via `obsidian eval`
-- `image_pipeline.py` — chains all stages for scan commands
+- `scan_pipeline.py` — chains all stages; the v14.7 unified entry point.
+  `image_pipeline.py` (removed) was a thin wrapper that predated the
+  unification; callers now invoke `scan_pipeline.process_file` directly
+  after fetching via `transport_loader.fetch_to_local`.
 
 **Transport modules:**
 
@@ -567,8 +570,6 @@ Key `ScanResult` fields (v14):
 - `image_candidate_paths: list[str]` — every compressed candidate image path before the embed cap is applied; `vision_runner` loops these to produce captions
 - `image_caption_prompts: list[str]` — one caption prompt per candidate, aligned by index; `vision_runner.run_captions` executes them (previously left to the skill runner, which almost always skipped; v14.5 Issue 2)
 - `image_captions: list[str]` — populated by `scripts/vision_runner.py`; passed to `event_writer.compose_body` so the note body can reference what was seen; persisted in the event-note frontmatter for reconcile reuse
-- `attachments_subfolder: str` — deprecated in v14: always empty. Kept on the dataclass so v13 serialisations do not break.
-
 `IMAGE_CANDIDATE_CAP = 20` and `IMAGE_EMBED_CAP = 10`: the pipeline compresses at most 20 candidates per event and embeds at most 10 of them. Notes are event descriptions, not photographic records — extra images are dropped.
 `IMAGE_GRID_MIN = 1` (v14.5, was 3): any event with ≥1 embedded image gets the Minimal `img-grid` cssclass. The previous threshold left single- and two-image notes rendering bare.
 

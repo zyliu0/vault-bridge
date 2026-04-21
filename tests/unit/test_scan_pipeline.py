@@ -1551,16 +1551,26 @@ class TestSkipOnNoContent:
 
 class TestImageSubfolderAndGrid:
     def test_few_images_use_flat_attachments(self, tmp_path):
-        """SP-IG1: ≤10 images → flat _Attachments/ (no batch subfolder)."""
+        """SP-IG1: ≤10 images → flat _Attachments/ (no batch subfolder).
+
+        v14.6 dropped `attachments_subfolder` from ScanResult; this test
+        now asserts the vault write path lands under `_Attachments/`
+        without any event-specific subdirectory.
+        """
         import scan_pipeline
         img = tmp_path / "photo.jpg"
         _write_fake_jpeg(img)
         compressed = tmp_path / "2026-04-19--photo--abc123ab.jpg"
         _write_fake_jpeg(compressed)
 
+        captured_dsts = []
+        def fake_write(vault_name, src_abs_path, vault_dst_path):
+            captured_dsts.append(vault_dst_path)
+            return {"ok": True}
+
         with mock.patch("scan_pipeline.file_type_handlers.extract_images", return_value=[img]):
             with mock.patch("scan_pipeline.compress_images.compress_image", return_value=compressed):
-                with mock.patch("scan_pipeline.vault_binary.write_binary", return_value={"ok": True}):
+                with mock.patch("scan_pipeline.vault_binary.write_binary", side_effect=fake_write):
                     result = scan_pipeline.process_file(
                         source_path=str(img),
                         workdir=str(tmp_path),
@@ -1569,7 +1579,13 @@ class TestImageSubfolderAndGrid:
                         vault_name="V",
                         dry_run=False,
                     )
-        assert result.attachments_subfolder == ""
+        assert result.images_embedded == 1
+        # Every vault write went directly under _Attachments/ — no subfolder.
+        for dst in captured_dsts:
+            assert "/_Attachments/" in dst
+            # The segment immediately after _Attachments/ is the filename, not another directory.
+            tail = dst.split("/_Attachments/", 1)[1]
+            assert "/" not in tail, f"Unexpected subfolder in {dst}"
 
     def test_many_images_hard_capped_at_embed_cap(self, tmp_path):
         """v14: >IMAGE_EMBED_CAP candidates → exactly IMAGE_EMBED_CAP embedded, flat layout, no subfolder."""
@@ -1609,7 +1625,6 @@ class TestImageSubfolderAndGrid:
                         dry_run=False,
                     )
         assert result.images_embedded == scan_pipeline.IMAGE_EMBED_CAP
-        assert result.attachments_subfolder == ""
         # Candidates are preserved even though only the cap was embedded.
         assert len(result.image_candidate_paths) == 11
         # Every write went into the flat _Attachments/ folder.
