@@ -1,5 +1,38 @@
 # Changelog
 
+## v14.5.1 — ghost-note guard (llm_wiki research follow-up)
+
+Applied one pattern from a review of nashsu/llm_wiki's ingest pipeline:
+every cache/index hit should re-verify that the recorded outputs still
+exist before trusting the entry (see llm_wiki `src/lib/ingest-cache.ts:74-89`).
+
+- New `vault_scan.load_index_verified(workdir, vault_name, runner=None)`
+  returns `(index_by_path, index_by_fp, ghost_note_paths)`. Any scan-index
+  entry whose recorded vault note is missing is dropped from the returned
+  dicts and reported as a ghost — callers decide whether to re-scan the
+  source or just log.
+- Conservative on errors: a CLI / network failure during verification
+  trusts the index rather than silently dropping entries.
+- Empty `vault_name` behaves like plain `load_index` (no verification).
+- `load_index` itself is unchanged — existing callers are unaffected.
+
+Adoption is staged: reconcile and heartbeat-scan will move to
+`load_index_verified` in a follow-up so ghost notes are surfaced as
+part of the scan diagnostics.
+
+### What was NOT taken from llm_wiki
+
+The research confirmed vault-bridge's handler/registration architecture
+is already more modular than llm_wiki's (llm_wiki uses a flat
+`match ext` with extension-set constants in one file). The other
+patterns flagged — mtime-sidecar extraction cache, persistent serial
+queue, FILE-block multi-artifact protocol — were evaluated and
+deferred: either the value is modest given vault-bridge's existing
+fingerprint + scan-index machinery, or the refactor cost is out of
+scope for this bug-fix cycle.
+
+---
+
 ## v14.5.0 — post-v14.4 field-agent bug report fixes
 
 Addresses a three-issue bug report after running v14.4.0 over 64 notes

@@ -652,3 +652,65 @@ def test_main_acquire_lock_already_held_exits_1(tmp_path, monkeypatch, capsys):
     with pytest.raises(SystemExit) as exc:
         runpy.run_path(str(SCRIPTS / "vault_scan.py"), run_name="__main__")
     assert exc.value.code == 1
+
+
+# ---------------------------------------------------------------------------
+# Ghost-note guard (v14.5, llm_wiki-inspired): load_index_verified
+# ---------------------------------------------------------------------------
+
+class TestLoadIndexVerified:
+    def test_all_notes_exist_surviving_equals_loaded(self, workdir):
+        vs.append_index(workdir, "/src/a.pdf", "fpA", "arch/P/a.md")
+        vs.append_index(workdir, "/src/b.pdf", "fpB", "arch/P/b.md")
+
+        def all_exist(cmd, **kwargs):
+            class R: returncode = 0; stdout = "dummy content"; stderr = ""
+            return R()
+
+        by_path, by_fp, ghosts = vs.load_index_verified(
+            workdir, vault_name="V", runner=all_exist,
+        )
+        assert "/src/a.pdf" in by_path
+        assert "/src/b.pdf" in by_path
+        assert ghosts == []
+
+    def test_ghost_note_is_dropped_and_reported(self, workdir):
+        vs.append_index(workdir, "/src/a.pdf", "fpA", "arch/P/a.md")
+        vs.append_index(workdir, "/src/b.pdf", "fpB", "arch/P/ghost.md")
+
+        def selective(cmd, **kwargs):
+            # Infer the path= argument
+            path_arg = next((c for c in cmd if c.startswith("path=")), "")
+            ok = "ghost.md" not in path_arg
+            class R:
+                returncode = 0 if ok else 1
+                stdout = "content" if ok else ""
+                stderr = ""
+            return R()
+
+        by_path, by_fp, ghosts = vs.load_index_verified(
+            workdir, vault_name="V", runner=selective,
+        )
+        assert "/src/a.pdf" in by_path
+        assert "/src/b.pdf" not in by_path
+        assert ghosts == ["arch/P/ghost.md"]
+
+    def test_runner_exception_trusts_index_conservatively(self, workdir):
+        """Network / CLI errors must not spuriously drop entries."""
+        vs.append_index(workdir, "/src/a.pdf", "fpA", "arch/P/a.md")
+
+        def flaky(cmd, **kwargs):
+            raise OSError("transient")
+
+        by_path, _, ghosts = vs.load_index_verified(
+            workdir, vault_name="V", runner=flaky,
+        )
+        assert "/src/a.pdf" in by_path
+        assert ghosts == []
+
+    def test_empty_vault_name_skips_verification(self, workdir):
+        vs.append_index(workdir, "/src/a.pdf", "fpA", "arch/P/a.md")
+        # vault_name="" → behaves like plain load_index
+        by_path, _, ghosts = vs.load_index_verified(workdir, vault_name="")
+        assert "/src/a.pdf" in by_path
+        assert ghosts == []

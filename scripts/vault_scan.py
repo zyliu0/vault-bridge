@@ -29,7 +29,7 @@ import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 
 # ---------------------------------------------------------------------------
@@ -330,6 +330,84 @@ def _maybe_migrate_index(workdir, index_file: Path) -> None:
             index_file.write_bytes(global_index.read_bytes())
     except Exception:
         pass
+
+
+def load_index_verified(
+    workdir,
+    vault_name: str,
+    runner=None,
+) -> Tuple[dict, dict, List[str]]:
+    """Load the scan index and drop entries whose vault note no longer exists.
+
+    Returns (index_by_path, index_by_fp, ghost_entries):
+      index_by_path, index_by_fp — as load_index, but only for entries
+        whose recorded `note_path` still resolves in the Obsidian vault.
+      ghost_entries — a list of dropped note_paths that the caller can
+        log or schedule for re-scan.
+
+    A ghost entry is an index row pointing at a vault note that was
+    deleted outside the scan loop (manual delete, vault move). Without
+    this verification, reconcile / heartbeat-scan would skip the source
+    file as "already scanned" while the note it named is actually
+    missing — producing a silent gap in the vault.
+
+    Pattern lifted from llm_wiki's ingest-cache (ingest-cache.ts:74-89):
+    every cache hit re-validates the recorded outputs before trusting
+    the entry. Cheap enough to run on every load.
+
+    Args:
+        workdir: scan workdir (where .vault-bridge/ lives).
+        vault_name: Obsidian vault name for `obsidian read` checks.
+        runner: optional subprocess-compatible runner (for tests). If
+            None, uses subprocess.run.
+    """
+    import subprocess as _subprocess
+    by_path, by_fp = load_index(workdir)
+
+    if not vault_name:
+        # Cannot verify without a vault — behave as the plain loader.
+        return by_path, by_fp, []
+
+    runner = runner or _subprocess.run
+
+    ghost_note_paths: List[str] = []
+    surviving_by_path: dict = {}
+    surviving_by_fp: dict = {}
+
+    # De-dup note_paths across the index before issuing obsidian reads.
+    checked: Dict[str, bool] = {}
+
+    for source_path, (fp, note_path) in by_path.items():
+        if not note_path:
+            # Legacy entries with empty note_path — keep as-is; not
+            # the concern of this verifier.
+            surviving_by_path[source_path] = (fp, note_path)
+            if fp:
+                surviving_by_fp[fp] = (source_path, note_path)
+            continue
+
+        if note_path not in checked:
+            try:
+                r = runner(
+                    ["obsidian", "read", f"vault={vault_name}", f"path={note_path}"],
+                    capture_output=True, text=True, timeout=10,
+                )
+                # Treat empty stdout + 0 exit as "note not found" too —
+                # some CLI versions return 0 for missing files.
+                exists = (r.returncode == 0 and bool(getattr(r, "stdout", "").strip()))
+            except Exception:
+                # Network/CLI error — be conservative, trust the index.
+                exists = True
+            checked[note_path] = exists
+
+        if checked[note_path]:
+            surviving_by_path[source_path] = (fp, note_path)
+            if fp:
+                surviving_by_fp[fp] = (source_path, note_path)
+        else:
+            ghost_note_paths.append(note_path)
+
+    return surviving_by_path, surviving_by_fp, ghost_note_paths
 
 
 def append_index(workdir, source_path: str, fingerprint: str, note_path: str) -> None:
