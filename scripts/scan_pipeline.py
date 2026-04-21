@@ -37,6 +37,7 @@ sys.path.insert(0, str(_HERE))
 import attachment_index
 import compress_images
 import file_type_handlers
+import handler_dispatcher
 import vault_binary
 
 logger = logging.getLogger(__name__)
@@ -57,8 +58,12 @@ IMAGE_EMBED_CAP = 10
 # v13 legacy name kept for anyone who imported it; always equals the embed cap.
 IMAGE_SUBFOLDER_THRESHOLD = IMAGE_EMBED_CAP
 
-# Minimum number of images in a batch that triggers image-grid CSS class.
-IMAGE_GRID_MIN = 3
+# Minimum number of images that triggers the img-grid cssclass (v14.5+: 1).
+# Previously 3 — but Minimal's img-grid styling (alignment, margins,
+# hover framing) is benign-to-helpful even for a single embed, and the
+# threshold created a gap where notes with 1-2 attachments rendered
+# bare. Field-review v14.4.1: Issue 3a.
+IMAGE_GRID_MIN = 1
 
 # Size gate: compressed images under this many bytes are almost always
 # non-content (logos, UI chrome, divider lines, small icons). Events
@@ -243,6 +248,7 @@ def _process_images(
     dry_run: bool,
     *,
     att_index: Optional[attachment_index.AttachmentIndex] = None,
+    strict_handlers: bool = False,
 ) -> tuple:
     """Extract, compress, and write images for a source file.
 
@@ -293,22 +299,41 @@ def _process_images(
         return attachments, images_embedded, False, "", warnings, errors, candidate_paths, caption_prompts
 
     if not raw_images:
-        # v14.3 (F1-d): readable-handler-but-empty-result is the worst failure
-        # mode — users cannot tell whether the file is empty or the handler
-        # is broken. Surface a warning so the memory report carries the hint.
+        # v14.3 (F1-d) + v14.5 (field-review Issue 1): readable-handler-
+        # but-empty-result is the worst failure mode — users cannot
+        # tell whether the file is empty or the handler is broken.
         cfg = file_type_handlers.get_handler(source_path)
-        if cfg is not None and cfg.category in (
-            "cad-dxf", "cad-dwg", "cad-3dm",
-            "vector-ai", "raster-psd",
-            "document-office-legacy", "spreadsheet-legacy",
-        ):
-            warnings.append(
-                f"no images rendered from {Path(source_path).name} "
-                f"(category {cfg.category}): the per-extension handler at "
-                f".vault-bridge/handlers/ may be missing, stale, or the "
-                f"required converter (e.g. ODA File Converter for DWG) "
-                f"may not be installed. Run /vault-bridge:setup → file types."
-            )
+        if cfg is not None and handler_dispatcher.is_delegated(cfg.category):
+            # Classify the cause: stub vs missing vs real-but-returned-empty.
+            ext = Path(source_path).suffix.lstrip(".").lower()
+            mod_path = handler_dispatcher._handler_module_path(workdir, cfg.category, ext) if workdir else None
+            if mod_path is None:
+                msg = (
+                    f"no content from {Path(source_path).name}: no "
+                    f".vault-bridge/handlers/ file for category "
+                    f"{cfg.category!r}. Run /vault-bridge:setup → file types."
+                )
+            elif handler_dispatcher.is_stub_module(mod_path):
+                msg = (
+                    f"no content from {Path(source_path).name}: "
+                    f".vault-bridge/handlers/{mod_path.name} is a TODO stub — "
+                    f"it will never produce content. Regenerate via "
+                    f"/vault-bridge:setup → file types."
+                )
+                if strict_handlers:
+                    errors.append(msg)
+                    return (
+                        attachments, images_embedded, False, "",
+                        warnings, errors, candidate_paths, caption_prompts,
+                    )
+            else:
+                msg = (
+                    f"no content from {Path(source_path).name} via "
+                    f"{mod_path.name}: the handler ran but produced nothing. "
+                    f"Check external tool availability (e.g. ODA File Converter "
+                    f"for DWG, libheif for HEIC) or inspect the file manually."
+                )
+            warnings.append(msg)
         return attachments, images_embedded, False, "", warnings, errors, candidate_paths, caption_prompts
 
     capped_raw = list(raw_images)[:IMAGE_CANDIDATE_CAP]
@@ -436,6 +461,7 @@ def process_file(
     skip_on_no_content: bool = True,
     dry_run: bool = False,
     att_index: Optional[attachment_index.AttachmentIndex] = None,
+    strict_handlers: bool = False,
 ) -> ScanResult:
     """Process a single source file through the handler registry pipeline.
 
@@ -473,6 +499,7 @@ def process_file(
             skip_on_no_content=skip_on_no_content,
             dry_run=dry_run,
             att_index=att_index,
+            strict_handlers=strict_handlers,
         )
     except Exception as exc:
         logger.exception("process_file: unexpected error for %s: %s", source_path, exc)
@@ -505,6 +532,7 @@ def _process_file_inner(
     skip_on_no_content: bool,
     dry_run: bool,
     att_index: Optional[attachment_index.AttachmentIndex] = None,
+    strict_handlers: bool = False,
 ) -> ScanResult:
     """Inner implementation — may raise; always wrapped by process_file."""
 
@@ -569,6 +597,7 @@ def _process_file_inner(
                 vault_name=vault_name,
                 dry_run=dry_run,
                 att_index=att_index,
+                strict_handlers=strict_handlers,
             )
             attachments.extend(img_attachments)
             images_embedded += img_embedded
@@ -629,6 +658,7 @@ def process_batch(
     dry_run: bool = False,
     att_index: Optional[attachment_index.AttachmentIndex] = None,
     persist_index: bool = True,
+    strict_handlers: bool = False,
 ) -> List[ScanResult]:
     """Process a list of source files, with an optional text-read cap.
 
@@ -700,6 +730,7 @@ def process_batch(
                 skip_on_no_content=skip_on_no_content,
                 dry_run=dry_run,
                 att_index=att_index,
+                strict_handlers=strict_handlers,
             )
             if result.sources_read > 0:
                 reads_done += result.sources_read

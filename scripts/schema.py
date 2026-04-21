@@ -43,11 +43,19 @@ FIELD_ORDER = (
     "attachments",       # optional
     "source_images",     # optional — archive paths processed for images
     "images_embedded",   # optional — count of images successfully written to vault
+    # Optional: one caption per embedded image, produced by the vision
+    # runner. Persisted in frontmatter so reconciles / rewrites don't
+    # need to re-run vision (field-review v14.4.1, Issue 2.2). Aligned
+    # by index with `attachments`.
+    "image_captions",
     "tags",              # optional
     "cssclasses",        # last — Obsidian rendering directive
 )
 
-_OPTIONAL_SET = frozenset({"attachments", "source_images", "images_embedded", "tags"})
+_OPTIONAL_SET = frozenset({
+    "attachments", "source_images", "images_embedded",
+    "image_captions", "tags",
+})
 
 REQUIRED_FIELDS = tuple(f for f in FIELD_ORDER if f not in _OPTIONAL_SET)
 OPTIONAL_FIELDS = tuple(f for f in FIELD_ORDER if f in _OPTIONAL_SET)
@@ -118,6 +126,7 @@ FIELD_TYPES = {
     "attachments": list,
     "source_images": list,
     "images_embedded": int,
+    "image_captions": list,     # optional; one caption per attachment
     "tags": list,
     "cssclasses": list,
 }
@@ -244,6 +253,20 @@ def check_invariants(frontmatter: dict) -> list:
             errors.append(
                 f"images_embedded ({images_embedded}) does not match "
                 f"len(attachments) ({len(attachments)})"
+            )
+
+    # image_captions, when present, must align with attachments. The
+    # vision runner fills this field in index-aligned order; a mismatch
+    # means the two drifted (field-review v14.4.1, Issue 2.2).
+    image_captions = frontmatter.get("image_captions")
+    if image_captions is not None:
+        attachments = frontmatter.get("attachments", []) or []
+        if not isinstance(image_captions, list):
+            errors.append("image_captions must be a list (got non-list)")
+        elif image_captions and len(image_captions) != len(attachments):
+            errors.append(
+                f"image_captions length ({len(image_captions)}) does not match "
+                f"attachments length ({len(attachments)})"
             )
 
     return errors

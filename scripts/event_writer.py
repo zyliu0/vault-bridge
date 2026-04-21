@@ -139,9 +139,14 @@ def _render_event_note_prompt(result, meta: dict) -> str:
 
 
 _ABSTRACT_CALLOUT_RE = re.compile(
-    # Matches `> [!abstract] <optional title>` followed by any number of
-    # continuation lines starting with `> ` (blockquote) or `>`.
-    r"^\s*>\s*\[!abstract\][^\n]*\n((?:\s*>[^\n]*\n?)*)",
+    # Matches `> [!abstract] <optional title>` followed by zero or more
+    # CONTIGUOUS continuation lines starting with `>`. The inner group
+    # must NOT allow whitespace at the start of each line — `\s*` there
+    # also matches `\n`, which would greedy-swallow any later
+    # `> [!info]` / `> [!note]` callout separated only by blank lines
+    # from this one (reported in the v14.4 field review: 20 affected
+    # notes had the next callout collapsed into summary_hint).
+    r"^\s*>\s*\[!abstract\][^\n]*\n((?:>[^\n]*\n?)*)",
     re.MULTILINE,
 )
 

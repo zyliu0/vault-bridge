@@ -1,5 +1,85 @@
 # Changelog
 
+## v14.5.0 — post-v14.4 field-agent bug report fixes
+
+Addresses a three-issue bug report after running v14.4.0 over 64 notes
+across two arch projects. Root causes: silent handler stubs, a
+documented-but-never-run vision pipeline, and inconsistent image-grid
+cssclass handling. Plus a regex fix found in passing.
+
+### Issue 1 — silent metadata-only notes from handler stubs
+- `scripts/handler_dispatcher.is_stub_module(path)` detects a TODO-stub
+  handler file (TODO markers, `raise NotImplementedError`, or trivial
+  `return ""`/`return []`).
+- `scripts/handler_dispatcher.coverage_report(workdir)` returns a
+  `HandlerCoverage` with `real` / `stub` / `missing` lists and a
+  `to_lines()` formatter for scan-start logging.
+- `scan_pipeline._process_images` now classifies no-content results
+  from delegated categories as missing / stub / real-but-empty and
+  emits a specific warning for each case.
+- New `strict_handlers=True` kwarg on `process_file` / `process_batch`
+  elevates a stub-induced no-content result to an error (the event is
+  skipped; no silent metadata-only write).
+- `/vault-bridge:retro-scan --strict` surfaces this to the user.
+
+### Issue 2 — vision captioning now actually runs
+- Ships `scripts/vision_runner.py` with a pluggable backend: `anthropic`
+  (SDK, needs `ANTHROPIC_API_KEY`), `claude_cli` (subprocess), `stub`
+  (returns `""`, for tests/dry-runs), and `auto` (first available).
+- Retro-scan Step 6e-image now calls `vision_runner.run_captions`
+  instead of asking the skill runner to manually Read each image (a
+  contract that was never actually honoured in practice).
+- Captions persist as `image_captions:` frontmatter, index-aligned
+  with `attachments:`, so reconciles don't re-run vision.
+- Schema: `image_captions` added to `FIELD_ORDER`, `FIELD_TYPES`, and
+  `OPTIONAL_FIELDS`. New invariant: `len(image_captions) == len(attachments)`
+  when both present.
+
+### Issue 3 — `img-grid` cssclass consistency
+- `IMAGE_GRID_MIN` dropped from 3 to 1. Any event with ≥1 embed gets
+  the cssclass so Minimal's grid styling applies uniformly.
+- `scripts/validate_event_note.py` gains Issue 3c drift detection:
+  `attachments:` frontmatter count must match the number of
+  `![[...]]` embeds in the body. Catches the orphan-cssclass case
+  after reconcile mutates one side.
+
+### Cross-cutting
+- **Regex fix (C):** `extract_abstract_callout` no longer swallows
+  adjacent `> [!info]` / `> [!note]` callouts separated by blank
+  lines. Root cause: `\\s*` at the start of the continuation group
+  matched `\\n`. 20 notes were affected in the field report.
+- **Legacy `## Excerpt from source` bodies flagged explicitly.**
+  The post-hoc auditor now classifies them as `note_kind="legacy_excerpt"`
+  and fails with a specific message pointing at `--rewrite-bodies`
+  (planned; see v14.6 follow-ups).
+- **MOC notes correctly identified.** When `note_type: project-index`
+  is in frontmatter (or the body matches the MOC fingerprint), the
+  auditor returns `note_kind="moc"` and skips event-note rules. Fixes
+  false "missing abstract" failures on index notes.
+
+### Deferred to a follow-up
+- `/vault-bridge:reconcile --rewrite-bodies` — regenerate prose from
+  existing `_Attachments/` + re-extracted text via `vision_runner` +
+  `compose_body`. Needs more design; schema/validator groundwork landed
+  here so v14.6 can deliver the flag.
+- `scan_outcome` enum in frontmatter — single observable field
+  recording how the note got written.
+
+### Migration
+
+Existing notes: nothing mandatory. After upgrading:
+- `/vault-bridge:vault-health` Check 7 will flag legacy excerpt bodies
+  and attachment drift so you know what's broken.
+- `/vault-bridge:reconcile --rebuild-indexes` picks up the new schema
+  (`image_captions:`) automatically.
+- DWG / PSD / AI / 3DM scans that previously produced silent
+  metadata-only notes will now print a specific warning pointing at
+  the stub handler file.
+
+All 1753 tests pass.
+
+---
+
 ## v14.4.0 — project-index MOC fixes from field-agent review
 
 Addresses the v14.3.0 field-agent review of `project_index.py`. The

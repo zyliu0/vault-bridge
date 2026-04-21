@@ -564,13 +564,13 @@ regardless of any max_reads cap.
 
 Key `ScanResult` fields (v14):
 - `image_grid: bool` — True when ≥3 images embedded; caller sets `cssclasses: [img-grid]` and delegates body assembly to `event_writer.assemble_note_body`, which chunks embeds into rows of `IMAGE_GRID_ROW_SIZE = 3` (blank line between rows, consecutive lines within). Minimal's img-grid CSS styles each paragraph as one grid row; a single paragraph of 10 embeds collapses into a 10-column strip. Reading view only (v14.3, F5).
-- `image_candidate_paths: list[str]` — every compressed candidate image path before the embed cap is applied; used by the command spec to run vision captioning over every candidate
-- `image_caption_prompts: list[str]` — one caption prompt per candidate, aligned by index; the invoking Claude runs each prompt and feeds the returned captions into `image_vision.select_top_k` to pick which images to embed
-- `image_captions: list[str]` — populated by the command after vision returns; passed to `event_writer.compose_body` so the note body can reference what was seen
+- `image_candidate_paths: list[str]` — every compressed candidate image path before the embed cap is applied; `vision_runner` loops these to produce captions
+- `image_caption_prompts: list[str]` — one caption prompt per candidate, aligned by index; `vision_runner.run_captions` executes them (previously left to the skill runner, which almost always skipped; v14.5 Issue 2)
+- `image_captions: list[str]` — populated by `scripts/vision_runner.py`; passed to `event_writer.compose_body` so the note body can reference what was seen; persisted in the event-note frontmatter for reconcile reuse
 - `attachments_subfolder: str` — deprecated in v14: always empty. Kept on the dataclass so v13 serialisations do not break.
 
 `IMAGE_CANDIDATE_CAP = 20` and `IMAGE_EMBED_CAP = 10`: the pipeline compresses at most 20 candidates per event and embeds at most 10 of them. Notes are event descriptions, not photographic records — extra images are dropped.
-`IMAGE_GRID_MIN = 3`: events with ≥3 images signal the note builder to use grid layout.
+`IMAGE_GRID_MIN = 1` (v14.5, was 3): any event with ≥1 embedded image gets the Minimal `img-grid` cssclass. The previous threshold left single- and two-image notes rendering bare.
 
 **Setup wizard Step 6.5:**
 

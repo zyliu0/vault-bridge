@@ -44,7 +44,9 @@ EXPECTED_REQUIRED = (
     "cssclasses",
 )
 
-EXPECTED_OPTIONAL = ("attachments", "source_images", "images_embedded", "tags")
+EXPECTED_OPTIONAL = (
+    "attachments", "source_images", "images_embedded", "image_captions", "tags",
+)
 
 EXPECTED_FILE_TYPES = {
     "folder", "image-folder",

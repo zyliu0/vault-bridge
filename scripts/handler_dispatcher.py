@@ -1,4 +1,4 @@
-"""Runtime dispatch into per-extension handler modules at
+"""Runtime dispatch + stub detection for per-extension handler modules at
 `<workdir>/.vault-bridge/handlers/<category>_<ext>.py`.
 
 Background (v14.1.0 field report, F1 + F6)
@@ -33,12 +33,165 @@ from __future__ import annotations
 import importlib.util
 import logging
 import os
+import re
 import sys
 import tempfile
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Stub detection (field-review v14.4.1, Issue 1)
+# ---------------------------------------------------------------------------
+#
+# `handler_installer` is supposed to generate working per-extension
+# handlers from templates in scripts/handlers/patterns/. In practice
+# several categories ship as TODO stubs that return empty content —
+# `read_text` returns `""`, `extract_images` returns `[]`. At runtime
+# those look identical to a file that genuinely has no content, so
+# `scan_pipeline` writes a metadata-only note and the user is left
+# wondering why their readable DWG/PSD/AI produced no prose.
+#
+# `is_stub_module(path)` reads the file text and detects the stub
+# signature: presence of any TODO marker or a trivial `return ""` /
+# `return []` body. `coverage_report(workdir)` returns a per-category
+# breakdown so scan commands can log it at start-up.
+
+# Markers that unambiguously indicate a TODO stub. Checked against the
+# whole file; we do not parse the AST to keep the dependency footprint
+# at stdlib-only.
+_STUB_MARKERS = (
+    "# TODO: implement",
+    "# TODO implement",
+    "raise NotImplementedError",
+    "VAULT_BRIDGE_HANDLER_STUB",   # explicit opt-in marker for templates
+)
+
+
+def is_stub_module(path: Path) -> bool:
+    """Return True when the handler file at `path` is a TODO stub.
+
+    Treats any of the following as stub:
+    - File contains one of `_STUB_MARKERS`.
+    - Both `read_text` and `extract_images` have trivial bodies:
+      a single `return ""` / `return []` / `return None` as the only
+      non-comment line in the function body.
+    """
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return False
+
+    if any(marker in text for marker in _STUB_MARKERS):
+        return True
+
+    # Minimal body check — looks for `def read_text(...)` and
+    # `def extract_images(...)` and verifies each has only a trivial
+    # return statement in its body. Regex-based (no AST) because the
+    # handler files are small and the contract is narrow.
+    read_text_trivial = _has_trivial_body(text, "read_text")
+    extract_images_trivial = _has_trivial_body(text, "extract_images")
+    return read_text_trivial and extract_images_trivial
+
+
+_TRIVIAL_BODY_RE_TMPL = (
+    r"def\s+{fn}\s*\([^)]*\)\s*(?:->\s*[^:]+)?:\s*\n"
+    r"(?:\s+(?:\"{{3}}.*?\"{{3}}|'{{3}}.*?'{{3}}|\#.*?\n))*"  # docstring / comments
+    r"\s+return\s+(?:\"\"|''|\[\]|None)\s*\n"
+)
+
+
+def _has_trivial_body(text: str, fn_name: str) -> bool:
+    pattern = _TRIVIAL_BODY_RE_TMPL.format(fn=re.escape(fn_name))
+    return bool(re.search(pattern, text, re.DOTALL))
+
+
+@dataclass
+class HandlerCoverage:
+    """Summary of `.vault-bridge/handlers/` contents for one workdir."""
+
+    real: List[str] = field(default_factory=list)
+    stub: List[str] = field(default_factory=list)
+    # Categories we support but have no handler file for at all.
+    missing: List[str] = field(default_factory=list)
+
+    def has_stubs(self) -> bool:
+        return bool(self.stub)
+
+    def to_lines(self) -> List[str]:
+        """Human-readable lines for a scan-start log."""
+        lines = []
+        if self.real:
+            lines.append(f"  real:    {', '.join(sorted(self.real))}")
+        if self.stub:
+            lines.append(
+                f"  stubs:   {', '.join(sorted(self.stub))}  "
+                f"← will return empty; files in these categories produce metadata-only notes"
+            )
+        if self.missing:
+            lines.append(
+                f"  missing: {', '.join(sorted(self.missing))}  "
+                f"← no handler file; files in these categories are skipped"
+            )
+        return lines
+
+
+def coverage_report(workdir: Optional[str]) -> HandlerCoverage:
+    """Walk `<workdir>/.vault-bridge/handlers/` and classify each handler.
+
+    Returns a `HandlerCoverage` with three parallel lists:
+    - `real`: handler file exists and is NOT a stub
+    - `stub`: handler file exists but looks like a TODO placeholder
+    - `missing`: delegated category has no handler file at all
+
+    When `workdir` is None or the directory does not exist, all
+    delegated categories are reported as `missing`.
+    """
+    cov = HandlerCoverage()
+    if not workdir:
+        cov.missing = sorted(DELEGATED_CATEGORIES)
+        return cov
+
+    handlers_dir = _handlers_dir(workdir)
+    if not handlers_dir.exists() or not handlers_dir.is_dir():
+        cov.missing = sorted(DELEGATED_CATEGORIES)
+        return cov
+
+    # Index per-extension handler files by their stem prefix → list of exts.
+    files_by_stem: Dict[str, List[str]] = {}
+    for entry in handlers_dir.iterdir():
+        if entry.suffix != ".py" or entry.name.startswith("_"):
+            continue
+        parts = entry.stem.rsplit("_", 1)
+        if len(parts) != 2:
+            continue
+        stem_prefix, ext = parts
+        files_by_stem.setdefault(stem_prefix, []).append(ext)
+
+    # Classify each delegated category.
+    for category, stem_prefix in _CATEGORY_TO_STEM.items():
+        exts = files_by_stem.get(stem_prefix, [])
+        if not exts:
+            cov.missing.append(category)
+            continue
+        # If ANY extension in this category is a stub, the category
+        # is reported as stub (conservatively — one stub is enough to
+        # produce silent-skip notes).
+        any_stub = False
+        for ext in exts:
+            path = handlers_dir / f"{stem_prefix}_{ext}.py"
+            if is_stub_module(path):
+                any_stub = True
+                break
+        if any_stub:
+            cov.stub.append(category)
+        else:
+            cov.real.append(category)
+
+    return cov
 
 # Category slug → handler-file stem prefix used by handler_installer.
 # The installer writes `<category_slug_underscored>_<ext>.py`.

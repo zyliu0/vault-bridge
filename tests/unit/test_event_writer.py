@@ -296,6 +296,24 @@ class TestExtractAbstractCallout:
     def test_returns_empty_on_empty_body(self):
         assert event_writer.extract_abstract_callout("") == ""
 
+    def test_does_not_swallow_adjacent_callouts(self):
+        """Blank line between abstract and next callout ends the hint.
+
+        Field-review C (v14.4.1): `\\s*` at the start of the continuation
+        group used to match `\\n`, letting the regex reach into the next
+        `> [!info]` / `> [!note]` callout and append it to the hint.
+        """
+        body = (
+            "> [!abstract] Overview\n"
+            "> Real summary.\n"
+            "\n"
+            "> [!info] Something unrelated\n"
+            "> This must not leak into the hint.\n"
+            "\n"
+            "Diary paragraph follows."
+        )
+        assert event_writer.extract_abstract_callout(body) == "Real summary."
+
     def test_ignores_non_abstract_callouts(self):
         body = (
             "> [!important] Something else\n"

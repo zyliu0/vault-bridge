@@ -1616,8 +1616,13 @@ class TestImageSubfolderAndGrid:
         for dst in captured_dsts:
             assert "/_Attachments/" in dst
 
-    def test_image_grid_flag_false_for_few_images(self, tmp_path):
-        """SP-IG3: <IMAGE_GRID_MIN images → image_grid=False."""
+    def test_image_grid_flag_true_for_single_image(self, tmp_path):
+        """v14.5 (Issue 3a): IMAGE_GRID_MIN dropped to 1 so every
+        image-bearing note gets the Minimal `img-grid` cssclass.
+
+        Previously 1-2 image notes rendered bare; Minimal's grid styling
+        is benign-to-helpful even for a single embed.
+        """
         import scan_pipeline
         img = tmp_path / "photo.jpg"
         _write_fake_jpeg(img)
@@ -1633,7 +1638,7 @@ class TestImageSubfolderAndGrid:
                     event_date="2026-04-19",
                     dry_run=True,
                 )
-        assert result.image_grid is False
+        assert result.image_grid is True
 
     def test_image_grid_flag_true_for_many_images(self, tmp_path):
         """SP-IG4: ≥IMAGE_GRID_MIN images → image_grid=True."""

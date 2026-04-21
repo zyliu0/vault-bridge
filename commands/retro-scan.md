@@ -1,7 +1,7 @@
 ---
 description: Full retroactive scan of an archive folder into vault notes
 allowed-tools: Read, Bash, Glob, Grep, AskUserQuestion
-argument-hint: "[folder-path] [--domain DOMAIN_NAME] [--dry-run] [--date-from YYYY-MM-DD] [--date-to YYYY-MM-DD]"
+argument-hint: "[folder-path] [--domain DOMAIN_NAME] [--dry-run] [--date-from YYYY-MM-DD] [--date-to YYYY-MM-DD] [--strict]"
 ---
 
 You are running a retroactive archive scan for vault-bridge. Your job is to
@@ -15,6 +15,9 @@ The argument `$1` is the source folder path. Optional flags:
 - `--date-from YYYY-MM-DD` — skip events older than this date
 - `--date-to YYYY-MM-DD` — skip events newer than this date
 - `--new-transport` — force-invoke the transport-builder regardless of existing state
+- `--strict` — v14.5: abort the event (record an error, no metadata-only
+  fallback) when a readable category's handler is a TODO stub. Recommended
+  once every required handler has been installed.
 
 ## Step 0 — check for plugin updates
 
@@ -68,6 +71,32 @@ If this fails, vault-bridge has not been set up here. **Run
 write any notes before setup completes — the scan depends on the vault
 name, the domain list, and the local `.vault-bridge/reports/` folder that
 setup creates.
+
+### Step 1b — handler coverage report (v14.5)
+
+Before scanning, log which per-extension handlers are real, which are
+TODO stubs, and which are missing. Stub handlers produce silent
+metadata-only notes — tell the user up front so they can either
+regenerate the handlers or abort.
+
+```bash
+python3 -c "
+import sys
+sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
+import handler_dispatcher
+cov = handler_dispatcher.coverage_report('$(pwd)')
+print('[handler coverage]')
+for line in cov.to_lines():
+    print(line)
+if cov.has_stubs():
+    print('  → stub handlers will produce metadata-only notes. Run /vault-bridge:setup → file types to regenerate, or pass --strict to abort on stub miss.')
+"
+```
+
+When `--strict` is passed to retro-scan, forward `strict_handlers=True`
+into `process_file` / `process_batch`: a stub-induced no-content result
+becomes an error (and the event is skipped) rather than a silent
+metadata-only write.
 
 ### Step 0b — transport health check
 
@@ -808,30 +837,45 @@ Use the returned `ScanResult` fields to populate note body and frontmatter:
 Use `process_batch(source_paths, ...)` to process all events at once (no
 limit by default), or call `process_file` in a loop for single-file control.
 
-### 6e-image. Vision captioning + image curation (v14)
+### 6e-image. Vision captioning + image curation (v14.5)
 
 The scan pipeline compressed up to `IMAGE_CANDIDATE_CAP = 20` candidate
 images per event and returned:
 - `result.image_candidate_paths` — every compressed JPEG's local path
 - `result.image_caption_prompts` — one caption prompt per candidate (same order)
 
-For each candidate, run its prompt via the Read tool. The prompt already
-contains event context and fabrication-firewall rules; just execute it and
-record the returned sentence. Build `CAPTIONS` as a list of strings, same
-length and order as `image_caption_prompts`.
-
-Then call `image_vision.select_top_k` to pick ≤10 images by relevance:
+**Run vision via `vision_runner` (v14.5).** Prior versions documented
+the vision loop in prose but nothing enforced it, so every scan shipped
+notes with `image_captions=[]` — starving the prose synthesis of
+visual evidence (field review Issue 2). The plugin now ships an
+executable runner. Call it directly — DO NOT attempt to caption images
+manually with the Read tool, that path is unreliable:
 
 ```python
 import sys
 sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
+import vision_runner
 import image_vision
 from scan_pipeline import IMAGE_EMBED_CAP
 
+event_meta = {'project': '${PROJECT}', 'event_date': '${EVENT_DATE}', 'source_basename': '${SOURCE_BASENAME}'}
+
+# backend='auto' picks anthropic SDK if ANTHROPIC_API_KEY is set,
+# else claude-cli subprocess, else stub (returns empty). A warning
+# is recorded when the stub path runs, so the memory report surfaces
+# "we did not caption this batch".
+CAPTIONS, CAPTION_WARNINGS = vision_runner.run_captions(
+    result.image_candidate_paths,
+    event_meta,
+    backend='auto',
+    model='claude-haiku-4-5',
+)
+
+# Rank by relevance (keyword overlap with event_meta) and cap at 10.
 selected = image_vision.select_top_k(
     CAPTIONS,
-    event_meta={'project': '${PROJECT}', 'source_basename': '${SOURCE_BASENAME}'},
-    k=IMAGE_EMBED_CAP,   # 10
+    event_meta=event_meta,
+    k=IMAGE_EMBED_CAP,
 )
 
 FINAL_CAPTIONS = [CAPTIONS[i] for i in selected]
@@ -843,8 +887,12 @@ candidates than prompts is possible), `selected` indices outside the
 attachments list are ignored — they referenced dropped candidates.
 
 Store `FINAL_CAPTIONS` and `FINAL_ATTACHMENTS` for the next steps — the
-event-writer consumes them to write the body, and `assemble_note_body`
-chunks them into grid rows (blank lines between rows, consecutive lines within a row).
+event-writer consumes them to write the body, `assemble_note_body`
+chunks them into grid rows, and Step 6i persists `image_captions:` into
+the note's frontmatter so future reconciles don't need to re-run vision.
+
+Add `CAPTION_WARNINGS` to the batch's memory-report warnings list so
+stub-backend or per-image failures are surfaced to the user.
 
 ### 6f. Compose the note body via event_writer (v14)
 
@@ -863,7 +911,8 @@ import event_writer
 result.image_captions = FINAL_CAPTIONS
 result.attachments = FINAL_ATTACHMENTS
 result.images_embedded = len(FINAL_ATTACHMENTS)
-result.image_grid = result.images_embedded >= 3  # IMAGE_GRID_MIN
+# v14.5 (Issue 3a): img-grid cssclass triggers on ≥1 image, not ≥3.
+result.image_grid = result.images_embedded >= 1  # IMAGE_GRID_MIN
 
 meta = {
     'source_path': '${SOURCE_PATH}',
@@ -1092,6 +1141,8 @@ attachments:
 source_images:
   - "/nas/path/to/source.jpg"
 images_embedded: 1
+image_captions:
+  - "Diagram of the south-wall reinforcement detail."
 tags: [architecture]
 cssclasses: [img-grid]
 ---
@@ -1102,9 +1153,14 @@ Field rules:
 - Always emit `images_embedded: N` when `source_images` is non-empty.
 - Emit `attachments` only when `images_embedded > 0`.
 - `len(attachments)` MUST equal `images_embedded` — the validator enforces this.
-- If no images processed at all, omit `source_images`, `images_embedded`, and `attachments`.
+- Emit `image_captions` whenever `attachments` is non-empty. Pass
+  `FINAL_CAPTIONS` from step 6e-image; `len(image_captions)` MUST equal
+  `len(attachments)` and captions are index-aligned with attachments.
+- If no images processed at all, omit `source_images`, `images_embedded`,
+  `attachments`, and `image_captions`.
 - If no tags, omit the `tags` field.
-- `cssclasses: [img-grid]` when `result.image_grid == True` (≥3 images); `cssclasses: []` otherwise.
+- `cssclasses: [img-grid]` when `result.image_grid == True`
+  (v14.5: ≥1 image); `cssclasses: []` otherwise.
 
 ### 6j. Write the note via obsidian CLI
 
