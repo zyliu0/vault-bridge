@@ -16,12 +16,13 @@ trigger a fresh load on the next call.
 
 Python 3.9 compatible.
 """
+import fnmatch
 import hashlib
 import importlib.util
 import time
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FuturesTimeout
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from types import ModuleType
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
@@ -265,6 +266,30 @@ def fetch_to_local_timed(
             )
 
 
+def _path_segment_skipped(rel_path: str, patterns: List[str]) -> bool:
+    """True if ANY path segment of `rel_path` matches ANY pattern.
+
+    Transport implementations historically applied skip_patterns to
+    the filename only (e.g. `fnmatch(basename, pattern)`). That meant
+    a folder named `_embedded_files` in `skip_patterns` did not prune
+    files nested under it: the filename check saw `DSCF1234.JPG`, not
+    `_embedded_files`. The post-filter here walks every segment of the
+    returned path so an ancestor-directory match prunes all descendants.
+    Field-review v14.7.1 P2.
+    """
+    if not patterns:
+        return False
+    try:
+        parts = PurePosixPath(rel_path).parts
+    except Exception:
+        return False
+    for seg in parts:
+        for pat in patterns:
+            if fnmatch.fnmatch(seg, pat):
+                return True
+    return False
+
+
 def list_archive(
     workdir: Path,
     transport_name: str,
@@ -274,7 +299,10 @@ def list_archive(
     """List all archive paths under archive_root using the named transport.
 
     Calls the transport module's list_archive(archive_root, skip_patterns)
-    and returns its iterator.
+    and post-filters the result so `skip_patterns` match any PATH SEGMENT,
+    not just the basename (v14.7.1 P2). User-authored transports commonly
+    only filter on the filename, which misses ancestor-directory matches
+    like `_embedded_files/` or `@eaDir/` containing hundreds of descendants.
 
     Raises:
         TransportMissing:  if the module does not exist.
@@ -283,8 +311,35 @@ def list_archive(
     """
     mod = load_transport(workdir, transport_name)
     try:
-        return mod.list_archive(archive_root, skip_patterns)
+        raw = mod.list_archive(archive_root, skip_patterns)
     except Exception as exc:
         raise TransportFailed(
             f"transport.list_archive({archive_root!r}) failed: {exc}"
         ) from exc
+
+    if not skip_patterns:
+        return raw
+
+    # Post-filter: any path-segment match against any pattern prunes.
+    root = str(archive_root).rstrip("/")
+    root_with_sep = root + "/"
+
+    def _filtered():
+        for path in raw:
+            p = str(path)
+            # Compute the path relative to archive_root so segment
+            # matching doesn't trip on absolute-path prefixes (e.g.
+            # `/_f-a-n` shouldn't be tested as a segment).
+            if p.startswith(root_with_sep):
+                rel = p[len(root_with_sep):]
+            elif p == root:
+                rel = ""
+            else:
+                # Transport returned a path outside the archive_root —
+                # fall back to testing the full path, same as old behavior.
+                rel = p
+            if rel and _path_segment_skipped(rel, skip_patterns):
+                continue
+            yield p
+
+    return _filtered()

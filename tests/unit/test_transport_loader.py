@@ -337,6 +337,96 @@ def test_list_archive_wrapper_calls_module_function(tmp_path):
     assert "file2.tmp" not in names
 
 
+# P2 — path-segment skip_patterns (v14.7.1 field review)
+# ----------------------------------------------------------------
+
+def test_list_archive_prunes_descendants_of_skip_dir(tmp_path):
+    """A folder name in skip_patterns prunes every file under it.
+
+    User-written transports typically only fnmatch on the BASENAME,
+    so a pattern like `_embedded_files` (a folder name) wouldn't
+    prune the 36 JPEGs living inside. transport_loader.list_archive
+    now post-filters on any path SEGMENT match.
+    """
+    d = _make_transports_dir(tmp_path)
+    archive_root = tmp_path / "archive"
+    (archive_root / "slides" / "_embedded_files").mkdir(parents=True)
+    (archive_root / "slides" / "_embedded_files" / "pic1.jpg").write_text("a")
+    (archive_root / "slides" / "_embedded_files" / "pic2.jpg").write_text("b")
+    (archive_root / "slides" / "cover.pdf").write_text("c")
+
+    tp = d / "basename-only.py"
+    tp.write_text(
+        "from pathlib import Path\n"
+        "from typing import Iterator\n"
+        "def fetch_to_local(archive_path: str) -> Path:\n"
+        "    return Path(archive_path)\n"
+        "def list_archive(archive_root: str, skip_patterns=None) -> Iterator[str]:\n"
+        "    # Intentionally basename-only, like many user transports in the wild.\n"
+        "    for entry in Path(archive_root).rglob('*'):\n"
+        "        if entry.is_file():\n"
+        "            yield str(entry)\n"
+    )
+
+    result = list(transport_loader.list_archive(
+        tmp_path, "basename-only", str(archive_root),
+        ["_embedded_files"],
+    ))
+    names = [Path(p).name for p in result]
+    assert "pic1.jpg" not in names
+    assert "pic2.jpg" not in names
+    assert "cover.pdf" in names
+
+
+def test_list_archive_no_patterns_is_passthrough(tmp_path):
+    """Empty skip_patterns must not mutate the transport's output."""
+    d = _make_transports_dir(tmp_path)
+    archive_root = tmp_path / "archive"
+    archive_root.mkdir()
+    (archive_root / "a.txt").write_text("1")
+
+    tp = d / "pass.py"
+    tp.write_text(
+        "from pathlib import Path\n"
+        "from typing import Iterator\n"
+        "def fetch_to_local(p): return Path(p)\n"
+        "def list_archive(root, skip_patterns=None):\n"
+        "    for e in Path(root).rglob('*'):\n"
+        "        if e.is_file():\n"
+        "            yield str(e)\n"
+    )
+    result = list(transport_loader.list_archive(
+        tmp_path, "pass", str(archive_root), None,
+    ))
+    assert any("a.txt" in p for p in result)
+
+
+def test_list_archive_glob_pattern_matches_segment(tmp_path):
+    """Glob-style patterns match on any path segment, not just basename."""
+    d = _make_transports_dir(tmp_path)
+    archive_root = tmp_path / "archive"
+    (archive_root / "tmp_project_backup").mkdir(parents=True)
+    (archive_root / "tmp_project_backup" / "doc.pdf").write_text("x")
+    (archive_root / "final" / "doc.pdf").parent.mkdir(parents=True)
+    (archive_root / "final" / "doc.pdf").write_text("y")
+
+    tp = d / "plain.py"
+    tp.write_text(
+        "from pathlib import Path\n"
+        "def fetch_to_local(p): return Path(p)\n"
+        "def list_archive(root, skip_patterns=None):\n"
+        "    for e in Path(root).rglob('*'):\n"
+        "        if e.is_file():\n"
+        "            yield str(e)\n"
+    )
+    # `tmp_*` should match the `tmp_project_backup` directory.
+    result = list(transport_loader.list_archive(
+        tmp_path, "plain", str(archive_root), ["tmp_*"],
+    ))
+    assert len(result) == 1
+    assert "final" in result[0]
+
+
 # N6 — fetch_to_local three-arg form
 def test_fetch_to_local_three_arg_form(tmp_path):
     """fetch_to_local(workdir, transport_name, archive_path) — new three-arg form."""

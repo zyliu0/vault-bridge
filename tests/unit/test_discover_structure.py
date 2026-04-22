@@ -465,3 +465,76 @@ def test_build_category_prompts_suggestions_empty_when_no_routes(tmp_path):
     prompts = ds.build_category_prompts(discovered, effective)
     assert len(prompts) == 1
     assert prompts[0].suggestions == []
+
+
+# ---------------------------------------------------------------------------
+# walk_top_level_subfolders_via_transport (v14.7.1 P1)
+# ---------------------------------------------------------------------------
+
+def _write_nas_like_transport(tmp_path: Path, archive_root: Path):
+    """Install a minimal transport at <tmp_path>/.vault-bridge/transports/nas.py
+    that walks `archive_root` via `Path.rglob` — emulating how a real
+    user-written NAS transport would enumerate remote paths."""
+    transports_dir = tmp_path / ".vault-bridge" / "transports"
+    transports_dir.mkdir(parents=True, exist_ok=True)
+    (transports_dir / "nas.py").write_text(
+        "from pathlib import Path\n"
+        "from typing import Iterator\n"
+        "def fetch_to_local(archive_path: str) -> Path:\n"
+        "    return Path(archive_path)\n"
+        "def list_archive(archive_root: str, skip_patterns=None) -> Iterator[str]:\n"
+        "    for e in Path(archive_root).rglob('*'):\n"
+        "        if e.is_file():\n"
+        "            yield str(e)\n",
+        encoding="utf-8",
+    )
+
+
+def test_walk_via_transport_groups_by_first_segment(tmp_path):
+    archive_root = tmp_path / "archive" / "proj"
+    # Three top-level subfolders
+    (archive_root / "SD" / "a.pdf").parent.mkdir(parents=True)
+    (archive_root / "SD" / "a.pdf").write_text("a")
+    (archive_root / "CD" / "sub" / "b.pdf").parent.mkdir(parents=True)
+    (archive_root / "CD" / "sub" / "b.pdf").write_text("b")
+    (archive_root / "Admin" / "c.pdf").parent.mkdir(parents=True)
+    (archive_root / "Admin" / "c.pdf").write_text("c")
+    _write_nas_like_transport(tmp_path, archive_root)
+
+    folders = ds.walk_top_level_subfolders_via_transport(
+        tmp_path, "nas", str(archive_root),
+    )
+    names = [f.name for f in folders]
+    assert names == ["Admin", "CD", "SD"]
+
+    sd = next(f for f in folders if f.name == "SD")
+    assert sd.has_files_directly is True
+    cd = next(f for f in folders if f.name == "CD")
+    # CD contains only a subdirectory with files nested deeper
+    assert cd.has_subfolders is True
+
+
+def test_walk_via_transport_skip_patterns_prune_subfolders(tmp_path):
+    archive_root = tmp_path / "archive" / "proj"
+    (archive_root / "_embedded_files" / "pic.jpg").parent.mkdir(parents=True)
+    (archive_root / "_embedded_files" / "pic.jpg").write_text("x")
+    (archive_root / "SD" / "a.pdf").parent.mkdir(parents=True)
+    (archive_root / "SD" / "a.pdf").write_text("y")
+    _write_nas_like_transport(tmp_path, archive_root)
+
+    folders = ds.walk_top_level_subfolders_via_transport(
+        tmp_path, "nas", str(archive_root),
+        skip_patterns=["_embedded_files"],
+    )
+    names = [f.name for f in folders]
+    assert names == ["SD"]
+
+
+def test_walk_via_transport_missing_transport_returns_empty(tmp_path):
+    """No transport file installed — helper returns [] instead of raising."""
+    archive_root = tmp_path / "archive"
+    archive_root.mkdir()
+    folders = ds.walk_top_level_subfolders_via_transport(
+        tmp_path, "does-not-exist", str(archive_root),
+    )
+    assert folders == []

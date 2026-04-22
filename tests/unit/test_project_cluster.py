@@ -251,3 +251,79 @@ def test_sample_folder_fingerprints_all_16char_hex(tmp_path):
     for fp, _ in results:
         assert len(fp) == 16
         int(fp, 16)  # raises ValueError if not valid hex
+
+
+# ---------------------------------------------------------------------------
+# sample_folder_fingerprints_via_transport (v14.7.1 P1)
+# ---------------------------------------------------------------------------
+
+def _write_nas_like_transport(tmp_path: Path, archive_root: Path):
+    """Install a transport that walks archive_root locally (stand-in for
+    a real SFTP transport in tests)."""
+    transports_dir = tmp_path / ".vault-bridge" / "transports"
+    transports_dir.mkdir(parents=True, exist_ok=True)
+    (transports_dir / "nas.py").write_text(
+        "from pathlib import Path\n"
+        "from typing import Iterator\n"
+        "def fetch_to_local(archive_path: str) -> Path:\n"
+        "    return Path(archive_path)\n"
+        "def list_archive(archive_root: str, skip_patterns=None) -> Iterator[str]:\n"
+        "    for e in Path(archive_root).rglob('*'):\n"
+        "        if e.is_file():\n"
+        "            yield str(e)\n",
+        encoding="utf-8",
+    )
+
+
+def test_sample_via_transport_returns_fingerprints(tmp_path):
+    archive_folder = tmp_path / "archive" / "proj"
+    archive_folder.mkdir(parents=True)
+    (archive_folder / "a.pdf").write_bytes(b"aaa")
+    (archive_folder / "b.pdf").write_bytes(b"bbb")
+    _write_nas_like_transport(tmp_path, archive_folder)
+
+    
+    pairs = pc.sample_folder_fingerprints_via_transport(
+        tmp_path, "nas", str(archive_folder),
+    )
+    assert len(pairs) == 2
+    fingerprints = {fp for fp, _name in pairs}
+    assert len(fingerprints) == 2  # distinct content → distinct fingerprints
+
+
+def test_sample_via_transport_respects_limit(tmp_path):
+    archive_folder = tmp_path / "archive" / "proj"
+    archive_folder.mkdir(parents=True)
+    for i in range(10):
+        (archive_folder / f"f{i}.pdf").write_bytes(f"content{i}".encode())
+    _write_nas_like_transport(tmp_path, archive_folder)
+
+    
+    pairs = pc.sample_folder_fingerprints_via_transport(
+        tmp_path, "nas", str(archive_folder), limit=3,
+    )
+    assert len(pairs) == 3
+
+
+def test_sample_via_transport_missing_transport_returns_empty(tmp_path):
+    
+    pairs = pc.sample_folder_fingerprints_via_transport(
+        tmp_path, "nope", str(tmp_path / "archive"),
+    )
+    assert pairs == []
+
+
+def test_sample_via_transport_skips_hidden_and_tmp(tmp_path):
+    archive_folder = tmp_path / "archive"
+    archive_folder.mkdir()
+    (archive_folder / "good.pdf").write_bytes(b"y")
+    (archive_folder / ".hidden").write_bytes(b"n")
+    (archive_folder / "stale.tmp").write_bytes(b"n")
+    _write_nas_like_transport(tmp_path, archive_folder)
+
+    
+    pairs = pc.sample_folder_fingerprints_via_transport(
+        tmp_path, "nas", str(archive_folder),
+    )
+    names = {name for _fp, name in pairs}
+    assert names == {"good.pdf"}

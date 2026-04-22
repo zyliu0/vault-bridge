@@ -7,6 +7,7 @@ extraction without circular imports.
 
 Public API:
     sample_folder_fingerprints(source_folder, limit=20) -> list[tuple[str, str]]
+    sample_folder_fingerprints_via_transport(workdir, transport_name, folder, limit=20) -> list[tuple[str, str]]
     tally_project_matches(file_fingerprints, index_rows) -> tuple[Counter, int]
     project_from_note_path(note_path) -> str
     archive_parent_from_source_path(source_path, project_name) -> str
@@ -16,7 +17,7 @@ from __future__ import annotations
 import sys
 from collections import Counter
 from pathlib import Path
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 _HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(_HERE))
@@ -181,3 +182,71 @@ def _os_walk(folder: Path):
     """Thin wrapper around os.walk for testability."""
     import os
     yield from os.walk(str(folder))
+
+
+def sample_folder_fingerprints_via_transport(
+    workdir,
+    transport_name: str,
+    archive_folder: str,
+    limit: int = 20,
+    skip_patterns: Optional[List[str]] = None,
+) -> List[Tuple[str, str]]:
+    """Transport-aware counterpart to `sample_folder_fingerprints`.
+
+    The local-FS version walks `source_folder` via `os.walk`, which
+    silently yields nothing for archives that live behind a transport
+    (nas-sftp, nas-smb, …). This variant lists paths through
+    `transport_loader.list_archive`, fetches each to a local copy via
+    `transport_loader.fetch_to_local`, and computes fingerprints on the
+    local copy.
+
+    The scan commands should prefer this function whenever
+    `domain.transport` is set. Field-review v14.7.1 P1: without it,
+    pre-scan rename / move detection no-ops on every NAS-backed domain.
+
+    Args:
+        workdir: project working directory (holds `.vault-bridge/`).
+        transport_name: domain.transport slug.
+        archive_folder: absolute archive path to sample inside.
+        limit: stop after this many successful fingerprints.
+        skip_patterns: passed through to list_archive so descendants of
+            skipped directories aren't even fetched.
+
+    Returns the same `[(fingerprint, filename), ...]` shape as
+    `sample_folder_fingerprints`. Returns an empty list when the
+    transport cannot be loaded or the archive folder does not exist;
+    never raises.
+    """
+    try:
+        from transport_loader import (  # noqa: PLC0415 — avoid import cycle
+            list_archive, fetch_to_local,
+            TransportMissing, TransportInvalid, TransportFailed,
+        )
+    except ImportError:
+        return []
+
+    results: List[Tuple[str, str]] = []
+
+    try:
+        paths = list(list_archive(workdir, transport_name, archive_folder,
+                                  skip_patterns or []))
+    except (TransportMissing, TransportInvalid, TransportFailed):
+        return []
+
+    for archive_path in paths:
+        if len(results) >= limit:
+            break
+        name = Path(archive_path).name
+        if not name or name.startswith(".") or name.endswith(".tmp"):
+            continue
+        try:
+            local_path = fetch_to_local(workdir, transport_name, archive_path)
+        except Exception:
+            continue
+        try:
+            fp = fp_mod.fingerprint_file(local_path)
+        except Exception:
+            continue
+        results.append((fp, name))
+
+    return results

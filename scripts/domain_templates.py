@@ -22,7 +22,9 @@ DOMAIN_TEMPLATES = {
     # -----------------------------------------------------------------------
     "architecture": {
         "routing_patterns": [
-            # Phase-based routing (bilingual folder names)
+            # Phase-based routing (bilingual folder names).
+            # Strict / numbered forms first so they win against looser
+            # bare-keyword entries below (first-match-wins semantics).
             {"match": "3_施工图 CD", "subfolder": "CD"},
             {"match": " CD", "subfolder": "CD"},
             {"match": "2_方案SD", "subfolder": "SD"},
@@ -32,6 +34,12 @@ DOMAIN_TEMPLATES = {
             {"match": "深化", "subfolder": "DD"},
             {"match": " CA", "subfolder": "CA"},
             {"match": "竣工", "subfolder": "CA"},
+            # Looser bare-keyword forms (v14.7.2, field-agent recommendation)
+            # — catches date-prefixed folders like `230228 施工图` without
+            # requiring the full `3_施工图 CD` template name.
+            {"match": "施工图", "subfolder": "CD"},
+            {"match": "小样", "subfolder": "CD"},
+            {"match": "concept", "subfolder": "SD"},  # case-insensitive match
             # Specialty routing
             {"match": "结构", "subfolder": "Structure"},
             {"match": "Structure", "subfolder": "Structure"},

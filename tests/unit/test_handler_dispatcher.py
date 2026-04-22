@@ -184,6 +184,22 @@ class TestCoverageReport:
         assert not cov.has_stubs()
         assert cov.real == []
 
+    def test_built_in_categories_always_populated(self):
+        """v14.7.1 P5: built-in registry categories must always be listed
+        so the scan-start log shows the full recognized-type surface,
+        not just the 7 delegated handlers."""
+        cov_none = handler_dispatcher.coverage_report(None)
+        assert "document-pdf" in cov_none.built_in
+        assert "image-raster" in cov_none.built_in
+        assert "text-plain" in cov_none.built_in
+        assert "video" in cov_none.built_in  # skip-only but still recognized
+
+    def test_to_lines_includes_built_in_section(self, tmp_path):
+        """to_lines() must emit a 'built-in:' row above 'real:'/'stubs:'."""
+        cov = handler_dispatcher.coverage_report(str(tmp_path))
+        lines = cov.to_lines()
+        assert any(line.lstrip().startswith("built-in:") for line in lines)
+
     def test_missing_handlers_dir_marks_all_missing(self, tmp_path):
         cov = handler_dispatcher.coverage_report(str(tmp_path))
         assert set(cov.missing) == set(handler_dispatcher.DELEGATED_CATEGORIES)

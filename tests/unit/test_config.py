@@ -297,6 +297,64 @@ def test_effective_for_merges_tiers(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# Test 10b — effective_for dedupes list-valued fields across tiers (v14.7.1 P4)
+# ---------------------------------------------------------------------------
+
+def test_effective_for_dedupes_skip_patterns(tmp_path):
+    """A skip pattern that appears in both template and domain appears once.
+
+    Before v14.7.1 the rendered CLAUDE.md listed every shared pattern
+    twice because the merge concatenated without dedup (field-review P4).
+    """
+    data = dict(_SAMPLE_V4)
+    # The "architecture" template ships with .DS_Store, #recycle, etc.
+    # in skip_patterns. The domain ALSO lists .DS_Store — the merge
+    # used to emit it twice.
+    data["domains"][0]["skip_patterns"] = [".DS_Store", "*.bak"]
+    _write_v4(tmp_path, data)
+    config = cfg_mod.load_config(tmp_path)
+
+    eff = cfg_mod.effective_for(config, "arch-projects")
+    # Each pattern appears at most once
+    assert eff.skip_patterns.count(".DS_Store") == 1
+
+
+def test_effective_for_dedupes_routing_patterns(tmp_path):
+    """Routing rules are deduped on (match, subfolder) identity."""
+    data = dict(_SAMPLE_V4)
+    # Add the same routing rule at project-override tier that the
+    # domain already declared — should collapse to one entry.
+    data["domains"][0]["routing_patterns"] = [{"match": " SD", "subfolder": "SD"}]
+    data["project_overrides"] = {
+        "routing_patterns": [{"match": " SD", "subfolder": "SD"}],
+        "content_overrides": [],
+        "skip_patterns": [],
+        "fallback": "",
+        "project_style": {},
+    }
+    _write_v4(tmp_path, data)
+    config = cfg_mod.load_config(tmp_path)
+
+    eff = cfg_mod.effective_for(config, "arch-projects")
+    sd_rules = [r for r in eff.routing_patterns
+                if r.get("match") == " SD" and r.get("subfolder") == "SD"]
+    assert len(sd_rules) == 1
+
+
+def test_effective_for_dedupes_default_tags(tmp_path):
+    """`default_tags` deduplicates across template + domain."""
+    data = dict(_SAMPLE_V4)
+    # Template "architecture" ships `default_tags: ["architecture"]`;
+    # domain ALSO lists "architecture" — should collapse to one.
+    data["domains"][0]["default_tags"] = ["architecture", "arch-projects"]
+    _write_v4(tmp_path, data)
+    config = cfg_mod.load_config(tmp_path)
+
+    eff = cfg_mod.effective_for(config, "arch-projects")
+    assert eff.default_tags.count("architecture") == 1
+
+
+# ---------------------------------------------------------------------------
 # Test 11 — effective_for with nonexistent domain raises ValueError
 # ---------------------------------------------------------------------------
 

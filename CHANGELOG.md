@@ -1,5 +1,107 @@
 # Changelog
 
+## v14.7.2 — field-review fixes (P1–P5 + arch-projects template seeds)
+
+Five issues from a 2026-04-22 retro-scan dry-run of a 548-file arch
+project behind `nas-sftp`. P-IDs match the field report.
+
+### P1 (high) — pre-scan detectors are now transport-aware
+
+`project_rename.detect_project_rename`, `project_move.detect_project_move`,
+and `discover_structure.walk_top_level_subfolders` all walked the source
+string via local filesystem APIs (`os.walk`, `Path.iterdir`). On domains
+whose `archive_root` lives behind a transport, they silently returned
+empty results — rename detection never fired, move detection never
+fired, and Step 4.5 (interactive subfolder classification) silently
+bypassed itself. Every new top-level subfolder fell through to the
+domain fallback without the user seeing a prompt.
+
+New helpers:
+
+- `project_cluster.sample_folder_fingerprints_via_transport(workdir, transport_name, folder, limit=20, skip_patterns=None)`
+  fetches each file via `transport_loader.fetch_to_local` and
+  fingerprints the local copy.
+- `discover_structure.walk_top_level_subfolders_via_transport(workdir, transport_name, archive_root, skip_patterns=None)`
+  enumerates top-level folders by grouping `transport_loader.list_archive`
+  output by first path segment under `archive_root`.
+
+Wiring:
+
+- `project_move.detect_project_move(..., transport_name=None)` — when set,
+  routes through the transport sampler.
+- `commands/retro-scan.md` Steps 1.5a / 3.5a / 4.5a now pick the
+  transport-aware variant when `effective.transport_name` is set.
+
+### P2 (medium) — `skip_patterns` match any path segment, not just basename
+
+`transport_loader.list_archive` now post-filters its own output so a
+pattern like `_embedded_files` (a folder name) prunes every descendant,
+regardless of whether the underlying transport's `list_archive`
+implementation only fnmatch'd on basenames. User-authored transports
+get the fix for free; no transport regeneration required.
+
+### P3 (low) — `plugin_version.get_git_sha` NameError on non-git workdirs
+
+Bare `e` in the `except` clause raised `NameError` whenever git was
+unavailable or the plugin root wasn't a git checkout. Plus the similar
+handler in `check_for_updates` spammed WARNING on every scan. Both
+handlers now handle `CalledProcessError` / `FileNotFoundError` quietly
+and return `"unknown"` / `(False, ..., "unknown")` without stderr noise.
+
+### P4 (low) — `config.effective_for` dedupes list-valued fields
+
+Merging template + domain + project_overrides concatenated without
+dedup, so the rendered `CLAUDE.md` listed every shared `skip_pattern`,
+`routing_pattern`, and `default_tag` twice. `_merge_lists` now takes an
+optional `key=` callable and drops duplicates preserving
+first-occurrence order. `_routing_key` keys routing rules and content
+overrides on their full rule identity.
+
+### P5 (low) — `handler_dispatcher.coverage_report` includes built-ins
+
+Only delegated categories (cad-*, vector-ai, raster-psd, legacy-office,
+spreadsheet-legacy) were listed, producing a scan-start log that
+misleadingly read "only 7 file types will be handled". `HandlerCoverage`
+now has a `built_in` list populated with `document-pdf`, `document-office`,
+`image-raster`, `image-vector`, `text-plain`, `video`, `audio`, `archive`;
+`to_lines()` emits it above `real:`.
+
+### arch-projects template seeds
+
+Three loose routing patterns added for the architecture domain, after
+the strict/numbered forms so first-match-wins semantics still favour
+the template:
+
+- `施工图` → CD — catches `230228 施工图` without the `3_` prefix
+- `小样` → CD — sample/mockup review is a CD-phase artifact
+- `concept` → SD — catches `230219 concept/` without `1_概念` prefix
+  (case-insensitive match covers `Concept` too)
+
+### Tests
+
+`1789 passed` end-to-end. New targeted tests:
+
+- `tests/unit/test_plugin_version.py` — P3 regression lock
+- `tests/unit/test_handler_dispatcher.py` — `TestCoverageReport.test_built_in_*`
+- `tests/unit/test_config.py` — `test_effective_for_dedupes_*` (3 cases)
+- `tests/unit/test_transport_loader.py` — path-segment skip (P2)
+- `tests/unit/test_discover_structure.py` — `test_walk_via_transport_*` (P1)
+- `tests/unit/test_project_cluster.py` — `test_sample_via_transport_*` (P1)
+
+### Migration
+
+None. Existing notes and configs are untouched. On the next scan:
+
+- Scan-start log will show `built-in: …` as a new line.
+- Non-git installs stop printing the WARNING traceback.
+- `CLAUDE.md` regenerated via `/vault-bridge:reconcile` (or re-derived
+  on any scan that logs `effective`) will drop duplicate entries.
+- NAS-backed domains will now trigger Step 4.5 prompts for top-level
+  subfolders that previously fell through — expect a one-time batch
+  of classification prompts on the first post-upgrade scan.
+
+---
+
 ## v14.7.1 — fix silent vision-caption regression (field-review P0-1)
 
 Every scan since the v14.5 vision-runner landing silently produced

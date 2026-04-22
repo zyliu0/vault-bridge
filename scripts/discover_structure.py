@@ -10,7 +10,7 @@ Pure Python, no shell-outs. Read-only — never mutates any state.
 import fnmatch
 import sys
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import List, Optional
 
 _HERE = Path(__file__).resolve().parent
@@ -175,6 +175,94 @@ def walk_top_level_subfolders(
             has_subfolders=has_subdirs,
         ))
 
+    return results
+
+
+def walk_top_level_subfolders_via_transport(
+    workdir,
+    transport_name: str,
+    archive_root: str,
+    skip_patterns: Optional[List[str]] = None,
+) -> List[DiscoveredFolder]:
+    """Transport-aware counterpart to `walk_top_level_subfolders`.
+
+    The local-FS version calls `Path.iterdir()` on `archive_root`, which
+    returns nothing for domains whose archive is behind a transport.
+    This variant enumerates archive paths through
+    `transport_loader.list_archive` and groups them by first path
+    segment relative to `archive_root`, reconstructing the same
+    `DiscoveredFolder` rows the mid-scan classifier needs.
+
+    Scan commands should prefer this function whenever `domain.transport`
+    is set. Field-review v14.7.1 P1: prior versions silently bypassed
+    Step 4.5 (interactive subfolder classification) on all NAS-backed
+    domains because the local-FS walk hit an empty iterator.
+
+    Args:
+        workdir: project working directory (holds `.vault-bridge/`).
+        transport_name: domain.transport slug.
+        archive_root: absolute archive root to enumerate top-level subfolders of.
+        skip_patterns: passed through to list_archive (and filtered on
+            the basename here too, for parity with the local-FS variant).
+
+    Returns the same `DiscoveredFolder` list shape as
+    `walk_top_level_subfolders`. Returns an empty list on transport
+    failure; never raises.
+    """
+    try:
+        from transport_loader import (  # noqa: PLC0415 — avoid cycle
+            list_archive,
+            TransportMissing, TransportInvalid, TransportFailed,
+        )
+    except ImportError:
+        return []
+
+    patterns = list(skip_patterns or [])
+    try:
+        paths = list(list_archive(workdir, transport_name, archive_root, patterns))
+    except (TransportMissing, TransportInvalid, TransportFailed):
+        return []
+
+    root_str = str(archive_root).rstrip("/")
+    root_prefix = root_str + "/"
+
+    # Group by first path segment under archive_root.
+    groups: dict = {}
+    for path in paths:
+        p = str(path)
+        if p.startswith(root_prefix):
+            rel = p[len(root_prefix):]
+        elif p == root_str:
+            continue
+        else:
+            rel = p
+        parts = PurePosixPath(rel).parts
+        if not parts:
+            continue
+        first = parts[0]
+        if not first or first.startswith(".") or _matches_skip_pattern(first, patterns):
+            continue
+        stats = groups.setdefault(first, {
+            "child_count": 0,
+            "has_files_directly": False,
+            "has_subfolders": False,
+        })
+        stats["child_count"] += 1
+        if len(parts) == 2:
+            stats["has_files_directly"] = True
+        elif len(parts) > 2:
+            stats["has_subfolders"] = True
+
+    results: List[DiscoveredFolder] = []
+    for name in sorted(groups.keys()):
+        stats = groups[name]
+        results.append(DiscoveredFolder(
+            name=name,
+            absolute_path=f"{root_str}/{name}",
+            child_count=stats["child_count"],
+            has_files_directly=stats["has_files_directly"],
+            has_subfolders=stats["has_subfolders"],
+        ))
     return results
 
 

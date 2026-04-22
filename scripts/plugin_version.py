@@ -22,16 +22,23 @@ def _get_plugin_root() -> Path:
 
 
 def get_git_sha(root: Optional[Path] = None) -> str:
-    """Return the git SHA of the plugin root."""
+    """Return the git SHA of the plugin root.
+
+    Silently returns "unknown" when git is unavailable or the path is
+    not inside a repository. Previously logged a WARNING with a bare
+    `e` that raised NameError (field-review v14.7.1 P3); now the branch
+    handles both subprocess failures and missing-git gracefully and
+    emits no stderr noise on the expected case (non-git checkout).
+    """
     root = root or _get_plugin_root()
     try:
         return subprocess.check_output(
             ["git", "rev-parse", "--short=8", "HEAD"],
             cwd=root,
             text=True,
+            stderr=subprocess.DEVNULL,
         ).strip()
-    except Exception:
-        print(f"WARNING: git SHA lookup failed: {e}", file=sys.stderr)
+    except (subprocess.CalledProcessError, FileNotFoundError, OSError):
         return "unknown"
 
 
@@ -96,26 +103,21 @@ def check_for_updates(plugin_root: Optional[Path] = None) -> tuple[bool, Optiona
     if not has_version_file:
         return (True, installed, current_sha)
 
-    # Compare git SHA of current install vs what was recorded
-    try:
-        recorded_sha = subprocess.check_output(
-            ["git", "rev-parse", "--short=8", "HEAD"],
-            cwd=plugin_root,
-            text=True,
-        ).strip()
-        # If the installed version's SHA differs from current HEAD, an update occurred
-        # Parse the installed version string for embedded SHA
-        installed_raw = get_installed_version() or ""
-        if "-" in installed_raw:
-            recorded_sha_from_version = installed_raw.rsplit("-", 1)[-1]
-        else:
-            recorded_sha_from_version = recorded_sha  # same install, no update
-
-        update_available = (recorded_sha_from_version != current_sha)
-        return (update_available, installed, current_sha)
-    except Exception as e:
-        print(f"WARNING: update check failed: {e}", file=sys.stderr)
+    # Compare git SHA of current install vs what was recorded. When the
+    # plugin is not in a git checkout, current_sha is "unknown" — we
+    # treat that as "cannot determine update availability" and return
+    # False quietly rather than warning on every scan.
+    if current_sha == "unknown":
         return (False, installed, current_sha)
+
+    installed_raw = get_installed_version() or ""
+    if "-" in installed_raw:
+        recorded_sha_from_version = installed_raw.rsplit("-", 1)[-1]
+    else:
+        recorded_sha_from_version = current_sha  # same install, no update
+
+    update_available = (recorded_sha_from_version != current_sha)
+    return (update_available, installed, current_sha)
 
 
 def format_update_notice(plugin_root: Optional[Path] = None) -> Optional[str]:

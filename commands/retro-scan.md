@@ -256,7 +256,14 @@ import project_move as pm
 
 source = os.environ['VB_SRC_FOLDER']
 workdir = Path(os.getcwd())
-move = pm.detect_project_move(workdir, Path(source))
+# v14.7.1 P1: pass the domain's transport when set so fingerprints are
+# sampled through the transport. Without this, SFTP/SMB archives see
+# an empty sample list and move detection silently no-ops.
+transport = os.environ.get('VB_TRANSPORT') or None
+move = pm.detect_project_move(
+    workdir, Path(source),
+    transport_name=transport,
+)
 if move is None:
     print(json.dumps({'move': None}))
 else:
@@ -270,7 +277,7 @@ else:
         'confidence': move.confidence,
         'pct': pct,
     }}))
-" VB_SRC_FOLDER="$1"
+" VB_SRC_FOLDER="$1" VB_TRANSPORT="$TRANSPORT_NAME"
 ```
 
 Capture as `$MOVE_JSON`.
@@ -377,28 +384,37 @@ python3 -c "
 import os, sys, json
 from pathlib import Path
 sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
-import fingerprint, project_rename as pr
+import fingerprint, project_rename as pr, project_cluster as pc
 
 source = os.environ['VB_SRC_FOLDER']
 workdir = Path(os.getcwd())
+transport = os.environ.get('VB_TRANSPORT') or None
 
-# Collect up to 20 sample files, skipping hidden + temp files
 sample: list = []
-for root, dirs, files in os.walk(source):
-    dirs[:] = [d for d in dirs if not d.startswith('.')]
-    for f in files:
-        if f.startswith('.') or f.endswith('.tmp'):
-            continue
-        p = Path(root) / f
-        try:
-            fp = fingerprint.fingerprint_file(p)
-        except Exception:
-            continue
-        sample.append((str(p), fp))
+if transport:
+    # v14.7.1 P1: sample via the domain transport so remote archives
+    # (nas-sftp, nas-smb) actually produce fingerprints.
+    for fp, name in pc.sample_folder_fingerprints_via_transport(
+        workdir, transport, source,
+    ):
+        sample.append((f'{source}/{name}', fp))
+else:
+    # Local-FS domain — walk directly.
+    for root, dirs, files in os.walk(source):
+        dirs[:] = [d for d in dirs if not d.startswith('.')]
+        for f in files:
+            if f.startswith('.') or f.endswith('.tmp'):
+                continue
+            p = Path(root) / f
+            try:
+                fp = fingerprint.fingerprint_file(p)
+            except Exception:
+                continue
+            sample.append((str(p), fp))
+            if len(sample) >= 20:
+                break
         if len(sample) >= 20:
             break
-    if len(sample) >= 20:
-        break
 
 det = pr.detect_project_rename(workdir, source, sample)
 if det is None:
@@ -413,7 +429,7 @@ else:
             'confidence': det.confidence,
         }
     }))
-" VB_SRC_FOLDER="$1"
+" VB_SRC_FOLDER="$1" VB_TRANSPORT="$TRANSPORT_NAME"
 ```
 
 Capture the JSON as `$RENAME_JSON`.
@@ -521,13 +537,23 @@ import domain_router, discover_structure as ds
 
 workdir = Path.cwd()
 cfg = load_config(workdir)
-import sys as _sys
 r = domain_router.resolve_domain('$1', cfg.to_dict())
 effective = effective_for(cfg, r.domain_name)
-discovered = ds.walk_top_level_subfolders(
-    '$1',
-    skip_patterns=list(effective.skip_patterns),
-)
+
+# v14.7.1 P1: pick the transport-aware walker when the domain has a
+# transport configured. The local-FS walker sees nothing on remote
+# archives and Step 4.5 would silently skip.
+if effective.transport_name:
+    discovered = ds.walk_top_level_subfolders_via_transport(
+        workdir, effective.transport_name, '$1',
+        skip_patterns=list(effective.skip_patterns),
+    )
+else:
+    discovered = ds.walk_top_level_subfolders(
+        '$1',
+        skip_patterns=list(effective.skip_patterns),
+    )
+
 prompts = ds.build_category_prompts(discovered, effective)
 print(json.dumps([
     {

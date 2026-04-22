@@ -291,9 +291,44 @@ class EffectiveConfig:
 # Internal merge helpers
 # ---------------------------------------------------------------------------
 
-def _merge_lists(base: list, override: list) -> list:
-    """Concatenate; override (project) entries come FIRST."""
-    return list(override) + list(base)
+def _merge_lists(base: list, override: list, key=None) -> list:
+    """Concatenate override (project) ENTRIES FIRST, then base, with dedup.
+
+    `key` is a callable that returns a hashable identity for each entry:
+      - For scalars (strings): default `None` means identity-on-value.
+      - For dicts (routing rules, content overrides): pass something like
+        `lambda r: (r.get("match"), r.get("subfolder"))`.
+
+    First-occurrence wins — which is correct when `override` comes first,
+    because project entries override domain entries which override
+    template entries (field-review v14.7.1 P4). Before the dedup, the
+    merge accumulated duplicates across tiers; rendered CLAUDE.md showed
+    every skip_pattern and routing rule twice when the domain didn't
+    override them.
+    """
+    seen = set()
+    out: list = []
+    for item in list(override) + list(base):
+        try:
+            ident = key(item) if key is not None else item
+        except Exception:
+            # Unhashable fallback — keep the entry and skip dedup for it.
+            out.append(item)
+            continue
+        if ident in seen:
+            continue
+        seen.add(ident)
+        out.append(item)
+    return out
+
+
+def _routing_key(entry):
+    """Dedup identity for a routing_patterns / content_overrides entry."""
+    if not isinstance(entry, dict):
+        return entry
+    # Stable, order-independent fingerprint of the whole rule.
+    return tuple(sorted((k, _routing_key(v) if isinstance(v, dict) else v)
+                        for k, v in entry.items()))
 
 
 def _merge_scalars(base: Any, override: Any) -> Any:
@@ -448,21 +483,28 @@ def effective_for(config: Config, domain_name: Optional[str]) -> EffectiveConfig
 
     po = config.project_overrides
 
-    # Lists: project first, then domain, then template
+    # Lists: project first, then domain, then template. First-occurrence
+    # dedup (field-review v14.7.1 P4) — previously rules could appear
+    # multiple times in the merged config when domain/template had the
+    # same entry, polluting CLAUDE.md and stderr logs.
     merged_routing = _merge_lists(
         _merge_lists(
             template.get("routing_patterns", []),
             list(domain.routing_patterns),
+            key=_routing_key,
         ),
         list(po.routing_patterns),
+        key=_routing_key,
     )
 
     merged_content_overrides = _merge_lists(
         _merge_lists(
             template.get("content_overrides", []),
             list(domain.content_overrides),
+            key=_routing_key,
         ),
         list(po.content_overrides),
+        key=_routing_key,
     )
 
     merged_skip = _merge_lists(
@@ -498,8 +540,13 @@ def effective_for(config: Config, domain_name: Optional[str]) -> EffectiveConfig
         dict(po.project_style),
     )
 
-    # fabrication_stopwords: builtins first, then user-added
-    merged_stopwords = list(BUILTIN_FABRICATION_STOPWORDS) + list(config.fabrication_stopwords)
+    # fabrication_stopwords: builtins first, then user-added, dedup
+    # preserves first-occurrence order so builtins never disappear
+    # when the user copies one into their list.
+    merged_stopwords = _merge_lists(
+        list(config.fabrication_stopwords),
+        list(BUILTIN_FABRICATION_STOPWORDS),
+    )
 
     return EffectiveConfig(
         vault_name=config.vault_name,

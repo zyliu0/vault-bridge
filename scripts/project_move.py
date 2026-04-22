@@ -71,6 +71,8 @@ def detect_project_move(
     source_folder: Path,
     threshold: float = 0.5,
     min_matches: int = 3,
+    *,
+    transport_name: Optional[str] = None,
 ) -> Optional[ProjectMove]:
     """Detect whether the archive project folder was *moved* (not renamed).
 
@@ -81,6 +83,11 @@ def detect_project_move(
         threshold: Minimum fraction of checked fingerprints that must
             agree on the same (project_name, archive_parent) cluster.
         min_matches: Absolute minimum number of matching fingerprints.
+        transport_name: When set, sample fingerprints through the named
+            domain transport (nas-sftp, nas-smb, …) instead of the local
+            filesystem. Without this, domains whose archive lives behind
+            a remote transport silently return no samples — move
+            detection never fires. Field-review v14.7.1 P1.
 
     Returns:
         ProjectMove if detected, else None.
@@ -105,8 +112,15 @@ def detect_project_move(
     if not by_fp:
         return None
 
-    # Sample fingerprints from the folder
-    samples = pc.sample_folder_fingerprints(source_folder)
+    # Sample fingerprints from the folder — via transport if configured,
+    # else local FS. The via-transport path fetches files to local and
+    # fingerprints on the local copy.
+    if transport_name:
+        samples = pc.sample_folder_fingerprints_via_transport(
+            workdir, transport_name, str(source_folder),
+        )
+    else:
+        samples = pc.sample_folder_fingerprints(source_folder)
     if not samples:
         return None
 

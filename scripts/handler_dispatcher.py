@@ -109,14 +109,41 @@ def _has_trivial_body(text: str, fn_name: str) -> bool:
     return bool(re.search(pattern, text, re.DOTALL))
 
 
+# Categories handled by the built-in registry in file_type_handlers.py
+# (no per-extension handler file needed). Included in coverage_report so
+# the user can see the full set of file types that will be recognized,
+# not just the delegated ones (field-review v14.7.1 P5).
+_BUILTIN_CATEGORIES = (
+    "document-pdf",
+    "document-office",
+    "image-raster",
+    "image-vector",
+    "text-plain",
+    "video",
+    "audio",
+    "archive",
+)
+
+
 @dataclass
 class HandlerCoverage:
-    """Summary of `.vault-bridge/handlers/` contents for one workdir."""
+    """Summary of `.vault-bridge/handlers/` contents for one workdir.
+
+    `real`, `stub`, and `missing` track delegated categories (CAD,
+    vector-ai, raster-psd, etc.) that depend on per-extension handler
+    files. `built_in` lists categories handled by the plugin's own
+    dispatch in `file_type_handlers.py` — PDF, Office, raster/vector
+    images, plain text, plus skip-only categories (video, audio,
+    archive). Built-ins need no setup; they are listed purely so the
+    scan-start log shows the full recognized-type surface.
+    """
 
     real: List[str] = field(default_factory=list)
     stub: List[str] = field(default_factory=list)
     # Categories we support but have no handler file for at all.
     missing: List[str] = field(default_factory=list)
+    # Categories handled by the built-in registry; always populated.
+    built_in: List[str] = field(default_factory=list)
 
     def has_stubs(self) -> bool:
         return bool(self.stub)
@@ -124,16 +151,18 @@ class HandlerCoverage:
     def to_lines(self) -> List[str]:
         """Human-readable lines for a scan-start log."""
         lines = []
+        if self.built_in:
+            lines.append(f"  built-in: {', '.join(sorted(self.built_in))}")
         if self.real:
-            lines.append(f"  real:    {', '.join(sorted(self.real))}")
+            lines.append(f"  real:     {', '.join(sorted(self.real))}")
         if self.stub:
             lines.append(
-                f"  stubs:   {', '.join(sorted(self.stub))}  "
+                f"  stubs:    {', '.join(sorted(self.stub))}  "
                 f"← will return empty; files in these categories produce metadata-only notes"
             )
         if self.missing:
             lines.append(
-                f"  missing: {', '.join(sorted(self.missing))}  "
+                f"  missing:  {', '.join(sorted(self.missing))}  "
                 f"← no handler file; files in these categories are skipped"
             )
         return lines
@@ -142,15 +171,19 @@ class HandlerCoverage:
 def coverage_report(workdir: Optional[str]) -> HandlerCoverage:
     """Walk `<workdir>/.vault-bridge/handlers/` and classify each handler.
 
-    Returns a `HandlerCoverage` with three parallel lists:
-    - `real`: handler file exists and is NOT a stub
-    - `stub`: handler file exists but looks like a TODO placeholder
-    - `missing`: delegated category has no handler file at all
+    Returns a `HandlerCoverage` with four parallel lists:
+    - `built_in`: categories handled by `file_type_handlers.py` directly
+      (document-pdf, image-raster, text-plain, …). Always populated.
+    - `real`: delegated category whose handler file exists and is NOT a stub
+    - `stub`: delegated category whose handler file is a TODO placeholder
+    - `missing`: delegated category with no handler file
 
-    When `workdir` is None or the directory does not exist, all
-    delegated categories are reported as `missing`.
+    When `workdir` is None or the handlers dir does not exist, all
+    delegated categories are reported as `missing`; `built_in` still
+    lists the standard set.
     """
-    cov = HandlerCoverage()
+    cov = HandlerCoverage(built_in=list(_BUILTIN_CATEGORIES))
+
     if not workdir:
         cov.missing = sorted(DELEGATED_CATEGORIES)
         return cov
