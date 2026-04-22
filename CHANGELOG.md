@@ -1,5 +1,23 @@
 # Changelog
 
+## v14.7.3 — template installer load_config signature fix
+
+Field-reported crash in `_write_to_vault` when `install_templates` was
+called without an explicit `vault_name`. The fallback branch imported
+`load_config` from `config`, which requires a `workdir` argument —
+calling it with no args raised `TypeError`. The zero-arg shim lives in
+`effective_config`, which reads the global config at
+`~/.vault-bridge/config.json` and returns a dict.
+
+Fix: `scripts/template_installer.py:_write_to_vault` now imports from
+`effective_config` and reads `load_config()["vault_name"]`. The first
+branch (caller provides `vault_name` explicitly, as `/vault-bridge:setup`
+and `/vault-bridge:self-update` already do) was unaffected.
+
+No template or CLI contract changes. All template installation still
+goes through the obsidian CLI (`obsidian create`), preserving the
+vault-isolation rule.
+
 ## v14.7.2 — field-review fixes (P1–P5 + arch-projects template seeds)
 
 Five issues from a 2026-04-22 retro-scan dry-run of a 548-file arch

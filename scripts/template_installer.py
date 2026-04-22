@@ -87,8 +87,8 @@ def install_all_templates(
 def _write_to_vault(vault_name: Optional[str], vault_path: str, content: str) -> None:
     """Write content to the vault using obsidian CLI."""
     if vault_name is None:
-        from config import load_config
-        vault_name = load_config().vault_name
+        from effective_config import load_config
+        vault_name = load_config()["vault_name"]
 
     cmd = [
         "obsidian", "create",
