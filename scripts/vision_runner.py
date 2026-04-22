@@ -123,6 +123,23 @@ def run_captions(
             f"no captions produced"
         ]
 
+    # Dangling-path probe (v14.7.1). If EVERY candidate path is gone, the
+    # upstream scan pipeline has torn down its tempdir before captioning.
+    # That used to fall through to empty captions silently — pre-v14.7.1
+    # every scan shipped notes with placeholder captions and nobody
+    # noticed. Raise loudly now so the bug can never hide again. Per-image
+    # missing files (rare edge case: vault moved mid-scan) still fall
+    # through to the warning path below.
+    if image_paths:
+        missing = [p for p in image_paths if not Path(p).exists()]
+        if len(missing) == len(image_paths):
+            raise FileNotFoundError(
+                f"vision_runner: all {len(missing)} image paths are missing "
+                f"(first: {image_paths[0]!r}). The scan pipeline likely "
+                f"destroyed its tmp dir before captioning — see "
+                f"scan_pipeline._scan_tmp_root / cleanup_scan_tmp."
+            )
+
     captions: List[str] = []
     warnings: List[str] = []
     for path in image_paths:
@@ -141,6 +158,15 @@ def run_captions(
             )
             continue
         captions.append(_clean_caption(caption))
+
+    # Surface the empty-caption ratio so the scan's memory report shows
+    # "captions unavailable" instead of burying it per-event (v14.7.1).
+    empty_count = sum(1 for c in captions if not c.strip())
+    if empty_count and image_paths:
+        warnings.append(
+            f"vision_runner[{actual_backend}]: {empty_count}/{len(image_paths)} "
+            f"captions came back empty — prose synthesis will lack visual grounding"
+        )
     return captions, warnings
 
 

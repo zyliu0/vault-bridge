@@ -1,5 +1,79 @@
 # Changelog
 
+## v14.7.1 — fix silent vision-caption regression (field-review P0-1)
+
+Every scan since the v14.5 vision-runner landing silently produced
+empty captions. The field-review retro-scan of `2502 ZSS 太子湾精神堡垒`
+(41 events) shipped with every note carrying placeholder captions;
+prose synthesis had no visual evidence to ground on, yet nothing
+warned the user.
+
+### Root cause
+
+`scan_pipeline._stage_extract_images` wrapped the image sub-pipeline
+in `tempfile.TemporaryDirectory()`. The compressed JPEGs lived under
+that directory, and their paths were stashed in
+`ScanResult.image_candidate_paths` for the retro-scan loop to feed
+into `vision_runner.run_captions`. But the context manager exited at
+end of stage — destroying the directory — before `process_file`
+returned. By the time the loop called the vision backend, every path
+was dangling; `Path.exists()` returned False, and the runner fell
+through to empty strings with a per-image "missing" warning buried
+inside a noisy memory report. Same bug in `_process_images_only`
+(the images-only path for text-capped files).
+
+### Fix
+
+- `scan_pipeline._make_scan_tmp_dir(workdir)` creates a persistent
+  dir under `<workdir>/.vault-bridge/tmp/extract_XXXX/`. Compressed
+  JPEGs now survive past `process_file`.
+- `scan_pipeline.cleanup_scan_tmp(workdir, *, max_age_seconds=None)`
+  sweeps extract-tmp dirs. Called with `max_age_seconds` at the top
+  of every `process_batch` to purge stale dirs from prior runs
+  (>24h); called with `None` by the scan commands after all notes
+  are written, to sweep the current batch.
+- `vision_runner.run_captions` now raises `FileNotFoundError` when
+  ALL candidate paths are missing — previously a silent fall-through
+  to empty captions. Partial missing still degrades per-image.
+- `vision_runner.run_captions` also surfaces an aggregate warning
+  like "3/5 captions came back empty" so the memory report reflects
+  the real outcome instead of burying it per-event.
+
+### Caller updates
+
+- `commands/retro-scan.md` Step 8 and `commands/heartbeat-scan.md`
+  Step 7 now invoke `cleanup_scan_tmp` after the lock is released.
+  Skipping the call is harmless — the next batch's stale-sweep
+  catches it — but keeps `.vault-bridge/tmp/` empty between runs.
+
+### Testing
+
+New in `tests/unit/test_scan_pipeline_v14.py` (`TestCandidatePathLifetime`):
+- `test_candidate_paths_exist_after_process_file` — regression
+  guard on the exact symptom (dangling paths).
+- `test_candidate_paths_land_under_scan_tmp_root` — locates tmps
+  under `<workdir>/.vault-bridge/tmp/`, not the system tempdir.
+- `test_cleanup_scan_tmp_removes_extract_dirs` and
+  `test_cleanup_scan_tmp_respects_max_age`.
+- `test_process_batch_sweeps_stale_tmp` — stale-tmp sweep on entry.
+
+Updated `tests/unit/test_vision_runner.py`:
+- `TestMissingImage::test_all_missing_paths_raises` and
+  `test_all_missing_multiple_paths_raises` — FileNotFoundError
+  regression guard.
+- Stub-backend tests assert the "captions came back empty" warning.
+
+All 107 tests pass across scan_pipeline + vision_runner suites.
+
+### Not included (deferred)
+
+- `/vault-bridge:reconcile --force-captions` to backfill captions
+  for the 41 notes already written with placeholders. Tracked as a
+  v14.8 candidate — captions are in frontmatter and can be
+  regenerated without rewriting bodies.
+
+---
+
 ## v14.7.0 — stage-based scan pipeline (C from design review)
 
 `_process_file_inner` used to be a 120-line function inlining handler

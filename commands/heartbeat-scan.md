@@ -674,6 +674,13 @@ Run:
 python3 ${CLAUDE_PLUGIN_ROOT}/scripts/vault_scan.py release-lock --workdir "$(pwd)"
 ```
 
+Sweep the scan-tmp dir now that all notes are written:
+
+```bash
+python3 -c "import sys; sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts'); \
+  import scan_pipeline; scan_pipeline.cleanup_scan_tmp('$(pwd)')"
+```
+
 ## Step 8 — write a memory report
 
 Write a per-scan report into the working directory's

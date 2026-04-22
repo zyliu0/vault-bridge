@@ -1389,6 +1389,17 @@ Run:
 python3 ${CLAUDE_PLUGIN_ROOT}/scripts/vault_scan.py release-lock --workdir "$(pwd)"
 ```
 
+Then sweep the scan-tmp dir — compressed candidate JPEGs are no longer
+needed once every note is written. Skipping this step is harmless (they
+get swept by the next batch's stale-sweep) but keeps `.vault-bridge/tmp/`
+empty between runs:
+
+```bash
+python3 -c "import sys; sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts'); \
+  import scan_pipeline; n = scan_pipeline.cleanup_scan_tmp('$(pwd)'); \
+  print(f'swept {n} extract dirs')"
+```
+
 ## Step 9 — write a memory report
 
 Write a per-scan report into the working directory's

@@ -31,7 +31,10 @@ class TestStubBackend:
             backend="stub", prompt_builder=_fake_prompt,
         )
         assert captions == [""]
-        assert warnings == []
+        # v14.7.1: stub backend always yields empty captions, so the
+        # run surfaces a memory-report warning ("1/1 came back empty")
+        # instead of silently claiming success.
+        assert any("came back empty" in w for w in warnings)
 
     def test_aligns_with_input_length(self, tmp_path):
         paths = []
@@ -39,20 +42,45 @@ class TestStubBackend:
             p = tmp_path / f"i{i}.jpg"
             p.write_bytes(b"\xff\xd8fake\xff\xd9")
             paths.append(str(p))
-        captions, _ = vision_runner.run_captions(
+        captions, warnings = vision_runner.run_captions(
             paths, {}, backend="stub", prompt_builder=_fake_prompt,
         )
         assert captions == ["", "", "", "", ""]
+        assert any("5/5" in w and "came back empty" in w for w in warnings)
 
 
 class TestMissingImage:
-    def test_nonexistent_image_gets_empty_caption_and_warning(self):
+    def test_partial_missing_image_gets_empty_caption_and_warning(self, fake_image):
+        """One real image + one missing → captions aligned, per-image warning."""
         captions, warnings = vision_runner.run_captions(
-            ["/nonexistent/does-not-exist.jpg"],
+            [fake_image, "/nonexistent/does-not-exist.jpg"],
             {}, backend="stub", prompt_builder=_fake_prompt,
         )
-        assert captions == [""]
+        assert captions == ["", ""]
         assert any("missing" in w.lower() for w in warnings)
+
+    def test_all_missing_paths_raises(self):
+        """v14.7.1: all-missing means the scan pipeline ate its tempdir — raise loudly."""
+        with pytest.raises(FileNotFoundError, match="all 1 image paths are missing"):
+            vision_runner.run_captions(
+                ["/nonexistent/does-not-exist.jpg"],
+                {}, backend="stub", prompt_builder=_fake_prompt,
+            )
+
+    def test_all_missing_multiple_paths_raises(self):
+        with pytest.raises(FileNotFoundError, match="all 3 image paths are missing"):
+            vision_runner.run_captions(
+                ["/a.jpg", "/b.jpg", "/c.jpg"],
+                {}, backend="stub", prompt_builder=_fake_prompt,
+            )
+
+    def test_empty_paths_does_not_raise(self):
+        """Empty input is fine — nothing to caption."""
+        captions, warnings = vision_runner.run_captions(
+            [], {}, backend="stub", prompt_builder=_fake_prompt,
+        )
+        assert captions == []
+        assert warnings == []
 
 
 class TestCustomBackend:

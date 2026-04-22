@@ -25,8 +25,10 @@ Python 3.9 compatible.
 """
 import logging
 import re
+import shutil
 import sys
 import tempfile
+import time
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import List, Optional
@@ -216,6 +218,94 @@ def _format_images_block(attachments: List[str]) -> str:
         return attachments[0]
     # Multiple images: consecutive lines (no blank) → minimal theme grid
     return "\n".join(attachments)
+
+
+# ---------------------------------------------------------------------------
+# Scan tempdir lifetime (v14.7.1)
+#
+# Prior to v14.7.1, `_stage_extract_images` wrapped `_process_images` in a
+# `tempfile.TemporaryDirectory()` context. The compressed JPEGs lived under
+# that dir, and their paths were stashed in `ScanResult.image_candidate_paths`
+# for the retro-scan loop to feed into `vision_runner.run_captions`. But the
+# context exited at end of stage — destroying the directory — before the
+# retro-scan loop ever saw the result. Every caption call got dangling paths
+# and silently returned empty strings or "image missing" warnings, starving
+# every written note of visual grounding.
+#
+# Fix: compress into a persistent batch-scoped dir under
+# `<workdir>/.vault-bridge/tmp/`. Paths survive `process_file` and remain
+# readable until the scan command explicitly sweeps. `process_batch` sweeps
+# stale (>24h) directories at entry so dirs never accumulate indefinitely;
+# current-batch cleanup is the scan command's job via `cleanup_scan_tmp`.
+# ---------------------------------------------------------------------------
+
+_SCAN_TMP_MAX_AGE_SECS = 86400  # 24h — covers overnight manual retro-scans
+
+
+def _scan_tmp_root(workdir: str) -> Optional[Path]:
+    """Return `<workdir>/.vault-bridge/tmp/` (created). None if workdir invalid.
+
+    Falls through to None (→ system tempdir) when workdir is empty, not a
+    string, or the .vault-bridge folder cannot be created. Callers that
+    receive None must fall back to `tempfile.mkdtemp()` without `dir=`.
+    """
+    if not workdir:
+        return None
+    try:
+        root = Path(workdir) / ".vault-bridge" / "tmp"
+        root.mkdir(parents=True, exist_ok=True)
+        return root
+    except OSError:
+        return None
+
+
+def _make_scan_tmp_dir(workdir: str, prefix: str = "extract_") -> Path:
+    """Create a per-extraction tmp dir under the scan-tmp root.
+
+    Uses the scan-tmp root when workdir is configured; falls back to the
+    system temp location when the root is unavailable so tests and edge
+    callers (empty workdir) still work.
+    """
+    root = _scan_tmp_root(workdir)
+    if root is not None:
+        return Path(tempfile.mkdtemp(dir=str(root), prefix=prefix))
+    return Path(tempfile.mkdtemp(prefix=f"vault-bridge-{prefix}"))
+
+
+def cleanup_scan_tmp(workdir: str, *, max_age_seconds: Optional[int] = None) -> int:
+    """Remove extract-tmp directories under `<workdir>/.vault-bridge/tmp/`.
+
+    Args:
+        workdir: the scan working directory.
+        max_age_seconds: only remove dirs whose mtime is older than this.
+            When None (default), remove ALL extract-tmp dirs — use this
+            form from a scan command after note-writing finishes for the
+            current batch. Pass `_SCAN_TMP_MAX_AGE_SECS` to sweep only
+            stale dirs from prior (possibly interrupted) runs.
+
+    Returns: number of directories removed. Failures are swallowed and logged.
+    """
+    root = _scan_tmp_root(workdir)
+    if root is None or not root.is_dir():
+        return 0
+    now = time.time()
+    removed = 0
+    for entry in root.iterdir():
+        if not entry.is_dir() or not entry.name.startswith("extract_"):
+            continue
+        if max_age_seconds is not None:
+            try:
+                age = now - entry.stat().st_mtime
+            except OSError:
+                continue
+            if age < max_age_seconds:
+                continue
+        try:
+            shutil.rmtree(entry)
+            removed += 1
+        except OSError as exc:
+            logger.warning("cleanup_scan_tmp: failed to remove %s: %s", entry, exc)
+    return removed
 
 
 def _safe_file_size(source_path: str) -> int:
@@ -611,27 +701,33 @@ def _stage_extract_text(ctx: _ScanContext) -> None:
 
 
 def _stage_extract_images(ctx: _ScanContext) -> None:
-    """Run the image sub-pipeline if the handler supports images."""
+    """Run the image sub-pipeline if the handler supports images.
+
+    Uses a persistent tmp dir under `<workdir>/.vault-bridge/tmp/`
+    instead of `tempfile.TemporaryDirectory()`: compressed JPEGs must
+    survive past `process_file` so `vision_runner.run_captions` can
+    read them. The scan command is responsible for calling
+    `cleanup_scan_tmp(workdir)` after the batch is done.
+    """
     h = ctx.handler
     if h is None or not (h.extract_images or h.render_pages):
         return
 
-    with tempfile.TemporaryDirectory() as tmp_str:
-        tmp_dir = Path(tmp_str)
-        (
-            img_attachments, img_embedded, img_grid,
-            img_warnings, img_errors, img_candidates, img_prompts,
-        ) = _process_images(
-            source_path=ctx.source_path,
-            workdir=ctx.workdir,
-            vault_project_path=ctx.vault_project_path,
-            event_date=ctx.event_date,
-            tmp_dir=tmp_dir,
-            vault_name=ctx.vault_name,
-            dry_run=ctx.dry_run,
-            att_index=ctx.att_index,
-            strict_handlers=ctx.strict_handlers,
-        )
+    tmp_dir = _make_scan_tmp_dir(ctx.workdir)
+    (
+        img_attachments, img_embedded, img_grid,
+        img_warnings, img_errors, img_candidates, img_prompts,
+    ) = _process_images(
+        source_path=ctx.source_path,
+        workdir=ctx.workdir,
+        vault_project_path=ctx.vault_project_path,
+        event_date=ctx.event_date,
+        tmp_dir=tmp_dir,
+        vault_name=ctx.vault_name,
+        dry_run=ctx.dry_run,
+        att_index=ctx.att_index,
+        strict_handlers=ctx.strict_handlers,
+    )
     ctx.attachments.extend(img_attachments)
     ctx.images_embedded += img_embedded
     if img_grid:
@@ -773,6 +869,15 @@ def process_batch(
     results: List[ScanResult] = []
     reads_done = 0
 
+    # Sweep stale extract-tmp dirs from prior runs (v14.7.1). Current-batch
+    # tmps are the scan command's responsibility — call `cleanup_scan_tmp`
+    # after all notes are written.
+    if workdir:
+        try:
+            cleanup_scan_tmp(workdir, max_age_seconds=_SCAN_TMP_MAX_AGE_SECS)
+        except Exception as exc:
+            logger.warning("process_batch: stale-tmp sweep failed: %s", exc)
+
     # Attachment dedup index — loaded once per batch so every event sees
     # the same view of previously-written attachments. Skips the load when
     # the caller passed one in (composite batches can share an index).
@@ -859,21 +964,20 @@ def _process_images_only(
     caption_prompts: List[str] = []
 
     try:
-        with tempfile.TemporaryDirectory() as tmp_str:
-            tmp_dir = Path(tmp_str)
-            (
-                attachments, images_embedded, image_grid,
-                warnings, errors, candidate_paths, caption_prompts,
-            ) = _process_images(
-                source_path=source_path,
-                workdir=workdir,
-                vault_project_path=vault_project_path,
-                event_date=event_date,
-                tmp_dir=tmp_dir,
-                vault_name=vault_name,
-                dry_run=dry_run,
-                att_index=att_index,
-            )
+        tmp_dir = _make_scan_tmp_dir(workdir)
+        (
+            attachments, images_embedded, image_grid,
+            warnings, errors, candidate_paths, caption_prompts,
+        ) = _process_images(
+            source_path=source_path,
+            workdir=workdir,
+            vault_project_path=vault_project_path,
+            event_date=event_date,
+            tmp_dir=tmp_dir,
+            vault_name=vault_name,
+            dry_run=dry_run,
+            att_index=att_index,
+        )
     except Exception as exc:
         errors.append(f"image-only processing error: {exc}")
 
