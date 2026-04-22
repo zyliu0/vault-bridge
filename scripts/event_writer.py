@@ -22,28 +22,37 @@ from pathlib import Path
 from typing import Callable, List, Optional, Protocol
 
 
-# Stop-words documented in CLAUDE.md — examples of fabrication to catch.
-STOP_WORDS = [
-    "pulled the back wall in",
-    "the team said",
-    "the review came back",
-    "half a storey",
-]
+# Stop-words: deliberately empty (v15.0.0). Pre-v15 this list contained
+# project-specific phrases from one user's past fabrication incidents
+# ("pulled the back wall in", "half a storey", "40cm"). They did not
+# generalise — every new project would need its own list — and they
+# masqueraded as a fabrication firewall while the real work (verbatim-
+# paste detection + source-grounding) was already done elsewhere.
+# Kept as an empty list so callers that still reference the name do not
+# break; re-populate per-project if a future user wants the behaviour.
+STOP_WORDS: List[str] = []
 
 # Verbatim-paste detection: any >= N consecutive chars from raw_text present in body.
 VERBATIM_PASTE_MIN_CHARS = 60
 
-# Word count bounds for event-note bodies.
-# The abstract callout is NOT counted — it's a separate structured
-# field for MOC builders and does not contribute to the diary prose.
-MIN_WORDS = 100
-MAX_WORDS = 200
+# Word count bounds: advisory, NOT enforced (v15.0.0). Pre-v15 the
+# validator rejected any event-note body outside MIN_WORDS..MAX_WORDS,
+# which forced retries + stub-fallback for notes where a short
+# field-observation (photo-only event) or a long PDF analysis would
+# have been fine. The LLM now picks the shape. Constants are retained
+# here as reference values the event-note prompt may surface as
+# guidance.
+MIN_WORDS = 100  # advisory — target floor for typical event notes
+MAX_WORDS = 200  # advisory — target ceiling; LLM may exceed for long PDFs
 
-# Abstract-callout contract. Every event-note body MUST start with a
-# `> [!abstract] Overview` callout whose content is a single sentence
-# (5-25 words) summarising what happened at the event. project_index
-# extracts this sentence as the `summary_hint` for each event; without
-# it the MOC cannot render a one-line preview.
+# Abstract-callout: advisory, NOT enforced (v15.0.0). Pre-v15 every
+# event-note body had to start with `> [!abstract] Overview`, with a
+# 5-25 word single sentence. MOC `summary_hint` extraction relied on
+# finding that callout. `extract_abstract_callout` now falls back to
+# the first sentence of the body when no callout is present, so the
+# LLM can choose whether the note opens with a callout, a bullet list,
+# a quote, or plain prose. Callers that want the callout shape can
+# still request it in their prompt.
 ABSTRACT_CALLOUT_MIN_WORDS = 5
 ABSTRACT_CALLOUT_MAX_WORDS = 25
 
@@ -151,33 +160,79 @@ _ABSTRACT_CALLOUT_RE = re.compile(
 )
 
 
+_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?。！？])\s+")
+
+
 def extract_abstract_callout(body: str) -> str:
-    """Return the content of the first `> [!abstract] ...` callout in body.
+    """Return a one-sentence summary hint for the note.
 
-    Strips the `> ` prefix from each line and collapses the resulting
-    lines into a single space-joined sentence. Returns '' when no
-    abstract callout is present.
+    Preference order (v15.0.0 relaxation — Issue 2 priority 2b):
+      1. Content of the first `> [!abstract] ...` callout, if present.
+      2. First sentence of the body prose when no callout is present,
+         subject to a 5-25 word filter so an overly-long opening does
+         not dump a paragraph into the MOC summary.
+      3. Empty string when neither heuristic yields a usable hint.
 
-    This is the canonical way to derive `ProjectIndexEvent.summary_hint`
-    from an event note. Callers (retro-scan, heartbeat-scan, reconcile)
-    read the written note back via obsidian CLI and pass the body to
-    this helper.
+    Pre-v15 the absence of an abstract callout was treated as a
+    validation error, which forced retries even when the LLM had
+    written a perfectly good opening sentence. The MOC builder now
+    gets a hint either way, without constraining note shape.
     """
     m = _ABSTRACT_CALLOUT_RE.search(body or "")
-    if m is None:
+    if m is not None:
+        raw_lines = m.group(1).splitlines()
+        cleaned = []
+        for line in raw_lines:
+            stripped = line.lstrip()
+            if stripped.startswith("> "):
+                cleaned.append(stripped[2:])
+            elif stripped.startswith(">"):
+                cleaned.append(stripped[1:])
+            else:
+                cleaned.append(stripped)
+        text = " ".join(part.strip() for part in cleaned if part.strip())
+        if text.strip():
+            return text.strip()
+
+    # Fallback: first prose line → first sentence. Skips headings,
+    # blockquotes, embeds, and tables — those aren't summary material.
+    prose = _first_nonblank_prose_line(body or "")
+    if not prose:
         return ""
-    raw_lines = m.group(1).splitlines()
-    cleaned = []
-    for line in raw_lines:
-        stripped = line.lstrip()
-        if stripped.startswith("> "):
-            cleaned.append(stripped[2:])
-        elif stripped.startswith(">"):
-            cleaned.append(stripped[1:])
-        else:
-            cleaned.append(stripped)
-    text = " ".join(part.strip() for part in cleaned if part.strip())
-    return text.strip()
+    parts = _SENTENCE_SPLIT_RE.split(prose, maxsplit=1)
+    sentence = (parts[0] if parts else prose).strip()
+    if not sentence:
+        return ""
+    word_count = len(sentence.split())
+    # Allow modest overshoot on the ceiling — MOC rows can render a
+    # slightly longer hint; the strict upper bound was a validation
+    # rule, now advisory.
+    if ABSTRACT_CALLOUT_MIN_WORDS <= word_count <= ABSTRACT_CALLOUT_MAX_WORDS + 10:
+        return sentence
+    return ""
+
+
+def _first_nonblank_prose_line(body: str) -> str:
+    """Return the first line of body that looks like prose (not a
+    heading / list / blockquote / image embed / callout fence)."""
+    for raw in (body or "").splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        if line.startswith("#"):          # heading
+            continue
+        if line.startswith("- "):         # bullet
+            return line[2:].strip()
+        if line.startswith("* "):
+            return line[2:].strip()
+        if line.startswith(">"):          # blockquote / callout
+            continue
+        if line.startswith("!["):         # image embed
+            continue
+        if line.startswith("|"):          # table row
+            continue
+        return line
+    return ""
 
 
 def _body_without_abstract(body: str) -> str:
@@ -199,14 +254,22 @@ def validate_event_note_body(
     event-note body. Both the write-time closure (via `_make_validator`)
     and the post-hoc auditor (`scripts/validate_event_note.py`) call it.
 
-    Checks:
-    - Leading `> [!abstract] Overview` callout is present, with a
-      single sentence of `ABSTRACT_CALLOUT_MIN_WORDS..MAX_WORDS` words.
-      The MOC relies on this to populate `summary_hint`.
-    - Body word count (excluding the abstract) within `MIN_WORDS..MAX_WORDS`.
-    - No `STOP_WORDS` phrases present.
+    Checks (v15.0.0 — Issue 2 priority 2a):
     - No verbatim-paste run ≥ `VERBATIM_PASTE_MIN_CHARS` chars from
-      `raw_text`. Skipped when `raw_text` is None (post-hoc audits).
+      `raw_text`. This is the core of the fabrication firewall and
+      stays enforced.
+    - Non-empty body (a zero-length response is always a failure —
+      the LLM produced nothing).
+    - Any stop-words in `STOP_WORDS` (empty by default post-v15).
+
+    Dropped in v15.0.0:
+    - Leading `> [!abstract] Overview` requirement. Hint extraction
+      still prefers the callout when present (`extract_abstract_callout`)
+      but falls back to the first sentence of body prose — the LLM
+      picks the shape.
+    - 100–200 word body bounds. A 2-line field observation for a
+      photo-only event and a 400-word PDF analysis are both fine. The
+      MIN_WORDS / MAX_WORDS constants remain as advisory guidance.
 
     Args:
         body: the note body text, without frontmatter.
@@ -221,34 +284,12 @@ def validate_event_note_body(
     reasons: List[str] = []
     stripped = (body or "").strip()
 
-    # Abstract-callout requirement
-    abstract = extract_abstract_callout(stripped)
-    if not abstract:
-        reasons.append(
-            "missing `> [!abstract] Overview` callout at the top of the body"
-        )
-    else:
-        abs_words = len(abstract.split())
-        if abs_words < ABSTRACT_CALLOUT_MIN_WORDS:
-            reasons.append(
-                f"abstract callout too short ({abs_words} words; "
-                f"min {ABSTRACT_CALLOUT_MIN_WORDS})"
-            )
-        elif abs_words > ABSTRACT_CALLOUT_MAX_WORDS:
-            reasons.append(
-                f"abstract callout too long ({abs_words} words; "
-                f"max {ABSTRACT_CALLOUT_MAX_WORDS})"
-            )
+    # Non-empty body — the only structural requirement post-v15.
+    if not stripped:
+        reasons.append("event-note body is empty")
 
-    # Word count — of the prose body, excluding the abstract callout
-    prose = _body_without_abstract(stripped) if abstract else stripped
-    words = prose.split()
-    n = len(words)
-    if n < MIN_WORDS:
-        reasons.append(f"word count {n} below minimum {MIN_WORDS}")
-    elif n > MAX_WORDS:
-        reasons.append(f"word count {n} above maximum {MAX_WORDS}")
-    # Stop-words
+    # Stop-words (empty list by default post-v15.0.0; left wired up
+    # so per-project overrides still work).
     low = stripped.lower()
     for phrase in STOP_WORDS:
         if phrase in low:

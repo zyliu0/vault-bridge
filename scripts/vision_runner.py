@@ -73,6 +73,47 @@ _API_VERSION = "2023-06-01"
 # record a blank caption.
 _CAPTION_TIMEOUT_SECS = 45.0
 
+# Batched-call ceiling. Option D (v14.7.4): one claude -p call covers
+# every candidate image in an event. Field test was 22s for 10 images;
+# 180s gives headroom for 20 (the IMAGE_CANDIDATE_CAP).
+_BATCH_CAPTION_TIMEOUT_SECS = 180.0
+
+# Refusal-pattern catalogue. When a `claude -p` subprocess runs without
+# `--dangerously-skip-permissions` (or hits a sandbox that denies file
+# reads), the child session returns a polite "I need permission to read
+# the image file..." instead of a caption. Pre-v14.7.4 every such string
+# flowed through `_clean_caption` and shipped into `image_captions` as
+# if it were a real description; scans with `images_embedded=N` were
+# silently poisoned. Matching any of these opens the red-line: the run
+# aborts, it does NOT degrade to stub/metadata.
+_REFUSAL_PATTERNS = (
+    "i need permission",
+    "i need your permission",
+    "please approve",
+    "permission prompt",
+    "file read when prompted",
+    "don't have permission",
+    "do not have permission",
+    "cannot read the image",
+    "unable to read the image",
+    "i'm unable to read",
+    "i am unable to read",
+)
+
+
+def is_refusal_caption(caption: str) -> bool:
+    """Return True if `caption` looks like a permission-refusal string.
+
+    Public so `validate_frontmatter.py` can share the detector. Match is
+    case-insensitive, anchored to the opening 200 chars — refusals are
+    always the entire response, never buried inside a valid caption.
+    """
+    low = (caption or "").strip().lower()
+    if not low:
+        return False
+    head = low[:200]
+    return any(pat in head for pat in _REFUSAL_PATTERNS)
+
 
 def _detect_backend() -> str:
     """Return the first available backend for `backend='auto'`."""
@@ -94,6 +135,7 @@ def run_captions(
     backend: str = "auto",
     model: str = _DEFAULT_MODEL,
     prompt_builder: Optional[Callable[[str, dict], str]] = None,
+    batch: Optional[bool] = None,
 ) -> Tuple[List[str], List[str]]:
     """Caption each image at `image_paths` in order.
 
@@ -104,11 +146,25 @@ def run_captions(
         model: model name forwarded to the backend.
         prompt_builder: defaults to `image_vision.caption_prompt_for`.
             Override for tests.
+        batch: when the backend is `claude_cli`, send all images in a
+            single subprocess call (Option D, v14.7.4). Default: True
+            when `len(image_paths) > 1`. Pass `False` to force the
+            legacy per-image loop (used by tests that stub each call).
+            Ignored for other backends.
 
     Returns:
         (captions, warnings). `captions` is index-aligned with
-        `image_paths`; slots for failed images are `""`. `warnings` is
-        a list of human-readable strings for the scan's memory report.
+        `image_paths`; slots for missing image files are `""`. `warnings`
+        is a list of human-readable strings for the scan's memory report.
+
+    Raises:
+        RuntimeError: the red-line — if any backend response matches a
+            permission-refusal pattern, or the batched claude-cli call
+            returns no parseable output, `run_captions` raises. Scans
+            must never silently ship a note whose `image_captions`
+            contains a refusal string masquerading as a description.
+        FileNotFoundError: every path in `image_paths` is missing on
+            disk (the pipeline tore down its tmp dir early).
     """
     if prompt_builder is None:
         import image_vision
@@ -140,6 +196,13 @@ def run_captions(
                 f"scan_pipeline._scan_tmp_root / cleanup_scan_tmp."
             )
 
+    # Option D (v14.7.4): batched claude_cli path. One subprocess for
+    # every image in the event instead of N — 7× faster in field tests
+    # (22s vs 160s for 10 images). Other backends stay per-image.
+    use_batch = batch if batch is not None else (len(image_paths) > 1)
+    if use_batch and actual_backend == "claude_cli" and len(image_paths) > 1:
+        return _run_captions_batched_cli(image_paths, event_meta, model)
+
     captions: List[str] = []
     warnings: List[str] = []
     for path in image_paths:
@@ -157,7 +220,16 @@ def run_captions(
                 f"{Path(path).name}: {exc}"
             )
             continue
-        captions.append(_clean_caption(caption))
+        cleaned = _clean_caption(caption)
+        if is_refusal_caption(cleaned):
+            raise RuntimeError(
+                f"vision_runner[{actual_backend}]: permission-refusal text "
+                f"returned for {Path(path).name} instead of a caption. "
+                f"The subprocess could not read the image — re-run with "
+                f"`--dangerously-skip-permissions` or an interactive session. "
+                f"Preview: {cleaned[:160]!r}"
+            )
+        captions.append(cleaned)
 
     # Surface the empty-caption ratio so the scan's memory report shows
     # "captions unavailable" instead of burying it per-event (v14.7.1).
@@ -221,12 +293,17 @@ def _claude_cli_backend(image_path: str, prompt: str, model: str) -> str:
     """Call `claude -p <prompt>` and return stdout.
 
     The prompt embeds the image path; the CLI's Read tool will open it.
-    Falls back to empty on non-zero exit or timeout.
+    Uses `--dangerously-skip-permissions` so the non-interactive
+    subprocess does not get stuck on a file-read permission prompt
+    (v14.7.4 red-line: pre-v14.7.4 every claude_cli caption returned
+    a "I need permission to read the image file..." refusal that was
+    silently written to `image_captions`). Falls back to empty on
+    timeout; raises on non-zero exit.
     """
-    cmd = ["claude", "-p", prompt]
+    base_cmd = ["claude", "-p", prompt, "--dangerously-skip-permissions"]
     # --model is optional; some claude versions don't accept it. Try
     # with first and fall through if argparse rejects.
-    try_cmd = cmd + ["--model", model]
+    try_cmd = base_cmd + ["--model", model]
     try:
         r = subprocess.run(
             try_cmd,
@@ -239,7 +316,7 @@ def _claude_cli_backend(image_path: str, prompt: str, model: str) -> str:
         # Retry without --model for older CLIs
         try:
             r = subprocess.run(
-                cmd,
+                base_cmd,
                 capture_output=True, text=True,
                 timeout=_CAPTION_TIMEOUT_SECS,
             )
@@ -248,6 +325,174 @@ def _claude_cli_backend(image_path: str, prompt: str, model: str) -> str:
         if r.returncode != 0:
             raise RuntimeError(r.stderr.strip() or "claude CLI non-zero exit")
     return r.stdout.strip()
+
+
+# ---------------------------------------------------------------------------
+# Batched claude_cli backend (Option D from v14.7.4 field-report Issue 1)
+# ---------------------------------------------------------------------------
+
+def _build_batch_prompt(image_paths: Sequence[str], event_meta: dict) -> str:
+    """Build a single prompt covering every image in the event."""
+    project = event_meta.get("project", "-") or "-"
+    event_date = event_meta.get("event_date", "-") or "-"
+    source = event_meta.get("source_basename", "-") or "-"
+    lines = [
+        "You are a vision captioner for the vault-bridge plugin.",
+        "",
+        "Read every image file listed below and write ONE caption per",
+        "image. Use your Read tool in parallel (a single tool-use block",
+        "with multiple Read calls).",
+        "",
+        f"Project: {project}",
+        f"Event date: {event_date}",
+        f"Source: {source}",
+        "",
+        "Images to caption:",
+    ]
+    for i, p in enumerate(image_paths, 1):
+        lines.append(f"{i}. {p}")
+    lines.extend([
+        "",
+        "Output format — exactly one line per image, in the same order",
+        "as listed, using the image's basename as the key:",
+        "",
+        "  <basename>: <single-sentence caption, roughly 15-25 words>",
+        "",
+        "Caption guidance:",
+        "  - Describe what is visible: materials, composition, spatial",
+        "    relationships, people and their role/state, legible text",
+        "    (quote short labels), construction/install state.",
+        "  - One sentence. No preamble, no trailing commentary, no",
+        "    empty lines between captions.",
+        "  - If an image is rotated, say so.",
+        "  - Do not request permission — Read directly.",
+        "",
+        f"Emit exactly {len(image_paths)} lines, no more, no less.",
+    ])
+    return "\n".join(lines)
+
+
+def _parse_batch_output(stdout: str, image_paths: Sequence[str]) -> List[str]:
+    """Parse `<basename>: <caption>` lines into an index-aligned list.
+
+    Missing entries are returned as "". Extra lines that don't match a
+    known basename are discarded. Tolerant of leading list markers
+    ("1.", "-", "*", "•") the model sometimes emits.
+    """
+    by_basename: dict = {}
+    for raw in (stdout or "").splitlines():
+        line = raw.strip()
+        if not line or ":" not in line:
+            continue
+        head, _, tail = line.partition(":")
+        head = head.strip().lstrip("-*•").strip()
+        # Strip leading numeric list markers like "1." or "01)"
+        while head and head[0].isdigit():
+            head = head[1:]
+        head = head.lstrip(".)-:").strip()
+        tail = tail.strip().strip("\"'")
+        if head and tail:
+            by_basename[head] = tail
+    return [by_basename.get(Path(p).name, "") for p in image_paths]
+
+
+def _run_captions_batched_cli(
+    image_paths: Sequence[str],
+    event_meta: dict,
+    model: str,
+) -> Tuple[List[str], List[str]]:
+    """Single `claude -p` call covering every existing image.
+
+    Returns (captions, warnings) aligned with `image_paths`. Missing
+    files are skipped with per-image warnings. Raises on timeout,
+    non-zero exit, or any caption matching a refusal pattern.
+    """
+    warnings: List[str] = []
+    existing: List[Tuple[int, str]] = []
+    for i, p in enumerate(image_paths):
+        if Path(p).exists():
+            existing.append((i, p))
+        else:
+            warnings.append(f"vision_runner: image missing: {p}")
+
+    if not existing:
+        return [""] * len(image_paths), warnings
+
+    existing_paths = [p for _, p in existing]
+    prompt = _build_batch_prompt(existing_paths, event_meta)
+    base_cmd = ["claude", "-p", prompt, "--dangerously-skip-permissions"]
+    try_cmd = base_cmd + ["--model", model]
+
+    stdout = ""
+    try:
+        r = subprocess.run(
+            try_cmd,
+            capture_output=True, text=True,
+            timeout=_BATCH_CAPTION_TIMEOUT_SECS,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(
+            f"vision_runner[claude_cli]: batched caption call timed out after "
+            f"{_BATCH_CAPTION_TIMEOUT_SECS}s covering {len(existing_paths)} image(s)"
+        ) from exc
+
+    if r.returncode != 0:
+        # Older CLIs may reject --model; retry without.
+        try:
+            r = subprocess.run(
+                base_cmd,
+                capture_output=True, text=True,
+                timeout=_BATCH_CAPTION_TIMEOUT_SECS,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError(
+                f"vision_runner[claude_cli]: batched caption call timed out after "
+                f"{_BATCH_CAPTION_TIMEOUT_SECS}s (retry without --model)"
+            ) from exc
+        if r.returncode != 0:
+            raise RuntimeError(
+                f"vision_runner[claude_cli]: batched call returned non-zero exit: "
+                f"{(r.stderr or '').strip() or 'no stderr'}"
+            )
+    stdout = r.stdout or ""
+
+    # Whole-body refusal check — child session refused before producing
+    # per-image lines (e.g., sandbox blocked Read even with the flag).
+    if is_refusal_caption(stdout):
+        raise RuntimeError(
+            f"vision_runner[claude_cli]: batched call returned a "
+            f"permission-refusal body for {len(existing_paths)} image(s). "
+            f"Preview: {stdout[:200]!r}"
+        )
+
+    parsed = _parse_batch_output(stdout, existing_paths)
+    if not any(c.strip() for c in parsed):
+        raise RuntimeError(
+            f"vision_runner[claude_cli]: batched call produced no parseable "
+            f"`<basename>: <caption>` lines for {len(existing_paths)} image(s). "
+            f"Raw stdout preview: {stdout[:200]!r}"
+        )
+
+    # Reassemble aligned with original image_paths; per-caption refusal
+    # check catches the rare case where the child partially refused.
+    captions: List[str] = [""] * len(image_paths)
+    for (orig_i, _), raw_cap in zip(existing, parsed):
+        cleaned = _clean_caption(raw_cap)
+        if is_refusal_caption(cleaned):
+            raise RuntimeError(
+                f"vision_runner[claude_cli]: caption slot {orig_i} matched a "
+                f"refusal pattern within the batched response. "
+                f"Preview: {cleaned[:160]!r}"
+            )
+        captions[orig_i] = cleaned
+
+    empty_count = sum(1 for c in captions if not c.strip())
+    if empty_count:
+        warnings.append(
+            f"vision_runner[claude_cli]: {empty_count}/{len(image_paths)} "
+            f"captions came back empty — prose synthesis will lack visual grounding"
+        )
+    return captions, warnings
 
 
 _BACKEND_REGISTRY = {

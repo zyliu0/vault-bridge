@@ -734,12 +734,19 @@ for src, (fp, note_path) in by_path.items():
 results = {}
 for proj, evs in projects.items():
     r = pi.update_index(proj, domain, evs, str(workdir), vault_name, date.today())
+    # v15.0.0: rewire the inter-event mesh every rebuild, so any MOC
+    # regenerated from scratch also gets its per-event Related + prev/next
+    # blocks refreshed. Idempotent via the vb:related markers.
+    r['inter_event'] = pi.apply_inter_event_links(
+        vault_name=vault_name, project_name=proj, domain=domain, events=evs,
+    )
     results[proj] = r
 print(json.dumps(results))
 " VB_VAULT=\"$VAULT_NAME\" VB_DOMAIN=\"$DOMAIN_NAME\"
 ```
 
-Track and report: `indexes_created: N`, `indexes_updated: N`, `indexes_skipped: N`.
+Track and report: `indexes_created: N`, `indexes_updated: N`, `indexes_skipped: N`,
+and `inter_event_events_linked: N`.
 
 ## Phase 2g — Fix orphaned notes (only if --orphans flag is set)
 

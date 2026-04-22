@@ -918,13 +918,20 @@ the note's frontmatter so future reconciles don't need to re-run vision.
 Add `CAPTION_WARNINGS` to the batch's memory-report warnings list so
 stub-backend or per-image failures are surfaced to the user.
 
-### 6f. Compose the note body via event_writer (v14)
+### 6f. Compose the note body via event_writer (v15)
 
 Notes are EVENT DESCRIPTIONS, not dumps of extracted text. The event-writer
-layer translates raw content + vision captions into a 100-200 word diary
-paragraph (an **event note**), or falls back to a **metadata stub** —
-fixed bullets, no prose — when nothing was readable. Never paste raw
-text into the note body.
+layer translates raw content + vision captions into a diary note — the
+LLM picks the shape (a 2-line field observation, a prose paragraph, a
+bullet-list, a `> [!important]` callout) subject to the fabrication
+firewall. When nothing was readable the pipeline falls back to a
+**metadata stub** — fixed bullets, no prose. Never paste raw text into
+the note body.
+
+v15.0.0 dropped the strict 100–200 word + required-abstract-callout
+rules; the prompt still suggests ~100–200 words as a normal target
+while the LLM is free to write shorter / longer when the content
+warrants it.
 
 ```python
 import sys
@@ -966,8 +973,9 @@ call required. Continue to 6g.
 **If `composed.note_kind == 'event'`:** execute `composed.prompt_text`
 as a sub-prompt (you are the model that runs it). The prompt is
 self-contained — it carries event metadata, the raw-text excerpt, the
-captions, and the fabrication-firewall rules. Return only the 100-200
-word diary paragraph. Then validate:
+captions, and the fabrication-firewall rules. Return the diary body in
+whatever shape best communicates what happened (prose, bullets, mix).
+Then validate:
 
 ```python
 vresult = composed.validator(diary_body)
@@ -1344,25 +1352,37 @@ print(event_writer.extract_abstract_callout(body))
 #    \"content_confidence\": ..., \"summary_hint\": \"$HINT\", \"parties\": []}
 ```
 
-### 7c — add backlinks to event notes
+### 7c — apply inter-event wikilinks (v15.0.0)
 
-For each newly-written event note, add an `index_note` backlink:
+After the MOC update for the project, wire the inter-event mesh onto
+every event note: a `## Related` section (content-proximity scoring in
+`link_strategy.find_related_events`) plus a footer `← Previous in <SF>` /
+`→ Next in <SF>` pair for chronological siblings in the same subfolder.
+The block is wrapped in `<!-- vb:related-start -->` /
+`<!-- vb:related-end -->` markers so subsequent scans replace it
+idempotently. Events with no peers above the min-score threshold get
+no Related block — better silence than noisy links.
 
 ```bash
 python3 -c "
-import os, sys
-from pathlib import Path
+import os, sys, json
 sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
 import project_index as pi
 
-pi.add_index_backlink(
-    workdir=os.getcwd(),
+events = [pi.ProjectIndexEvent(**e) for e in json.loads(os.environ['VB_EVENTS_JSON'])]
+stats = pi.apply_inter_event_links(
     vault_name=os.environ['VB_VAULT'],
-    note_path=os.environ['VB_NOTE_PATH'],
     project_name=os.environ['VB_PROJECT'],
+    domain=os.environ['VB_DOMAIN'],
+    events=events,
 )
-" VB_VAULT=\"$VAULT_NAME\" VB_NOTE_PATH=\"$NOTE_PATH\" VB_PROJECT=\"$PROJECT_NAME\"
+print(json.dumps(stats))
+" VB_PROJECT=\"$PROJECT_NAME\" VB_DOMAIN=\"$DOMAIN_NAME\" \
+  VB_VAULT=\"$VAULT_NAME\" VB_EVENTS_JSON=\"$EVENTS_JSON\"
 ```
+
+Track `events_linked`, `events_without_peers`, and `failures` in the
+Step 9 memory report so the user sees mesh-wiring coverage.
 
 ### 7d — create the Obsidian template (once)
 

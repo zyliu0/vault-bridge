@@ -55,6 +55,13 @@ FIELD_ORDER = (
 _OPTIONAL_SET = frozenset({
     "attachments", "source_images", "images_embedded",
     "image_captions", "tags",
+    # v15.0.0 (Issue 2 priority 4b): cssclasses and sources_read are
+    # now optional. `cssclasses: []` was required-even-empty pre-v15,
+    # which added a noise line to every note that had no image grid;
+    # `sources_read: []` on metadata stubs was likewise the dominant
+    # shape. Notes that omit these fields are valid — the cross-field
+    # invariants still treat a missing `sources_read` as empty.
+    "cssclasses", "sources_read",
 })
 
 REQUIRED_FIELDS = tuple(f for f in FIELD_ORDER if f not in _OPTIONAL_SET)

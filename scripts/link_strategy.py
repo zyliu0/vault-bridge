@@ -167,6 +167,244 @@ def compute_relevance_score(
 
 
 # ---------------------------------------------------------------------------
+# Inter-event mesh (v15.0.0 — Issue 2 priorities 1c + 1d)
+#
+# The MOC has always carried MOC → event wikilinks but events carried
+# zero event → event wikilinks. In Obsidian's graph view this produces
+# a pure star: one hub, N spokes. The helpers below compute per-event
+# related/prev/next suggestions that retro-scan / heartbeat-scan append
+# as a `## Related` section after the event body is validated, turning
+# the star into a mesh while keeping the fabrication firewall (only
+# suggests events that actually exist in the scan index).
+#
+# Scoring is intentionally heuristic; treat the weights as tunables.
+# A lower total `_MIN_RELATED_SCORE` threshold would introduce noisy
+# links; a higher one would leave genuine siblings unconnected.
+# ---------------------------------------------------------------------------
+
+# Weight of each signal, summed into a score per peer.
+_RELATED_WEIGHT_TOPIC_TOKEN = 5.0    # per shared topic token, capped at 3 tokens
+_RELATED_WEIGHT_MAX_TOKEN_HITS = 3
+_RELATED_WEIGHT_SAME_SUBFOLDER = 3.0
+_RELATED_WEIGHT_PARTY_OVERLAP = 2.0  # per shared party, capped at 3 parties
+_RELATED_WEIGHT_MAX_PARTY_HITS = 3
+_RELATED_DATE_WINDOW_DAYS = 14       # date-proximity contribution within ±14 days
+_RELATED_DATE_WEIGHT = 4.0           # max date proximity contribution
+_MIN_RELATED_SCORE = 4.0             # below this a peer is not linked
+
+# Tokens dropped before scoring — extremely common words, routing-folder
+# names, and the fixed "event" placeholder in unnamed notes all pollute
+# similarity without telling us anything.
+_RELATED_STOP_TOKENS = frozenset({
+    "event", "note", "file", "folder", "meeting",
+    "admin", "sd", "dd", "cd", "ca", "drawing", "drawings",
+    "the", "and", "of", "for", "with", "to", "a", "an",
+})
+
+
+def _tokenize_for_related(text: str) -> set:
+    """Split a filename / summary_hint into lowercased word tokens.
+
+    Strips YYYY-MM-DD date prefixes, punctuation, and stop-tokens.
+    Keeps CJK characters intact (each Unicode code point in CJK Unified
+    Ideographs is treated as a token) so shared Chinese phrases like
+    ``"施工图"`` score as a match.
+    """
+    import re as _re
+    if not text:
+        return set()
+    # Strip ISO date prefix like "2024-08-15 " or "2024-08-15--"
+    t = _re.sub(r"^\d{4}-\d{2}-\d{2}[-\s]*", "", text)
+    tokens: set = set()
+    buf = []
+
+    def _flush_buf():
+        if buf:
+            w = "".join(buf).lower()
+            if len(w) >= 2 and w not in _RELATED_STOP_TOKENS:
+                tokens.add(w)
+            buf.clear()
+
+    for ch in t:
+        # CJK Unified Ideographs range → per-char token
+        if "一" <= ch <= "鿿":
+            _flush_buf()
+            tokens.add(ch)
+        elif ch.isalnum() or ch == "_":
+            buf.append(ch)
+        else:
+            _flush_buf()
+    _flush_buf()
+    return tokens
+
+
+def _related_date_proximity(date_a: str, date_b: str) -> float:
+    try:
+        da = datetime.strptime(date_a, "%Y-%m-%d")
+        db = datetime.strptime(date_b, "%Y-%m-%d")
+    except ValueError:
+        return 0.0
+    delta = abs((da - db).days)
+    if delta > _RELATED_DATE_WINDOW_DAYS:
+        return 0.0
+    # Linear decay from weight (at delta=0) to 0 (at delta=window).
+    return _RELATED_DATE_WEIGHT * (1.0 - delta / _RELATED_DATE_WINDOW_DAYS)
+
+
+def score_event_pair(current: Any, peer: Any) -> float:
+    """Return a similarity score between two events.
+
+    Accepts either ProjectIndexEvent-like objects (with attributes
+    `event_date`, `note_filename`, `subfolder`, `summary_hint`,
+    `parties`) or plain dicts with the same keys. Returns 0 for a
+    self-pair or missing data.
+    """
+
+    def _g(obj, key):
+        if isinstance(obj, dict):
+            return obj.get(key, "")
+        return getattr(obj, key, "")
+
+    a_name = _g(current, "note_filename")
+    b_name = _g(peer, "note_filename")
+    if not a_name or not b_name or a_name == b_name:
+        return 0.0
+
+    a_tokens = _tokenize_for_related(a_name) | _tokenize_for_related(
+        _g(current, "summary_hint") or ""
+    )
+    b_tokens = _tokenize_for_related(b_name) | _tokenize_for_related(
+        _g(peer, "summary_hint") or ""
+    )
+    shared = a_tokens & b_tokens
+    token_hits = min(len(shared), _RELATED_WEIGHT_MAX_TOKEN_HITS)
+    score = token_hits * _RELATED_WEIGHT_TOPIC_TOKEN
+
+    if _g(current, "subfolder") and _g(current, "subfolder") == _g(peer, "subfolder"):
+        score += _RELATED_WEIGHT_SAME_SUBFOLDER
+
+    parties_a = set(_g(current, "parties") or [])
+    parties_b = set(_g(peer, "parties") or [])
+    party_hits = min(len(parties_a & parties_b), _RELATED_WEIGHT_MAX_PARTY_HITS)
+    score += party_hits * _RELATED_WEIGHT_PARTY_OVERLAP
+
+    score += _related_date_proximity(
+        _g(current, "event_date"), _g(peer, "event_date"),
+    )
+    return score
+
+
+def find_related_events(
+    current: Any,
+    peers: List[Any],
+    *,
+    k: int = 3,
+    min_score: float = _MIN_RELATED_SCORE,
+) -> List[Tuple[Any, float]]:
+    """Score every peer against `current` and return the top-K above threshold.
+
+    Returns a list of `(peer, score)` tuples sorted by score descending.
+    Pairs that score below `min_score` are filtered out — the red-line
+    is "no noisy links"; an event with no obvious siblings gets no
+    Related section rather than a random wikilink.
+    """
+    scored: List[Tuple[Any, float]] = []
+    for peer in peers:
+        s = score_event_pair(current, peer)
+        if s >= min_score:
+            scored.append((peer, s))
+    scored.sort(key=lambda t: t[1], reverse=True)
+    return scored[:k]
+
+
+def build_event_related_section(related: List[Tuple[Any, float]]) -> str:
+    """Render a `## Related` section from the output of `find_related_events`.
+
+    Returns `""` when the list is empty — callers skip the append in
+    that case so events without siblings do not carry an empty header.
+    """
+    if not related:
+        return ""
+    lines = ["## Related", ""]
+    for peer, _score in related:
+        name = peer.note_filename if not isinstance(peer, dict) else peer.get(
+            "note_filename", ""
+        )
+        if name:
+            lines.append(f"- [[{name}]]")
+    return "\n".join(lines)
+
+
+def find_prev_next_in_subfolder(
+    current: Any,
+    peers: List[Any],
+) -> Tuple[Optional[Any], Optional[Any]]:
+    """Return the (previous, next) peers in `current`'s subfolder.
+
+    Peers are ordered by `event_date`. Ties on date are broken by
+    `note_filename` so ordering stays deterministic. The current event
+    itself is excluded. Either half of the tuple may be `None` when
+    there is no chronological neighbour on that side.
+    """
+
+    def _g(obj, key):
+        if isinstance(obj, dict):
+            return obj.get(key, "")
+        return getattr(obj, key, "")
+
+    current_sf = _g(current, "subfolder")
+    current_name = _g(current, "note_filename")
+    current_date = _g(current, "event_date")
+    if not current_sf or not current_date:
+        return (None, None)
+
+    siblings = [
+        p for p in peers
+        if _g(p, "subfolder") == current_sf
+        and _g(p, "note_filename") != current_name
+    ]
+    siblings.sort(key=lambda p: (_g(p, "event_date"), _g(p, "note_filename")))
+
+    prev: Optional[Any] = None
+    nxt: Optional[Any] = None
+    for p in siblings:
+        pd = _g(p, "event_date")
+        pn = _g(p, "note_filename")
+        if (pd, pn) < (current_date, current_name):
+            prev = p   # last one with date < current wins
+        elif (pd, pn) > (current_date, current_name):
+            nxt = p    # first one with date > current wins
+            break
+    return (prev, nxt)
+
+
+def build_prev_next_section(
+    prev: Optional[Any],
+    nxt: Optional[Any],
+    subfolder: str,
+) -> str:
+    """Render the footer `← Previous in <SF>: [[...]]` / `→ Next in <SF>: [[...]]`.
+
+    Returns `""` when both `prev` and `nxt` are `None` so events without
+    chronological neighbours don't carry an empty footer.
+    """
+    if prev is None and nxt is None:
+        return ""
+
+    def _g(obj, key):
+        if isinstance(obj, dict):
+            return obj.get(key, "")
+        return getattr(obj, key, "")
+
+    lines = []
+    if prev is not None:
+        lines.append(f"← Previous in {subfolder}: [[{_g(prev, 'note_filename')}]]  ")
+    if nxt is not None:
+        lines.append(f"→ Next in {subfolder}: [[{_g(nxt, 'note_filename')}]]")
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
 # Wikilink building
 # ---------------------------------------------------------------------------
 

@@ -565,6 +565,16 @@ Inside the per-event loop (after the note is written in Step 5), derive
 `event_writer.extract_abstract_callout(body)`. See retro-scan Step 7b for
 the exact snippet.
 
+Then wire the inter-event mesh (v15.0.0): run
+`project_index.apply_inter_event_links` per touched project with the
+same `events` list, so each heartbeat-written note picks up a
+`## Related` section plus prev/next footer pointing to siblings
+(content-proximity + chronological neighbours within the same
+subfolder). The block is wrapped in
+`<!-- vb:related-start -->` / `<!-- vb:related-end -->` markers so
+later reconciles replace it idempotently. See retro-scan Step 7c for
+the snippet.
+
 Rules:
 - Index updates do not read source files — they are never rate-limited.
 

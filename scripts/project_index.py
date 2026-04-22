@@ -12,7 +12,6 @@ Public API:
     generate_index(project_name, domain, events, subfolders, existing, today) → str
     generate_base_file(project_name, domain) → str
     update_index(project_name, domain, new_events, workdir, vault_name, today) → dict
-    add_index_backlink(workdir, vault_name, note_path, project_name) → None
 """
 from __future__ import annotations
 
@@ -193,6 +192,10 @@ def infer_status(events: List[ProjectIndexEvent], today: date) -> ProjectIndexSt
 # parse_existing_index
 # ---------------------------------------------------------------------------
 
+VB_AUTO_START = "<!-- vb:auto-start -->"
+VB_AUTO_END = "<!-- vb:auto-end -->"
+
+
 def parse_existing_index(text: str) -> dict:
     """Parse frontmatter + known sections from an existing index note.
 
@@ -205,6 +208,21 @@ def parse_existing_index(text: str) -> dict:
         open_items       — string content of ## Open Items section
         related_projects — string content of ## Related Projects section
         user_sections    — verbatim string of any sections not listed above
+        marker_head      — verbatim string of everything BEFORE the
+                           `<!-- vb:auto-start -->` marker (v15.0.0)
+        marker_tail      — verbatim string of everything AFTER the
+                           `<!-- vb:auto-end -->` marker (v15.0.0)
+        has_markers      — bool; True when both markers are present
+
+    v15.0.0 (Issue 2 priority 3c): the MOC now emits auto-generated
+    sections wrapped in `<!-- vb:auto-start -->` / `<!-- vb:auto-end -->`
+    comment markers. On regeneration, everything OUTSIDE the markers is
+    preserved verbatim — users can freely edit the top (overview,
+    notes), the bottom (references, scratch), or insert whole sections
+    in-between without them being clobbered. Notes authored before
+    v15.0.0 have no markers; the legacy section-by-section preservation
+    (overview/parties/budget/etc.) still runs so the first regeneration
+    under v15 migrates smoothly.
     """
     result: dict = {
         "frontmatter": {},
@@ -215,6 +233,9 @@ def parse_existing_index(text: str) -> dict:
         "open_items": "",
         "related_projects": "",
         "user_sections": "",
+        "marker_head": "",
+        "marker_tail": "",
+        "has_markers": False,
     }
 
     if not text:
@@ -234,6 +255,18 @@ def parse_existing_index(text: str) -> dict:
                 result["frontmatter"] = _parse_fm_simple(fm_text)
         except Exception:
             result["frontmatter"] = {}
+
+    # Marker-based preservation. When both markers are present, the
+    # content outside the markers is user territory and must be
+    # regenerated verbatim. Section-by-section parsing still runs so
+    # callers that ignore `has_markers` (tests, migrations) see the
+    # same data shape as before.
+    start_idx = body.find(VB_AUTO_START)
+    end_idx = body.rfind(VB_AUTO_END)
+    if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
+        result["has_markers"] = True
+        result["marker_head"] = body[:start_idx].rstrip()
+        result["marker_tail"] = body[end_idx + len(VB_AUTO_END):].lstrip()
 
     # Extract [!abstract] Overview callout
     abstract_match = re.search(
@@ -444,14 +477,21 @@ def generate_index(
     subfolder_lines = [f"- {sf}" for sf in all_subfolders if sf]
     substructure_nav = _generate_substructure_nav(sorted_events, all_subfolders)
 
-    # Timeline rendering depends on whether Substructures is already
-    # carrying the summary hints: if yes, keep Timeline compact so the
-    # two sections don't duplicate each other verbatim.
-    include_hint_in_timeline = not bool(substructure_nav)
-    timeline_lines = [
-        _format_timeline_entry(ev, include_hint=include_hint_in_timeline)
-        for ev in sorted_events
-    ]
+    # Timeline rendering (v14.7.4): pick ONE of Substructures or Timeline,
+    # not both. Pre-v14.7.4 the MOC emitted every event wikilink twice —
+    # once under `### Subfolder/` groups and once in a flat chronological
+    # block below — which duplicated 22 spokes per 22-event project in
+    # Obsidian's graph view and cluttered the reading experience. Now:
+    #   - ≥2 subfolders → Substructures carries every event (grouped +
+    #     summary hints), Timeline is skipped.
+    #   - 1 subfolder (or 0) → no Substructures block; Timeline section
+    #     stands in, with inline summary hints.
+    emit_timeline = not bool(substructure_nav)
+    timeline_lines = (
+        [_format_timeline_entry(ev, include_hint=True) for ev in sorted_events]
+        if emit_timeline
+        else []
+    )
 
     # --- Parties aggregation (v14.4) ---
     # Prefer explicit user-edited Parties content. Otherwise fall back
@@ -492,54 +532,87 @@ def generate_index(
     ]
 
     # --- Body ---
-    body_parts: List[str] = [
-        f"# {project_name}",
-        "",
-    ]
+    # v15.0.0 (Issue 2 priority 3c): the MOC wraps auto-generated
+    # sections in `<!-- vb:auto-start -->` / `<!-- vb:auto-end -->`
+    # markers so users can edit freely above and below without being
+    # clobbered on the next regenerate. When an existing MOC already
+    # has markers, we preserve its head (above the start marker) and
+    # tail (below the end marker) verbatim. Otherwise we preserve the
+    # overview + parse-able sections the old way, which on this first
+    # regeneration migrates the note into the marker layout.
+    has_markers = bool(existing) and existing.get("has_markers", False)
+    marker_head = existing.get("marker_head", "") if existing else ""
+    marker_tail = existing.get("marker_tail", "") if existing else ""
 
-    # Overview callout only when there's real content.
-    if overview:
-        body_parts += [
-            "> [!abstract] Overview",
-            *(f"> {line}" for line in overview.splitlines()),
-            "",
-        ]
+    if has_markers and marker_head:
+        head_parts: List[str] = [marker_head, ""]
+    else:
+        head_parts = [f"# {project_name}", ""]
+        if overview:
+            head_parts += [
+                "> [!abstract] Overview",
+                *(f"> {line}" for line in overview.splitlines()),
+                "",
+            ]
 
-    body_parts += [
+    # v15.0.0 (Issue 2 priority 3b): dropped the `==highlight==` markup
+    # from Status. Highlights are meant to mark facts the USER cares
+    # about (dates, decisions, amounts literally read from source). When
+    # the MOC highlighted every status line by default, the signal
+    # inverted — users stopped seeing their own highlights as distinct.
+    auto_parts: List[str] = [
         "## Status",
-        f"==Current status==: {status_obj.status}  ",
-        f"Timeline: =={status_obj.timeline_start}== → =={status_obj.timeline_end or 'ongoing'}==",
+        f"Current status: {status_obj.status}  ",
+        f"Timeline: {status_obj.timeline_start} → "
+        f"{status_obj.timeline_end or 'ongoing'}",
         "",
     ]
 
     # Substructure navigation (grouped by subfolder, with hints) —
     # only when there are ≥2 subfolders.
     if substructure_nav:
-        body_parts += ["## Substructures", ""]
-        body_parts.append(substructure_nav)
-        body_parts.append("")
+        auto_parts += ["## Substructures", ""]
+        auto_parts.append(substructure_nav)
+        auto_parts.append("")
 
-    body_parts += ["## Timeline (all events)"]
-    body_parts.extend(timeline_lines if timeline_lines else ["_No events yet._"])
-    body_parts += ["", "## Subfolders"]
-    body_parts.extend(subfolder_lines if subfolder_lines else ["_None._"])
+    # Timeline stands in for Substructures when the project has ≤1
+    # subfolder (see `emit_timeline` above). With ≥2 subfolders,
+    # Substructures already covers every event and Timeline is skipped.
+    if emit_timeline:
+        auto_parts += ["## Timeline (all events)"]
+        auto_parts.extend(timeline_lines if timeline_lines else ["_No events yet._"])
+        auto_parts += [""]
+    auto_parts += ["## Subfolders"]
+    auto_parts.extend(subfolder_lines if subfolder_lines else ["_None._"])
 
     # Only emit these sections when they have content — hiding empty
     # placeholders is the whole point of the v14.4 change.
     if parties_text:
-        body_parts += ["", "## Parties", parties_text]
+        auto_parts += ["", "## Parties", parties_text]
     if budget_content:
-        body_parts += ["", "## Budget", budget_content]
+        auto_parts += ["", "## Budget", budget_content]
     if key_decisions_content:
-        body_parts += ["", "## Key Decisions", key_decisions_content]
+        auto_parts += ["", "## Key Decisions", key_decisions_content]
     if open_items_content:
-        body_parts += ["", "## Open Items", open_items_content]
+        auto_parts += ["", "## Open Items", open_items_content]
     if related_projects_content:
-        body_parts += ["", "## Related Projects", related_projects_content]
+        auto_parts += ["", "## Related Projects", related_projects_content]
 
-    if user_sections:
-        body_parts += ["", user_sections]
+    # Marker-wrapped auto zone.
+    auto_block = [VB_AUTO_START, "", *auto_parts, "", VB_AUTO_END]
 
+    # Tail preservation. With markers: honour whatever the user has
+    # written after the end marker. Without markers (legacy note on
+    # first regenerate under v15): fall back to the parsed-out user
+    # sections so nothing is lost during migration.
+    if has_markers and marker_tail:
+        tail_parts: List[str] = ["", marker_tail]
+    elif user_sections:
+        tail_parts = ["", user_sections]
+    else:
+        tail_parts = []
+
+    body_parts: List[str] = head_parts + auto_block + tail_parts
     return "\n".join(fm_lines) + "\n\n" + "\n".join(body_parts) + "\n"
 
 
@@ -744,34 +817,183 @@ def _obsidian_create(vault_name: str, path: str, content: str, overwrite: bool =
         pass
 
 
+# `add_index_backlink` (pre-v14.7.4): deleted. It wrote an
+# `index_note: "[[<project>]]"` key into every event-note's frontmatter
+# via `obsidian property:set`. Two problems:
+#   1. The MOC body already has `[[event-note]]` wikilinks — Obsidian's
+#      backlinks panel and graph view derive the reverse edge from them
+#      automatically. `index_note` added a redundant outgoing edge per
+#      event, amplifying the "star shape" graph the MOC already forms.
+#   2. The implementation swallowed all exceptions silently. Field reports
+#      showed the function failing on every call (never populating the
+#      frontmatter) — but the scan never surfaced that, so bugs in the
+#      Obsidian CLI plumbing masqueraded as success.
+# Callers (commands/retro-scan.md step 7c) were removed in the same change.
+
+
 # ---------------------------------------------------------------------------
-# add_index_backlink
+# Inter-event mesh post-write (v15.0.0 — Issue 2 priorities 1c + 1d)
 # ---------------------------------------------------------------------------
 
-def add_index_backlink(
-    workdir: str,
-    vault_name: str,
-    note_path: str,
-    project_name: str,
-) -> None:
-    """Add ``index_note: "[[{project_name}]]"`` to a note's frontmatter.
+_INTER_EVENT_MARKER_START = "<!-- vb:related-start -->"
+_INTER_EVENT_MARKER_END = "<!-- vb:related-end -->"
 
-    Uses ``obsidian property:set`` and is idempotent — if the property
-    already exists with the correct value, no write is made.
+
+def build_inter_event_section(
+    current,
+    peers,
+    *,
+    k: int = 3,
+) -> str:
+    """Return the combined ``## Related`` + prev/next block for one event.
+
+    Returns `""` when the current event has neither related peers nor
+    chronological siblings — events without signal get no section.
+
+    Accepts `ProjectIndexEvent` objects (or dicts with the same keys).
+    The returned block is wrapped in
+    ``<!-- vb:related-start -->`` / ``<!-- vb:related-end -->``
+    comment markers so later regenerations can replace it idempotently.
     """
-    index_link = f"[[{project_name}]]"
-    try:
-        subprocess.run(
-            [
-                "obsidian",
-                "property:set",
+    import link_strategy
+
+    related = link_strategy.find_related_events(current, peers, k=k)
+    related_section = link_strategy.build_event_related_section(related)
+
+    subfolder = current.subfolder if not isinstance(current, dict) else current.get(
+        "subfolder", ""
+    )
+    prev, nxt = link_strategy.find_prev_next_in_subfolder(current, peers)
+    prev_next = link_strategy.build_prev_next_section(prev, nxt, subfolder)
+
+    pieces = [p for p in (related_section, prev_next) if p]
+    if not pieces:
+        return ""
+    inner = "\n\n".join(pieces)
+    return (
+        _INTER_EVENT_MARKER_START + "\n" + inner + "\n" + _INTER_EVENT_MARKER_END
+    )
+
+
+def _strip_prior_inter_event_block(body: str) -> str:
+    """Remove any prior vb:related-start/end block from `body`.
+
+    Idempotency helper: re-running the scan must not stack multiple
+    Related sections on the same note. When no prior block is present
+    returns `body` unchanged.
+    """
+    if _INTER_EVENT_MARKER_START not in body:
+        return body
+    pattern = re.compile(
+        re.escape(_INTER_EVENT_MARKER_START)
+        + r"(?s:.*?)"
+        + re.escape(_INTER_EVENT_MARKER_END),
+    )
+    return pattern.sub("", body).rstrip() + "\n"
+
+
+def apply_inter_event_links(
+    vault_name: str,
+    project_name: str,
+    domain: str,
+    events: list,
+    *,
+    k: int = 3,
+    _obsidian_runner=None,
+) -> dict:
+    """Append a Related + prev/next block to every event note in a project.
+
+    For each event in `events`, reads the current note body via
+    `obsidian read`, strips any prior vb:related block, appends the
+    fresh block via `obsidian append`, and returns a dict of
+    `{events_linked, events_without_peers}`. Callers invoke this from
+    retro-scan / heartbeat-scan / reconcile after all events for a
+    project have been written so every event sees every peer.
+
+    `_obsidian_runner` is an injection hook for tests; defaults to the
+    real subprocess call. Failures are swallowed per event so a single
+    broken note does not abort the whole project.
+    """
+    runner = _obsidian_runner or _default_obsidian_runner
+    stats = {"events_linked": 0, "events_without_peers": 0, "failures": 0}
+    if not events:
+        return stats
+
+    for current in events:
+        peers = [e for e in events if e is not current]
+        section = build_inter_event_section(current, peers, k=k)
+        filename = (
+            current.note_filename if not isinstance(current, dict)
+            else current.get("note_filename", "")
+        )
+        if not filename:
+            stats["failures"] += 1
+            continue
+        note_path = f"{domain}/{project_name}/"
+        subfolder = (
+            current.subfolder if not isinstance(current, dict)
+            else current.get("subfolder", "")
+        )
+        if subfolder:
+            note_path = f"{domain}/{project_name}/{subfolder}/{filename}.md"
+        else:
+            note_path = f"{domain}/{project_name}/{filename}.md"
+        try:
+            if not section:
+                stats["events_without_peers"] += 1
+                # Still strip any prior block so a note that used to
+                # have peers but no longer does doesn't carry stale
+                # links. Read-modify-write via `obsidian create` with
+                # the `overwrite` flag.
+                body = runner(["read", f"vault={vault_name}", f"path={note_path}"])
+                if body is None:
+                    continue
+                stripped = _strip_prior_inter_event_block(body)
+                if stripped != body:
+                    runner([
+                        "create",
+                        f"vault={vault_name}",
+                        f"path={Path(note_path).parent}",
+                        f"name={Path(note_path).stem}",
+                        f"content={stripped}",
+                        "silent", "overwrite",
+                    ])
+                continue
+
+            body = runner(["read", f"vault={vault_name}", f"path={note_path}"])
+            if body is None:
+                stats["failures"] += 1
+                continue
+            stripped = _strip_prior_inter_event_block(body)
+            new_body = stripped.rstrip() + "\n\n" + section + "\n"
+            runner([
+                "create",
                 f"vault={vault_name}",
-                f"path={note_path}",
-                "key=index_note",
-                f"value={index_link}",
-            ],
+                f"path={Path(note_path).parent}",
+                f"name={Path(note_path).stem}",
+                f"content={new_body}",
+                "silent", "overwrite",
+            ])
+            stats["events_linked"] += 1
+        except Exception:
+            stats["failures"] += 1
+    return stats
+
+
+def _default_obsidian_runner(argv):
+    """Invoke the `obsidian` CLI. Returns stdout for `read`, None for
+    non-`read` commands (or on failure)."""
+    try:
+        r = subprocess.run(
+            ["obsidian", *argv],
             capture_output=True,
             text=True,
+            timeout=30,
         )
     except Exception:
-        pass
+        return None
+    if r.returncode != 0:
+        return None
+    if argv and argv[0] == "read":
+        return r.stdout
+    return ""

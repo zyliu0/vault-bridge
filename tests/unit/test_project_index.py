@@ -345,7 +345,11 @@ def test_generate_index_valid_frontmatter():
     assert fm["note_type"] == "project-index"
 
 
-def test_generate_index_contains_timeline_events():
+def test_generate_index_contains_event_wikilinks():
+    """Every event note must appear as a wikilink — via Substructures
+    (≥2 subfolders) or Timeline (≤1 subfolder). v14.7.4 stopped
+    emitting both sections simultaneously, so this test just checks the
+    links land somewhere in the body."""
     events = _make_events(
         ("2024-08-15", "2024-08-15 kickoff", "SD"),
         ("2024-09-01", "2024-09-01 review", "CD"),
@@ -353,18 +357,24 @@ def test_generate_index_contains_timeline_events():
     text = pi.generate_index("Proj", "arch", events, ["SD", "CD"], None, date(2024, 10, 1))
     assert "[[2024-08-15 kickoff]]" in text
     assert "[[2024-09-01 review]]" in text
-    assert "## Timeline" in text
+    # With 2 subfolders, Substructures carries the events and Timeline
+    # is skipped — see the v14.7.4 deduplication note in generate_index.
+    assert "## Substructures" in text
+    assert "## Timeline" not in text
 
 
-def test_generate_index_timeline_is_sorted():
+def test_generate_index_events_sorted_within_substructures():
     events = _make_events(
         ("2024-09-01", "2024-09-01 review", "CD"),
         ("2024-08-15", "2024-08-15 kickoff", "SD"),
     )
     text = pi.generate_index("Proj", "arch", events, ["SD", "CD"], None, date(2024, 10, 1))
+    # Each event still shows up; order within its subfolder group
+    # follows event_date. Across groups the SD block comes first
+    # because `subfolders=["SD", "CD"]` declares that order.
     kickoff_pos = text.index("2024-08-15 kickoff")
     review_pos = text.index("2024-09-01 review")
-    assert kickoff_pos < review_pos  # sorted ascending
+    assert kickoff_pos < review_pos
 
 
 def test_generate_index_subfolders_section():
@@ -508,20 +518,24 @@ def test_generate_index_timeline_includes_summary_hint_when_single_subfolder():
     assert "SD 80% phase freeze with client." in text
 
 
-def test_generate_index_timeline_compact_when_substructures_present():
-    """Timeline rows stay compact (no hint) when Substructures carries hints."""
+def test_generate_index_drops_timeline_when_substructures_present():
+    """v14.7.4: ≥2 subfolders → Substructures carries every event and
+    Timeline is skipped entirely. Pre-v14.7.4 both sections were
+    emitted, duplicating 22 wikilinks × 2 for a 22-event project and
+    producing a pure-star Obsidian graph."""
     events = _make_events(
         ("2024-08-15", "n1", "SD", "high", "SD-phase kickoff."),
         ("2024-09-15", "n2", "DD", "high", "DD-phase review."),
     )
     text = pi.generate_index("Proj", "arch", events, ["SD", "DD"], None, date(2024, 10, 1))
     assert "## Substructures" in text
-    # The Substructures block holds the hints …
+    assert "## Timeline" not in text
+    # Substructures carries the summary hints.
     assert "SD-phase kickoff." in text
-    # … and the Timeline (all events) block stays compact.
-    tl_block = text.split("## Timeline (all events)", 1)[1].split("## Subfolders", 1)[0]
-    assert "SD-phase kickoff." not in tl_block
-    assert "DD-phase review." not in tl_block
+    assert "DD-phase review." in text
+    # Each event wikilink should appear exactly once in the body.
+    assert text.count("[[n1]]") == 1
+    assert text.count("[[n2]]") == 1
 
 
 def test_generate_index_idempotent():
@@ -654,56 +668,17 @@ def test_update_index_events_linked_count(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# add_index_backlink
+# add_index_backlink was deleted in v14.7.4 — the MOC body wikilinks
+# already give Obsidian the reverse edge. See the deletion note in
+# scripts/project_index.py above the old function's location.
 # ---------------------------------------------------------------------------
 
-def test_add_index_backlink_calls_obsidian(tmp_path, monkeypatch):
-    calls = []
 
-    def fake_run(cmd, **kwargs):
-        calls.append(cmd)
-        class FakeResult:
-            returncode = 0
-            stdout = ""
-            stderr = ""
-        return FakeResult()
-
-    import subprocess
-    monkeypatch.setattr(subprocess, "run", fake_run)
-
-    pi.add_index_backlink(
-        workdir=str(tmp_path),
-        vault_name="MyVault",
-        note_path="Proj/SD/2024-08-15 kickoff.md",
-        project_name="Proj",
-    )
-    # Should have made at least one subprocess call
-    assert len(calls) >= 1
-
-
-def test_add_index_backlink_uses_property_set(tmp_path, monkeypatch):
-    calls = []
-
-    def fake_run(cmd, **kwargs):
-        calls.append(cmd)
-        class FakeResult:
-            returncode = 0
-            stdout = ""
-            stderr = ""
-        return FakeResult()
-
-    import subprocess
-    monkeypatch.setattr(subprocess, "run", fake_run)
-
-    pi.add_index_backlink(
-        workdir=str(tmp_path),
-        vault_name="MyVault",
-        note_path="Proj/SD/note.md",
-        project_name="Proj",
-    )
-    # Check that "property:set" or "property" appeared in the call
-    call_strs = [" ".join(c) if isinstance(c, list) else str(c) for c in calls]
-    assert any("property" in s for s in call_strs)
+def test_add_index_backlink_symbol_removed():
+    """Regression: v14.7.4 removed `pi.add_index_backlink` to break the
+    `index_note` backlink star-edge. This test fails loudly if the
+    symbol ever gets resurrected without a new design decision."""
+    assert not hasattr(pi, "add_index_backlink")
 
 
 # ---------------------------------------------------------------------------
@@ -929,18 +904,238 @@ class TestGenerateIndexSubstructures:
         )
         assert "## Substructures" not in result
 
-    def test_index_uses_timeline_all_events_heading(self):
-        """generate_index uses '## Timeline (all events)' as the flat timeline heading."""
+    def test_index_uses_timeline_all_events_heading_when_no_substructures(self):
+        """v14.7.4: Timeline stands in for Substructures when the
+        project has ≤1 subfolder. With a single subfolder, Substructures
+        is omitted and Timeline carries the events."""
         events = _make_events(
             ("2024-08-15", "2024-08-15 sd-drawing", "SD"),
-            ("2024-09-01", "2024-09-01 dd-plan", "DD"),
+            ("2024-09-01", "2024-09-01 sd-review", "SD"),
         )
         result = pi.generate_index(
             project_name="2408 Sample",
             domain="arch-projects",
             events=events,
-            subfolders=["SD", "DD"],
+            subfolders=["SD"],
             existing=None,
             today=date(2024, 10, 1),
         )
         assert "## Timeline (all events)" in result
+        assert "## Substructures" not in result
+
+
+# ---------------------------------------------------------------------------
+# Marker-based preservation (v15.0.0 — Issue 2 priority 3c)
+# ---------------------------------------------------------------------------
+
+
+class TestMarkerPreservation:
+    def _gen(self, existing=None):
+        events = _make_events(
+            ("2024-08-15", "2024-08-15 n1", "SD", "high", "Opening meeting."),
+            ("2024-09-01", "2024-09-01 n2", "DD", "high", "DD phase review."),
+        )
+        return pi.generate_index(
+            "Proj", "arch", events, ["SD", "DD"], existing, date(2024, 10, 1),
+        )
+
+    def test_fresh_index_wraps_auto_sections_in_markers(self):
+        text = self._gen()
+        assert pi.VB_AUTO_START in text
+        assert pi.VB_AUTO_END in text
+        # The markers must bracket the Status heading.
+        start = text.index(pi.VB_AUTO_START)
+        end = text.index(pi.VB_AUTO_END)
+        assert text.index("## Status") > start
+        assert text.index("## Status") < end
+
+    def test_regeneration_preserves_marker_head_verbatim(self):
+        """Custom pre-marker content must survive regeneration verbatim."""
+        existing = pi.parse_existing_index(
+            "---\nplugin: vault-bridge\n---\n\n"
+            "# Custom Title\n\n"
+            "> [!abstract] Overview\n"
+            "> A preserved overview with *italics* and `code`.\n\n"
+            "## Notes from the architect\n"
+            "This block must not be clobbered.\n\n"
+            f"{pi.VB_AUTO_START}\n\n"
+            "## Status\nstale auto content — should be regenerated\n\n"
+            f"{pi.VB_AUTO_END}\n"
+        )
+        assert existing["has_markers"] is True
+        out = self._gen(existing=existing)
+        assert "# Custom Title" in out
+        assert "A preserved overview with *italics*" in out
+        assert "Notes from the architect" in out
+        assert "This block must not be clobbered." in out
+        # Stale auto content must be gone.
+        assert "stale auto content" not in out
+
+    def test_regeneration_preserves_marker_tail_verbatim(self):
+        """Content after the end marker must survive regeneration."""
+        existing = pi.parse_existing_index(
+            "---\nplugin: vault-bridge\n---\n\n"
+            f"# Proj\n\n{pi.VB_AUTO_START}\n\n"
+            "## Status\nstale content\n\n"
+            f"{pi.VB_AUTO_END}\n\n"
+            "## Field notes\n"
+            "- user-authored 1\n"
+            "- user-authored 2\n"
+        )
+        out = self._gen(existing=existing)
+        assert "## Field notes" in out
+        assert "user-authored 1" in out
+        assert "user-authored 2" in out
+
+    def test_legacy_index_without_markers_still_regenerates_cleanly(self):
+        """A v14-era MOC (no markers) gets migrated: legacy overview +
+        user-sections still preserved, new output carries markers."""
+        legacy = (
+            "---\nplugin: vault-bridge\n---\n\n"
+            "# Proj\n\n"
+            "> [!abstract] Overview\n"
+            "> Inherited overview line.\n\n"
+            "## Status\nold content\n\n"
+            "## Custom Section\n"
+            "Must survive migration.\n"
+        )
+        existing = pi.parse_existing_index(legacy)
+        assert existing["has_markers"] is False
+        out = self._gen(existing=existing)
+        # Markers now present.
+        assert pi.VB_AUTO_START in out
+        assert pi.VB_AUTO_END in out
+        # Overview migrated.
+        assert "Inherited overview line" in out
+        # Custom section migrated into tail.
+        assert "Custom Section" in out
+        assert "Must survive migration." in out
+
+
+# ---------------------------------------------------------------------------
+# Inter-event mesh post-write (v15.0.0 — Issue 2 priorities 1c + 1d)
+# ---------------------------------------------------------------------------
+
+
+class TestInterEventSection:
+    def _evs(self):
+        return _make_events(
+            ("2023-02-27", "2023-02-27 施工图", "CD", "high", ""),
+            ("2023-02-28", "2023-02-28 施工图", "CD", "high", ""),
+            ("2023-03-17", "2023-03-17 施工图", "CD", "high", ""),
+            ("2023-01-15", "2023-01-15 kickoff", "SD", "high", ""),
+        )
+
+    def test_builds_block_with_related_and_prev_next(self):
+        evs = self._evs()
+        section = pi.build_inter_event_section(evs[1], [evs[0], evs[2], evs[3]])
+        assert "<!-- vb:related-start -->" in section
+        assert "<!-- vb:related-end -->" in section
+        assert "## Related" in section
+        assert "Previous in CD:" in section
+        assert "Next in CD:" in section
+
+    def test_returns_empty_when_no_peers(self):
+        evs = self._evs()
+        # Isolate one event with no siblings — scoring returns nothing.
+        lonely = pi.ProjectIndexEvent(
+            event_date="2024-08-15", note_filename="2024-08-15 kickoff",
+            subfolder="SD", content_confidence="high", summary_hint="",
+        )
+        section = pi.build_inter_event_section(lonely, [])
+        assert section == ""
+
+
+class TestStripPriorInterEventBlock:
+    def test_removes_single_block(self):
+        body = (
+            "Some body prose.\n\n"
+            "<!-- vb:related-start -->\n"
+            "## Related\n- [[x]]\n"
+            "<!-- vb:related-end -->\n"
+        )
+        assert "vb:related-start" not in pi._strip_prior_inter_event_block(body)
+
+    def test_leaves_body_alone_when_no_markers(self):
+        body = "just prose\n"
+        assert pi._strip_prior_inter_event_block(body) == body
+
+
+class TestApplyInterEventLinks:
+    def test_calls_obsidian_read_then_overwrite_with_section(self):
+        events = _make_events(
+            ("2023-02-27", "2023-02-27 施工图", "CD", "high", ""),
+            ("2023-02-28", "2023-02-28 施工图", "CD", "high", ""),
+        )
+        # Existing body for each note — no prior marker block.
+        bodies = {
+            "arch-projects/P/CD/2023-02-27 施工图.md": "Prior prose.\n",
+            "arch-projects/P/CD/2023-02-28 施工图.md": "Other prose.\n",
+        }
+        calls = []
+
+        def fake_runner(argv):
+            calls.append(argv)
+            cmd = argv[0]
+            if cmd == "read":
+                # argv: ["read", "vault=V", "path=..."]
+                path = argv[2].split("=", 1)[1]
+                return bodies.get(path, "")
+            return ""
+
+        stats = pi.apply_inter_event_links(
+            vault_name="V",
+            project_name="P",
+            domain="arch-projects",
+            events=events,
+            _obsidian_runner=fake_runner,
+        )
+        assert stats["events_linked"] == 2
+        assert stats["failures"] == 0
+        # Two reads + two overwrites.
+        cmds = [a[0] for a in calls]
+        assert cmds.count("read") == 2
+        assert cmds.count("create") == 2
+
+    def test_events_without_peers_do_not_count_as_linked(self):
+        events = _make_events(
+            ("2024-08-15", "2024-08-15 kickoff", "SD", "high", ""),
+        )
+        calls = []
+
+        def fake_runner(argv):
+            calls.append(argv)
+            if argv[0] == "read":
+                return "Prior prose.\n"
+            return ""
+
+        stats = pi.apply_inter_event_links(
+            vault_name="V",
+            project_name="P",
+            domain="arch-projects",
+            events=events,
+            _obsidian_runner=fake_runner,
+        )
+        assert stats["events_linked"] == 0
+        assert stats["events_without_peers"] == 1
+
+    def test_failure_to_read_counts_as_failure_not_link(self):
+        events = _make_events(
+            ("2023-02-27", "2023-02-27 a", "CD", "high", "施工图 variant"),
+            ("2023-02-28", "2023-02-28 b", "CD", "high", "施工图 variant"),
+        )
+
+        def fake_runner(argv):
+            if argv[0] == "read":
+                return None    # simulate missing note
+            return ""
+
+        stats = pi.apply_inter_event_links(
+            vault_name="V",
+            project_name="P",
+            domain="arch-projects",
+            events=events,
+            _obsidian_runner=fake_runner,
+        )
+        assert stats["events_linked"] == 0
+        assert stats["failures"] == 2

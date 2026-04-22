@@ -27,6 +27,11 @@ import schema  # noqa: E402
 # Constants — these must match the design doc's Vault Note Schema section exactly.
 # ---------------------------------------------------------------------------
 
+# v15.0.0 (Issue 2 priority 4b): `cssclasses` and `sources_read` moved
+# to optional. Both were required-even-empty pre-v15, which added noise
+# lines to every metadata stub. Cross-field invariants treat a missing
+# `sources_read` as an empty list, so the metadata-only branch still
+# works.
 EXPECTED_REQUIRED = (
     "schema_version",
     "plugin",
@@ -38,14 +43,18 @@ EXPECTED_REQUIRED = (
     "event_date",
     "event_date_source",
     "scan_type",
-    "sources_read",
     "read_bytes",
     "content_confidence",
-    "cssclasses",
 )
 
 EXPECTED_OPTIONAL = (
-    "attachments", "source_images", "images_embedded", "image_captions", "tags",
+    "sources_read",
+    "attachments",
+    "source_images",
+    "images_embedded",
+    "image_captions",
+    "tags",
+    "cssclasses",
 )
 
 EXPECTED_FILE_TYPES = {
@@ -85,13 +94,25 @@ def test_required_fields_match_design_doc_exactly():
 
 
 def test_required_fields_preserve_canonical_order():
-    # This is a tuple so order is part of the contract. The on-disk YAML
-    # serializes in this order.
+    """REQUIRED_FIELDS preserves insertion order for serialization
+    convenience, even though v15.0.0 dropped on-disk order enforcement
+    (Issue 2 priority 4a). schema_version still opens the block."""
     assert isinstance(schema.REQUIRED_FIELDS, tuple)
-    # schema_version must be first (it's the header of the frontmatter block)
     assert schema.REQUIRED_FIELDS[0] == "schema_version"
-    # cssclasses must be last (Obsidian renders it at the bottom of the YAML)
-    assert schema.REQUIRED_FIELDS[-1] == "cssclasses"
+
+
+def test_cssclasses_is_optional_post_v15():
+    """v15.0.0 (Issue 2 priority 4b): cssclasses is no longer required."""
+    assert "cssclasses" in schema.OPTIONAL_FIELDS
+    assert "cssclasses" not in schema.REQUIRED_FIELDS
+
+
+def test_sources_read_is_optional_post_v15():
+    """v15.0.0 (Issue 2 priority 4b): sources_read is no longer required.
+    Cross-field invariants still treat a missing value as empty — the
+    metadata-only branch works without the key."""
+    assert "sources_read" in schema.OPTIONAL_FIELDS
+    assert "sources_read" not in schema.REQUIRED_FIELDS
 
 
 def test_optional_fields_match_design_doc_exactly():

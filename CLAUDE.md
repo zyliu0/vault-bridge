@@ -54,9 +54,12 @@ which classifies the event into one of two **note kinds** and either:
 - Emits an **event-note** prompt for the invoking Claude to execute.
   The prompt carries the raw-text excerpt, the curated image captions,
   and the fabrication-firewall rules. The returned body is validated
-  (stop words, 100-200 word range, verbatim-paste detection); on
-  validator failure the command retries once, then falls back to a
-  metadata stub.
+  for fabrication signals: verbatim-paste detection and (optional,
+  empty by default post-v15) per-project stop-words. Body shape is
+  the LLM's choice — pre-v15 rules requiring a leading
+  `> [!abstract] Overview` callout and a 100-200 word body were
+  dropped (Issue 2 priorities 2a-2d). On validator failure the
+  command retries once, then falls back to a metadata stub.
 
 The `ComposedBody.note_kind` field is `"event"` or `"stub"`. There is no
 user-facing choice here — the pipeline classifies each event
@@ -86,17 +89,23 @@ reserved only for genuinely non-readable types (video, audio, archive,
 unknown extension). Callers may pass `skip_on_no_content=False` to
 override.
 
-The stop-word list that enforces this:
-- "pulled the back wall in"
-- "the team" (as a collective actor)
-- "[person] said" / "X said" (quotes you didn't literally see quoted)
-- "the review came back"
-- "half a storey"
-- "40cm" (or any specific measurement not in the source)
+Enforcement (v15.0.0):
+- **Verbatim-paste detection.** Any ≥60-char run from `raw_text`
+  appearing in the body fails validation. This is the primary
+  fabrication firewall and is always on.
+- **`event_writer.STOP_WORDS` opt-in list.** Empty by default —
+  pre-v15 it hard-coded phrases from one user's past incidents
+  ("pulled the back wall in", "half a storey") which did not
+  generalise. Per-project callers can append phrases they want
+  flagged.
+- **Source-grounding.** The prompt tells the LLM every specific
+  measurement, quote, decision, person, or date must come from the
+  raw text or a caption. The LLM is the first enforcement layer;
+  verbatim-paste + stop-words catch regressions.
 
-These are examples of the kind of fabrication to catch. The general rule:
-any specific measurement, quote, decision, person, or date that was not
-literally read in the source content must not appear in the note.
+The general rule: any specific measurement, quote, decision, person,
+or date that was not literally read in the source content must not
+appear in the note.
 
 ## Data model: projects and events
 
@@ -274,15 +283,15 @@ appear only when they have real content — empty placeholders like
   `on-hold` 90–365 days, `completed` >365 days). v14.4 dropped the
   brittle keyword-sniffing of `summary_hint`; override by editing the
   index `status:` frontmatter directly.
-- **Substructures** (v13+) — auto-derived when a project has events in ≥2
-  distinct subfolders. Groups events under `### SF/` headings with each
-  event's one-sentence `summary_hint` alongside its link, so the user can
-  scan SD, DD, Meetings etc. without opening every note. Omitted when
-  all events share a single subfolder.
-- **Timeline (all events)** — auto-derived: links to all event notes in
-  date order regardless of subfolder. Renders `summary_hint` inline
-  when Substructures is absent (so one place carries the hint); stays
-  compact (dates + link only) when Substructures already carries it.
+- **Substructures OR Timeline, never both** (v14.7.4) — the MOC emits
+  exactly one event-list section so each wikilink appears once and
+  Obsidian's graph view shows a single edge per event instead of two.
+  - **Substructures** — auto-derived when a project has events in ≥2
+    distinct subfolders. Groups events under `### SF/` headings with
+    each event's one-sentence `summary_hint` alongside its link, so the
+    user can scan SD, DD, Meetings etc. without opening every note.
+  - **Timeline (all events)** — stands in when the project has ≤1
+    subfolder. Chronological, with inline `summary_hint` on each row.
 - **Subfolders** — auto-derived: lists vault subfolders that contain events.
 - **Parties** — v14.4: aggregated from `events[].parties` frontmatter
   lists, de-duplicated first-seen, rendered as `- <name>` bullets AND
@@ -293,12 +302,27 @@ appear only when they have real content — empty placeholders like
   surfaced only from user-edited existing content; never synthesised.
   Omitted when empty.
 
-**`summary_hint` contract:** every event-note body MUST start with
-`> [!abstract] Overview\n> <one sentence, 5–25 words>`. The event-writer
-prompt enforces this at write time; the validator rejects notes without
-it. Callers (retro-scan, heartbeat-scan, reconcile) derive the
-`ProjectIndexEvent.summary_hint` by reading the just-written note body
-via the obsidian CLI and passing it to `event_writer.extract_abstract_callout`.
+**`summary_hint` contract (v15.0.0):** the LLM picks the body shape.
+`event_writer.extract_abstract_callout` prefers a `> [!abstract] Overview`
+callout when present, and falls back to the first prose sentence of
+the body when absent — subject to a 5-35 word filter so overly long
+openings don't dump a paragraph into the MOC. Callers (retro-scan,
+heartbeat-scan, reconcile) still derive `ProjectIndexEvent.summary_hint`
+by reading the just-written note and passing it to this function. The
+pre-v15 rule that the body MUST start with the abstract callout is
+dropped — see `scripts/event_writer.validate_event_note_body`.
+
+**Inter-event mesh (v15.0.0):** every event note gets a `## Related`
+section (content-proximity scoring: shared topic tokens incl. CJK
+characters, same subfolder, shared parties, date proximity) and a
+footer `← Previous in <SF>` / `→ Next in <SF>` pair for chronological
+siblings in the same subfolder. Both are wrapped in
+`<!-- vb:related-start -->` / `<!-- vb:related-end -->` markers so
+subsequent scans can replace them idempotently. Wired via
+`project_index.apply_inter_event_links`, which runs after the MOC
+update in retro-scan / heartbeat-scan / reconcile. Events with no
+peers above a minimum-score threshold get no Related block — silence
+beats noisy links.
 
 A companion `{project_name}.base` (Obsidian Bases file) is generated
 alongside the index note, providing a tabular event table filtered to the

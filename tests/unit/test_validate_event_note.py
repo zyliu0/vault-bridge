@@ -32,17 +32,30 @@ def test_valid_event_body_passes():
     assert audit.note_kind == "event"
 
 
-def test_body_with_stop_word_fails():
+def test_body_with_stop_word_fails_when_opt_in():
+    """v15.0.0: STOP_WORDS is empty by default; phrase-based rejection
+    only fires when a project explicitly opts in by appending to the
+    list. Proves the mechanism still works under opt-in."""
+    import event_writer as ew
     body = _valid_body() + " the review came back with comments."
-    audit = ven.audit_body(body)
-    assert not audit.ok
-    assert any("stop-word" in r for r in audit.reasons)
+    # Default empty list → passes.
+    audit_default = ven.audit_body(body)
+    assert audit_default.ok
+    # Opt in.
+    ew.STOP_WORDS.append("the review came back")
+    try:
+        audit = ven.audit_body(body)
+        assert not audit.ok
+        assert any("stop-word" in r for r in audit.reasons)
+    finally:
+        ew.STOP_WORDS.pop()
 
 
-def test_too_short_body_fails():
-    audit = ven.audit_body("Short note, not enough words.")
-    assert not audit.ok
-    assert any("word count" in r and "below" in r for r in audit.reasons)
+def test_short_body_passes_post_v15():
+    """v15.0.0 (Issue 2 priority 2a): word-count bounds dropped — a
+    6-word field observation is now valid."""
+    audit = ven.audit_body("Short note, six words that pass.")
+    assert audit.ok, f"Short note should pass post-v15; got: {audit.reasons}"
 
 
 def test_metadata_stub_body_is_skipped():
@@ -88,9 +101,11 @@ def test_cli_json_output(tmp_path, capsys):
     assert '"ok": true' in out
 
 
-def test_cli_exit_nonzero_on_fail(tmp_path):
+def test_cli_exit_nonzero_on_empty_body(tmp_path):
+    """v15.0.0: non-empty body is the only structural requirement for
+    event notes, so the CLI must still fail on a totally empty file."""
     note = tmp_path / "note.md"
-    note.write_text("Short text.\n", encoding="utf-8")
+    note.write_text("\n", encoding="utf-8")
     rc = ven.main([str(note)])
     assert rc == 1
 

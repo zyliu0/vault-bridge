@@ -38,6 +38,32 @@ def die(msg: str) -> None:
     sys.exit(2)
 
 
+# Kept in sync with scripts/vision_runner.py:_REFUSAL_PATTERNS. Inlined
+# (rather than imported) so validate_frontmatter.py stays runnable as a
+# standalone script without triggering vision_runner's heavier imports.
+_REFUSAL_PATTERNS = (
+    "i need permission",
+    "i need your permission",
+    "please approve",
+    "permission prompt",
+    "file read when prompted",
+    "don't have permission",
+    "do not have permission",
+    "cannot read the image",
+    "unable to read the image",
+    "i'm unable to read",
+    "i am unable to read",
+)
+
+
+def _looks_like_refusal(caption: str) -> bool:
+    low = (caption or "").strip().lower()
+    if not low:
+        return False
+    head = low[:200]
+    return any(pat in head for pat in _REFUSAL_PATTERNS)
+
+
 def validate(note_path: str) -> None:
     """Validate a note file at a filesystem path (for temp files only)."""
     path = Path(note_path)
@@ -142,25 +168,52 @@ def validate_content(content: str, label: str = "<stdin>") -> None:
                 f"got {fm.get(field)!r}"
             )
 
+    # 7b. Semantic check on image_captions (v14.7.4 red-line).
+    #
+    # The cross-field invariant (attachments length vs image_captions
+    # length) is checked in schema.check_invariants; here we catch the
+    # stronger failure mode: captions that are permission-refusal text
+    # ("I need permission to read the image file...") or suspiciously
+    # short non-empty strings. Empty slots stay valid — a legitimately
+    # failed per-image caption records "" and the scan surfaces it via
+    # memory-report warnings, but poisoned captions must never reach
+    # disk. See scripts/vision_runner.py:is_refusal_caption.
+    captions = fm.get("image_captions")
+    if isinstance(captions, list):
+        for i, cap in enumerate(captions):
+            if not isinstance(cap, str):
+                continue  # schema's type check will flag this
+            stripped = cap.strip()
+            if not stripped:
+                continue
+            if _looks_like_refusal(stripped):
+                die(
+                    f"{note_path}: image_captions[{i}] matches a "
+                    f"permission-refusal pattern — the vision backend "
+                    f"returned a refusal instead of a caption: "
+                    f"{stripped[:120]!r}"
+                )
+            word_count = len(stripped.split())
+            if word_count < 5:
+                die(
+                    f"{note_path}: image_captions[{i}] is too short "
+                    f"({word_count} word(s)); expected at least 5 words "
+                    f"of description: {stripped!r}"
+                )
+
     # 8. Drift case 5: cross-field invariants.
     invariant_errors = schema.check_invariants(fm)
     if invariant_errors:
         joined = "; ".join(invariant_errors)
         die(f"{note_path}: invariant violation(s): {joined}")
 
-    # 9. Drift case 6: canonical field order.
-    # The on-disk YAML must serialize fields in FIELD_ORDER. Optional fields
-    # slot into their canonical position when present; missing optional fields
-    # are skipped without disturbing the order of what's present.
-    actual_order = _extract_top_level_key_order(fm_yaml)
-    expected_order = [f for f in field_order if f in fm]
-
-    if actual_order != expected_order:
-        die(
-            f"{note_path}: frontmatter field order is wrong.\n"
-            f"  Expected: {expected_order}\n"
-            f"  Got:      {actual_order}"
-        )
+    # 9. Field order: NOT enforced (v15.0.0 — Issue 2 priority 4a).
+    # YAML dicts are unordered; Obsidian, dataviews, bases, and every
+    # downstream consumer tolerate any order. Pre-v15 the validator
+    # rejected notes whose frontmatter was shuffled — a rule only the
+    # validator cared about. Reordering tolerance keeps the required
+    # field list, the type checks, the enum checks, and the invariants;
+    # field order is advisory only.
 
 
 def _extract_top_level_key_order(yaml_text: str) -> list:

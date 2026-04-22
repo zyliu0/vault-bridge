@@ -532,3 +532,177 @@ def test_full_orphan_fix_workflow(tmp_path, mock_vault, sample_orphan):
             # Step 3: append
             ok = ls.append_related_notes(mock_vault, sample_orphan["vault_path"], section)
             assert ok is True
+
+
+# ---------------------------------------------------------------------------
+# Inter-event mesh (v15.0.0 — Issue 2 priorities 1c + 1d)
+# ---------------------------------------------------------------------------
+
+
+def _make_peer(date, name, subfolder, summary_hint="", parties=None):
+    return {
+        "event_date": date,
+        "note_filename": name,
+        "subfolder": subfolder,
+        "summary_hint": summary_hint,
+        "parties": list(parties or []),
+    }
+
+
+class TestTokenize:
+    def test_strips_date_prefix(self):
+        tokens = ls._tokenize_for_related("2024-08-15 SD review")
+        assert "sd" not in tokens  # in the stop-token list
+        assert "review" in tokens
+
+    def test_keeps_cjk_characters_as_per_char_tokens(self):
+        tokens = ls._tokenize_for_related("2023-02-27 施工图")
+        assert "施" in tokens
+        assert "工" in tokens
+        assert "图" in tokens
+
+    def test_drops_stop_tokens(self):
+        tokens = ls._tokenize_for_related("2024-08-15 event meeting folder")
+        # "event", "meeting", "folder" all stop-tokens → dropped.
+        assert "event" not in tokens
+        assert "meeting" not in tokens
+        assert "folder" not in tokens
+
+    def test_empty_input(self):
+        assert ls._tokenize_for_related("") == set()
+        assert ls._tokenize_for_related(None) == set()
+
+
+class TestScoreEventPair:
+    def test_cjk_topic_match_within_same_subfolder(self):
+        a = _make_peer("2023-02-28", "2023-02-28 施工图", "CD")
+        b = _make_peer("2023-02-27", "2023-02-27 施工图", "CD")
+        # 3 shared CJK tokens (capped at 3) + same subfolder + near date.
+        score = ls.score_event_pair(a, b)
+        assert score >= ls._MIN_RELATED_SCORE
+        # Reality check: three tokens capped * 5 = 15, + 3 subfolder, + date ≈ 21–22
+        assert 18 <= score <= 25
+
+    def test_self_pair_scores_zero(self):
+        a = _make_peer("2023-02-28", "2023-02-28 施工图", "CD")
+        assert ls.score_event_pair(a, a) == 0.0
+
+    def test_different_subfolder_still_scores_if_topic_matches(self):
+        a = _make_peer("2023-02-28", "2023-02-28 施工图", "CD")
+        b = _make_peer("2023-02-27", "2023-02-27 施工图", "DD")
+        score = ls.score_event_pair(a, b)
+        # 3 tokens + date proximity, no subfolder bonus
+        assert score > 0
+        assert score < 25  # lower than the same-subfolder case
+
+    def test_party_overlap_adds_score(self):
+        a = _make_peer("2024-08-15", "2024-08-15 review", "SD", parties=["ClientCo"])
+        b = _make_peer("2024-09-30", "2024-09-30 followup", "DD", parties=["ClientCo", "ArchFirm"])
+        # Different subfolder, different tokens, different dates beyond window.
+        # Only the party overlap contributes.
+        score = ls.score_event_pair(a, b)
+        assert score == pytest.approx(ls._RELATED_WEIGHT_PARTY_OVERLAP * 1)
+
+    def test_pairs_with_no_signal_score_zero(self):
+        a = _make_peer("2024-08-15", "2024-08-15 kickoff", "SD", parties=["A"])
+        b = _make_peer("2025-12-31", "2025-12-31 unrelated", "CA", parties=["Z"])
+        assert ls.score_event_pair(a, b) == 0.0
+
+
+class TestFindRelatedEvents:
+    def test_returns_top_k_sorted_by_score(self):
+        current = _make_peer("2023-02-28", "2023-02-28 施工图", "CD")
+        peers = [
+            _make_peer("2023-02-27", "2023-02-27 施工图", "CD"),
+            _make_peer("2023-03-17", "2023-03-17 施工图", "CD"),
+            _make_peer("2023-03-21", "2023-03-21 施工图", "CD"),
+            _make_peer("2023-01-15", "2023-01-15 kickoff", "SD"),
+        ]
+        related = ls.find_related_events(current, peers, k=2)
+        assert len(related) == 2
+        # Closest date wins.
+        assert related[0][0]["note_filename"] == "2023-02-27 施工图"
+
+    def test_filters_below_min_score(self):
+        current = _make_peer("2024-08-15", "2024-08-15 kickoff", "SD")
+        peers = [
+            _make_peer("2025-12-31", "2025-12-31 unrelated", "CA"),
+        ]
+        assert ls.find_related_events(current, peers) == []
+
+    def test_excludes_self(self):
+        current = _make_peer("2023-02-28", "2023-02-28 施工图", "CD")
+        related = ls.find_related_events(current, [current])
+        assert related == []
+
+
+class TestBuildRelatedSection:
+    def test_empty_list_returns_empty_string(self):
+        assert ls.build_event_related_section([]) == ""
+
+    def test_renders_wikilinks_in_score_order(self):
+        peers = [
+            (_make_peer("2023-02-27", "2023-02-27 施工图", "CD"), 22.0),
+            (_make_peer("2023-03-17", "2023-03-17 施工图", "CD"), 18.0),
+        ]
+        out = ls.build_event_related_section(peers)
+        assert "## Related" in out
+        assert out.index("[[2023-02-27 施工图]]") < out.index("[[2023-03-17 施工图]]")
+
+
+class TestPrevNextInSubfolder:
+    def test_returns_chronological_neighbours_in_same_subfolder(self):
+        current = _make_peer("2023-02-28", "2023-02-28 施工图", "CD")
+        peers = [
+            _make_peer("2023-02-27", "2023-02-27 施工图", "CD"),
+            _make_peer("2023-03-17", "2023-03-17 施工图", "CD"),
+            _make_peer("2023-03-21", "2023-03-21 施工图", "CD"),
+            _make_peer("2023-01-15", "2023-01-15 kickoff", "SD"),   # different subfolder
+        ]
+        prev, nxt = ls.find_prev_next_in_subfolder(current, peers)
+        assert prev["note_filename"] == "2023-02-27 施工图"
+        assert nxt["note_filename"] == "2023-03-17 施工图"
+
+    def test_head_of_sequence_has_no_prev(self):
+        current = _make_peer("2023-02-27", "2023-02-27 施工图", "CD")
+        peers = [
+            _make_peer("2023-02-28", "2023-02-28 施工图", "CD"),
+            _make_peer("2023-03-17", "2023-03-17 施工图", "CD"),
+        ]
+        prev, nxt = ls.find_prev_next_in_subfolder(current, peers)
+        assert prev is None
+        assert nxt["note_filename"] == "2023-02-28 施工图"
+
+    def test_tail_of_sequence_has_no_next(self):
+        current = _make_peer("2023-03-21", "2023-03-21 施工图", "CD")
+        peers = [
+            _make_peer("2023-02-27", "2023-02-27 施工图", "CD"),
+            _make_peer("2023-03-17", "2023-03-17 施工图", "CD"),
+        ]
+        prev, nxt = ls.find_prev_next_in_subfolder(current, peers)
+        assert prev["note_filename"] == "2023-03-17 施工图"
+        assert nxt is None
+
+    def test_singleton_returns_none_none(self):
+        current = _make_peer("2023-02-28", "2023-02-28 施工图", "CD")
+        assert ls.find_prev_next_in_subfolder(current, []) == (None, None)
+
+
+class TestBuildPrevNextSection:
+    def test_empty_when_both_none(self):
+        assert ls.build_prev_next_section(None, None, "CD") == ""
+
+    def test_only_prev_renders_arrow_left(self):
+        prev = _make_peer("2023-02-27", "2023-02-27 施工图", "CD")
+        out = ls.build_prev_next_section(prev, None, "CD")
+        assert "←" in out
+        assert "[[2023-02-27 施工图]]" in out
+        assert "→" not in out
+
+    def test_both_render_both_arrows(self):
+        prev = _make_peer("2023-02-27", "2023-02-27 施工图", "CD")
+        nxt = _make_peer("2023-03-17", "2023-03-17 施工图", "CD")
+        out = ls.build_prev_next_section(prev, nxt, "CD")
+        assert "←" in out
+        assert "→" in out
+        assert out.index("Previous") < out.index("Next")

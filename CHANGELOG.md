@@ -1,5 +1,133 @@
 # Changelog
 
+## v15.0.0 — field-report Issue 1 + Issue 2 full sweep (breaking)
+
+Major version because the validator drops format-as-validation rules
+that pre-v15 callers may have relied on, several optional-field rules
+change, and the MOC moves to marker-based preservation. Existing
+vaults keep working — the legacy section-by-section parser runs on
+the first regenerate under v15 and migrates the MOC into the new
+marker layout.
+
+### Issue 1 — vision-captioner
+
+All three sub-items from the field report:
+
+1. `claude -p` now runs with `--dangerously-skip-permissions` so the
+   non-interactive subprocess no longer deadlocks on a permission
+   prompt. Pre-v15 every caption came back as
+   `"I need permission to read the image file..."` and was silently
+   written into `image_captions`.
+2. **Batched `claude_cli` backend** (Option D from the field report).
+   A scan with 10 candidate images now makes ONE subprocess call
+   instead of 10 — measured 22s vs ~160s, a 7× speedup. Legacy
+   per-image path preserved for `anthropic`, `stub`, and for tests
+   via `batch=False`.
+3. **Refusal detection that raises.** New public
+   `vision_runner.is_refusal_caption()` matches 11 known
+   permission-refusal phrases. Any match (per-image, whole-body, or
+   per-line in a batch response) raises `RuntimeError` — the scan
+   aborts the event rather than shipping a poisoned note.
+   `validate_frontmatter.py` gains the same check as a last line of
+   defence: a non-empty `image_captions` entry matching a refusal
+   pattern, or shorter than 5 words, is a schema violation.
+
+### Issue 2 — MOC + event-note + validator (all 11 sub-items)
+
+Priorities 1a–1d (graph shape + inter-event mesh):
+
+- **1a — Substructures OR Timeline, never both.** Pre-v15 both
+  sections always emitted, duplicating every event wikilink. Now
+  Substructures covers projects with ≥2 subfolders; Timeline stands
+  in for ≤1 subfolder.
+- **1b — `add_index_backlink` deleted.** The `index_note` frontmatter
+  key was a redundant graph edge on top of the MOC body wikilinks,
+  and its silent-`except` swallowed real Obsidian-CLI failures.
+- **1c — inter-event `## Related` section.**
+  `link_strategy.find_related_events` scores peer events on:
+  shared topic tokens (incl. CJK characters treated as per-char
+  tokens, so the 施工图 sequence from the field report self-links),
+  same subfolder (+3), party overlap (+2 per shared name, capped
+  at 3), date proximity (0-4 within ±14 days). Below a
+  min-score threshold events get no section — silence beats noisy
+  links.
+- **1d — prev/next footer.** `link_strategy.find_prev_next_in_subfolder`
+  emits `← Previous in <SF>: [[...]]` / `→ Next in <SF>: [[...]]`
+  for chronological siblings in the same subfolder. Rendered
+  together with the Related section in a block wrapped in
+  `<!-- vb:related-start -->` / `<!-- vb:related-end -->` markers so
+  re-runs replace it idempotently.
+- `project_index.apply_inter_event_links` wires both into the
+  post-write path; retro-scan (new step 7c), heartbeat-scan (Step 5d
+  extension), and reconcile (`--rebuild-indexes`) all invoke it.
+
+Priorities 2a–2d (event-note formatter relaxation):
+
+- **2a — abstract callout + word-count checks dropped** from
+  `event_writer.validate_event_note_body`. The only structural rule
+  now is non-empty body. Verbatim-paste detection stays — it's the
+  core of the fabrication firewall. `MIN_WORDS = 100` and
+  `MAX_WORDS = 200` are kept as advisory constants.
+- **2b — `extract_abstract_callout` first-sentence fallback.** When
+  no `> [!abstract]` callout is present, the function returns the
+  first prose sentence (5-35 word filter) as the MOC hint. The LLM
+  picks the note's opening shape; the MOC still gets its one-liner.
+- **2c — `STOP_WORDS` emptied.** Pre-v15 the list hard-coded
+  phrases from one project's past incidents. Per-project callers can
+  still append to `event_writer.STOP_WORDS`; the default is `[]`.
+- **2d — event-note prompt relaxed.**
+  `templates/event_writer/event-note.prompt.md` no longer requires
+  the `> [!abstract] Overview` structure or the 100-200 word target;
+  it explicitly tells the LLM that shape is its choice subject to
+  the fabrication rules, and enumerates the failure modes the
+  pre-v15 rules created (short field observations, long PDF
+  analyses).
+
+Priorities 3a–3c (MOC formatter):
+
+- **3b — `==highlight==` markup dropped from Status.** Pre-v15 the
+  MOC wrapped `Current status` and `Timeline` values in highlight
+  markers. Highlights are meant to mark facts the USER highlights;
+  when everything was highlighted, nothing was.
+- **3c — marker-based preservation.** `generate_index` wraps the
+  auto-generated zone in `<!-- vb:auto-start -->` /
+  `<!-- vb:auto-end -->` comments. `parse_existing_index` returns
+  `marker_head` / `marker_tail` / `has_markers`. On regenerate:
+  with markers present, the head and tail content is preserved
+  verbatim; without markers (legacy v14 MOCs), the old
+  section-by-section parser runs and migrates the note into the
+  new layout.
+- **3a — LLM-authored MOC body** is NOT shipped. The spec itself
+  calls for an opt-in flag (`index_mode`), a migration path, and
+  marker support as prereqs. 3c landed the marker prereq; the
+  full LLM-authored path is deferred to a follow-up because it
+  needs its own prompt design, opt-in UX, and broad cross-vault
+  migration testing.
+
+Priorities 4a + 4b (frontmatter validator):
+
+- **4a — field-order check dropped.** Step 9 in
+  `validate_frontmatter.py` is gone; any order passes. YAML dicts
+  are unordered; Obsidian, Dataview, Bases all tolerate any order.
+- **4b — `cssclasses` and `sources_read` moved to optional.**
+  Pre-v15 both were required-even-empty, adding noise lines to
+  metadata stubs. The cross-field invariant for `sources_read`
+  treats a missing value as empty, so the metadata-only branch
+  still works.
+
+### Migration notes for existing vaults
+
+- First regenerate under v15 converts an MOC from section-parsed to
+  marker-wrapped layout. User sections move below the end marker; the
+  overview moves above the start marker. No data loss.
+- Event notes written pre-v15 remain valid under the looser validator —
+  no re-scan needed. Running `/vault-bridge:reconcile --rebuild-indexes`
+  also applies the inter-event mesh to the existing notes.
+- Notes with poisoned `image_captions` from pre-v14.7.4 refusal strings
+  will now fail schema validation. Re-run `/vault-bridge:retro-scan`
+  on the affected events (now batched via Option D, fast) to
+  regenerate clean captions.
+
 ## v14.7.3 — template installer load_config signature fix
 
 Field-reported crash in `_write_to_vault` when `install_templates` was

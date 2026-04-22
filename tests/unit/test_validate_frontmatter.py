@@ -272,12 +272,16 @@ def test_drift_5_invariant_empty_sources_nonzero_bytes(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Drift case 6: wrong field order
+# Drift case 6: field order — NOT enforced post-v15.0.0
+#
+# (Issue 2 priority 4a): YAML dicts are unordered, downstream tools
+# don't care, only the validator did. Pre-v15 the canonical FIELD_ORDER
+# was mandatory and the commonest false-positive. Reordering tolerance
+# keeps types/enums/invariants and drops the order rule.
 # ---------------------------------------------------------------------------
 
-def test_drift_6_field_order_shuffled(tmp_path):
-    """Fields present but in the wrong order violate the canonical layout."""
-    # Sort alphabetically — completely wrong order
+def test_shuffled_fields_pass_post_v15(tmp_path):
+    """Completely reordered frontmatter is now valid."""
     shuffled = """captured_date: 2026-04-12
 content_confidence: high
 cssclasses: []
@@ -293,22 +297,20 @@ source_path: "/nas/test.pdf"
 sources_read:
   - "/nas/test.pdf"
 """
-    note = write_note(tmp_path, "drift6.md", shuffled)
+    note = write_note(tmp_path, "shuffled.md", shuffled)
     code, stderr = run_validator(note)
-    assert code != 0
-    assert "order" in stderr.lower()
+    assert code == 0, f"Shuffled frontmatter should pass post-v15; got:\n{stderr}"
 
 
-def test_drift_6_first_field_not_schema_version(tmp_path):
-    """schema_version must be first so humans can spot the schema at a glance."""
+def test_schema_version_first_is_nice_to_have_not_required(tmp_path):
+    """Pre-v15 schema_version had to come first; v15.0.0 dropped this."""
     fm = VALID_EVENT_NOTE_FRONTMATTER.replace(
         "schema_version: 1\nplugin: vault-bridge\n",
         "plugin: vault-bridge\nschema_version: 1\n",
     )
-    note = write_note(tmp_path, "drift6b.md", fm)
+    note = write_note(tmp_path, "plugin_first.md", fm)
     code, stderr = run_validator(note)
-    assert code != 0
-    assert "order" in stderr.lower()
+    assert code == 0, f"Field order should not be enforced; got:\n{stderr}"
 
 
 # ---------------------------------------------------------------------------
@@ -435,3 +437,81 @@ def test_v2_images_embedded_positive_no_attachments_fails(tmp_path):
     code, stderr = run_validator(note)
     assert code != 0
     assert "images_embedded" in stderr
+
+
+# ---------------------------------------------------------------------------
+# image_captions semantic checks (v14.7.4 red-line)
+# ---------------------------------------------------------------------------
+#
+# The validator rejects captions that look like permission-refusal text or
+# are suspiciously short. These are last-line-of-defence checks so that if
+# vision_runner's refusal-raise ever regresses, poisoned notes still cannot
+# land on disk.
+
+VALID_V2_WITH_CAPTIONS = VALID_V2_WITH_IMAGES.replace(
+    "images_embedded: 2\ncssclasses: []\n",
+    "images_embedded: 2\n"
+    "image_captions:\n"
+    "  - \"Four painted canvas sample swatches arranged with Chinese labels.\"\n"
+    "  - \"Illuminated white textured panel mounted on wall with visible wiring.\"\n"
+    "cssclasses: []\n",
+)
+
+
+def test_v2_with_real_captions_passes(tmp_path):
+    """Two properly-worded captions → valid."""
+    note = write_note(tmp_path, "v2_caps_ok.md", VALID_V2_WITH_CAPTIONS)
+    code, stderr = run_validator(note)
+    assert code == 0, f"Real captions should pass:\n{stderr}"
+
+
+def test_v2_empty_caption_slots_pass(tmp_path):
+    """Empty string slots are valid — per-image failures record \"\" and
+    the scan surfaces them via warnings; only non-empty poisoned strings
+    are fatal."""
+    fm = VALID_V2_WITH_IMAGES.replace(
+        "images_embedded: 2\ncssclasses: []\n",
+        "images_embedded: 2\n"
+        "image_captions:\n"
+        "  - \"\"\n"
+        "  - \"\"\n"
+        "cssclasses: []\n",
+    )
+    note = write_note(tmp_path, "v2_caps_empty.md", fm)
+    code, stderr = run_validator(note)
+    assert code == 0, f"Empty caption slots should pass:\n{stderr}"
+
+
+def test_v2_refusal_caption_fails(tmp_path):
+    """A permission-refusal string in image_captions must be rejected."""
+    fm = VALID_V2_WITH_IMAGES.replace(
+        "images_embedded: 2\ncssclasses: []\n",
+        "images_embedded: 2\n"
+        "image_captions:\n"
+        "  - \"Four painted canvas samples with Chinese labels.\"\n"
+        "  - \"I need permission to read the image file. Please approve "
+        "the file read when prompted.\"\n"
+        "cssclasses: []\n",
+    )
+    note = write_note(tmp_path, "v2_caps_refusal.md", fm)
+    code, stderr = run_validator(note)
+    assert code != 0, "Refusal string should be rejected"
+    assert "refusal" in stderr.lower()
+    assert "image_captions[1]" in stderr
+
+
+def test_v2_short_caption_fails(tmp_path):
+    """A non-empty caption shorter than 5 words is a schema violation."""
+    fm = VALID_V2_WITH_IMAGES.replace(
+        "images_embedded: 2\ncssclasses: []\n",
+        "images_embedded: 2\n"
+        "image_captions:\n"
+        "  - \"Four painted canvas sample swatches arranged in a row.\"\n"
+        "  - \"A red cube.\"\n"
+        "cssclasses: []\n",
+    )
+    note = write_note(tmp_path, "v2_caps_short.md", fm)
+    code, stderr = run_validator(note)
+    assert code != 0, "3-word caption should be rejected"
+    assert "too short" in stderr.lower()
+    assert "image_captions[1]" in stderr

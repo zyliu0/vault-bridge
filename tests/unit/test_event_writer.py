@@ -183,16 +183,31 @@ class TestValidator:
         result = body.validator(clean)
         assert result.ok, f"Expected ok, got: {result.reasons}"
 
-    def test_validator_rejects_stop_word(self):
+    def test_validator_stopword_list_empty_by_default(self):
+        """v15.0.0 (Issue 2 priority 2c): STOP_WORDS is empty. Phrases
+        like "the review came back" no longer fail validation on their
+        own — verbatim-paste detection + source-grounding do the real
+        anti-fabrication work. Per-project overrides can still populate
+        `event_writer.STOP_WORDS`.
+        """
         r = _FakeResult(text="raw content")
         body = event_writer.compose_body(r, _meta())
-        bad = _ABSTRACT_CALLOUT + (
-            "On August 1 the review came back with several changes. Everyone was happy. "
-            "We moved on. " * 10
+        formerly_bad = _ABSTRACT_CALLOUT + (
+            "On August 1 the review came back with several changes. "
+            "Everyone was happy. We moved on. " * 5
         )
-        result = body.validator(bad)
-        assert not result.ok
-        assert any("the review came back" in r.lower() for r in result.reasons)
+        # Default STOP_WORDS is empty — this note is allowed.
+        result = body.validator(formerly_bad)
+        assert result.ok, f"Expected ok; got: {result.reasons}"
+
+        # But if a project opts back in, the mechanism still works.
+        event_writer.STOP_WORDS.append("the review came back")
+        try:
+            result = body.validator(formerly_bad)
+            assert not result.ok
+            assert any("the review came back" in r.lower() for r in result.reasons)
+        finally:
+            event_writer.STOP_WORDS.pop()
 
     def test_validator_rejects_verbatim_paste(self):
         """If body contains a long consecutive substring from raw_text, reject."""
@@ -212,55 +227,46 @@ class TestValidator:
         assert not result.ok
         assert any("paste" in reason.lower() or "verbatim" in reason.lower() for reason in result.reasons)
 
-    def test_validator_rejects_too_short(self):
+    def test_validator_rejects_empty_body(self):
+        """v15.0.0: non-empty body is the only structural rule. Zero
+        content always fails."""
         r = _FakeResult(text="raw")
         body = event_writer.compose_body(r, _meta())
-        result = body.validator(_ABSTRACT_CALLOUT + "Too short.")
+        result = body.validator("")
         assert not result.ok
-        assert any("word" in reason.lower() for reason in result.reasons)
+        assert any("empty" in reason.lower() for reason in result.reasons)
 
-    def test_validator_rejects_too_long(self):
+    def test_validator_allows_short_note_post_v15(self):
+        """v15.0.0 (Issue 2 priority 2a): word-count bounds are advisory.
+        A 2-line field-observation for a photo-only event is fine. Pre-v15
+        any body under 100 words was rejected."""
         r = _FakeResult(text="raw")
         body = event_writer.compose_body(r, _meta())
-        long_text = _ABSTRACT_CALLOUT + " ".join(["word"] * 400)
+        short = "Two photos of the east elevation in morning light after install."
+        result = body.validator(short)
+        assert result.ok, f"Short note should pass post-v15; got: {result.reasons}"
+
+    def test_validator_allows_long_note_post_v15(self):
+        """v15.0.0: 400-word analyses of long PDFs are fine."""
+        r = _FakeResult(text="raw")
+        body = event_writer.compose_body(r, _meta())
+        long_text = " ".join(["analysis"] * 400)
         result = body.validator(long_text)
-        assert not result.ok
-        assert any("word" in reason.lower() for reason in result.reasons)
+        assert result.ok, f"Long note should pass post-v15; got: {result.reasons}"
 
-    def test_validator_rejects_missing_abstract_callout(self):
-        """Event notes MUST start with > [!abstract] Overview (v14.4)."""
+    def test_validator_allows_missing_abstract_callout_post_v15(self):
+        """v15.0.0 (Issue 2 priority 2a/2b): the `> [!abstract] Overview`
+        callout is no longer required. The LLM picks the shape; the MOC
+        gets its summary_hint via first-sentence fallback."""
         r = _FakeResult(text="raw")
         body = event_writer.compose_body(r, _meta())
-        # Same prose as the clean-prose test, BUT without the abstract callout.
-        no_abstract = (
-            "On August 1 we met with the consultant at the SD review in the afternoon. "
-            "We walked through the latest floor-plan revision, agreed on moving the entry "
-            "to the east elevation, and flagged the stair detail for further study. The "
-            "mechanical scope stays unchanged from the prior package. Next step is to "
-            "update the set before the next coordination meeting at the end of the month. "
-            "This is a deliberately padded paragraph to cross the minimum-word floor "
-            "cleanly and land safely inside the allowed range for a diary note body. "
-            "We left the office feeling productive and agreed to circle back before "
-            "Friday to finalise the dimensions and confirm the revised floor plate. "
-            "Everyone seemed aligned; the owner sent a thumbs up after the call ended."
+        plain = (
+            "On August 1 we met with the consultant at the SD review. "
+            "We walked through the floor-plan revision and agreed on "
+            "moving the entry to the east elevation."
         )
-        result = body.validator(no_abstract)
-        assert not result.ok
-        assert any("abstract" in reason.lower() for reason in result.reasons)
-
-    def test_validator_rejects_abstract_callout_too_short(self):
-        r = _FakeResult(text="raw")
-        body = event_writer.compose_body(r, _meta())
-        # Abstract has 3 words — below ABSTRACT_CALLOUT_MIN_WORDS (5)
-        too_short_abs = (
-            "> [!abstract] Overview\n"
-            "> Met client today.\n"
-            "\n"
-            + " ".join(["word"] * 150)
-        )
-        result = body.validator(too_short_abs)
-        assert not result.ok
-        assert any("abstract" in r.lower() and "short" in r.lower() for r in result.reasons)
+        result = body.validator(plain)
+        assert result.ok, f"Plain prose should pass post-v15; got: {result.reasons}"
 
 
 class TestExtractAbstractCallout:
@@ -287,9 +293,33 @@ class TestExtractAbstractCallout:
         # Joined into one line
         assert "\n" not in hint
 
-    def test_returns_empty_when_no_abstract(self):
-        body = "Just a diary paragraph with no callout at the top."
-        assert event_writer.extract_abstract_callout(body) == ""
+    def test_falls_back_to_first_sentence_when_no_abstract(self):
+        """v15.0.0 (Issue 2 priority 2b): when no `> [!abstract]` callout
+        is present, fall back to the first sentence of body prose."""
+        body = "Met the client today at the SD review for the east wing."
+        hint = event_writer.extract_abstract_callout(body)
+        assert "Met the client" in hint
+
+    def test_first_sentence_fallback_ignores_headings_and_embeds(self):
+        body = (
+            "# 2024-08-15 SD meeting\n"
+            "\n"
+            "![[photo1.jpg]]\n"
+            "\n"
+            "Walked through floor plans with the consultant at the afternoon review.\n"
+        )
+        hint = event_writer.extract_abstract_callout(body)
+        assert "floor plans" in hint
+        assert "#" not in hint
+
+    def test_first_sentence_fallback_skips_short_lines(self):
+        """A 3-word line is below ABSTRACT_CALLOUT_MIN_WORDS; fallback
+        returns empty rather than a fragment."""
+        body = "Met today.\n\nThen went home."
+        # Even though two sentences exist, the first is too short to be
+        # a useful hint.
+        hint = event_writer.extract_abstract_callout(body)
+        assert hint == ""
 
     def test_returns_empty_on_empty_body(self):
         assert event_writer.extract_abstract_callout("") == ""
