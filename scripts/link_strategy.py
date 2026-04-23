@@ -317,6 +317,20 @@ def find_related_events(
     return scored[:k]
 
 
+def _wikilink_target(name: str) -> str:
+    """Return the bare wikilink target for a note filename.
+
+    v16.1.1 — the v16.0.3 field-report addendum flagged that
+    `note_filename` values carrying a `.md` extension produced
+    wikilinks like ``[[foo.md]]``, which Obsidian then appends
+    another ``.md`` to when resolving (searches ``foo.md.md``).
+    Strip the extension so bare-name resolution works as intended.
+    """
+    if name.endswith(".md"):
+        return name[:-3]
+    return name
+
+
 def build_event_related_section(related: List[Tuple[Any, float]]) -> str:
     """Render a `## Related` section from the output of `find_related_events`.
 
@@ -331,7 +345,7 @@ def build_event_related_section(related: List[Tuple[Any, float]]) -> str:
             "note_filename", ""
         )
         if name:
-            lines.append(f"- [[{name}]]")
+            lines.append(f"- [[{_wikilink_target(name)}]]")
     return "\n".join(lines)
 
 
@@ -398,9 +412,9 @@ def build_prev_next_section(
 
     lines = []
     if prev is not None:
-        lines.append(f"← Previous in {subfolder}: [[{_g(prev, 'note_filename')}]]  ")
+        lines.append(f"← Previous in {subfolder}: [[{_wikilink_target(_g(prev, 'note_filename'))}]]  ")
     if nxt is not None:
-        lines.append(f"→ Next in {subfolder}: [[{_g(nxt, 'note_filename')}]]")
+        lines.append(f"→ Next in {subfolder}: [[{_wikilink_target(_g(nxt, 'note_filename'))}]]")
     return "\n".join(lines)
 
 

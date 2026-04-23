@@ -1728,3 +1728,158 @@ class TestEventBatchFolder:
         # No special characters in slug
         assert "(" not in folder
         assert ")" not in folder
+
+
+# ---------------------------------------------------------------------------
+# v16.1.1 — transport fetch stage
+# ---------------------------------------------------------------------------
+
+class TestStageFetchToLocal:
+    """v16.1.1 Critical 2 fix — `_stage_fetch_to_local` materialises
+    remote archive paths into local copies before extraction. Pre-v16.1.1
+    the pipeline dispatched straight to `file_type_handlers.read_text`,
+    which guarded on `Path(source_path).exists()` and returned `""`
+    for un-mounted SFTP paths — every remote-archive scan silently
+    dropped 100% of events.
+    """
+
+    def _ctx(self, source_path, workdir="/tmp/fake-workdir"):
+        import scan_pipeline as sp
+        return sp._ScanContext(
+            source_path=source_path,
+            workdir=workdir,
+            vault_project_path="arch-projects/P/SD",
+            event_date="2025-04-01",
+            vault_name="V",
+            throughput_bps=None,
+            skip_on_no_content=True,
+            dry_run=False,
+            att_index=None,
+            strict_handlers=False,
+        )
+
+    def test_local_path_pass_through(self, tmp_path):
+        """When source_path exists locally, no transport call is
+        attempted and `local_path` equals `source_path`."""
+        import scan_pipeline as sp
+        local_file = tmp_path / "note.md"
+        local_file.write_text("hello", encoding="utf-8")
+        ctx = self._ctx(str(local_file), workdir=str(tmp_path))
+        sp._stage_fetch_to_local(ctx)
+        assert ctx.local_path == str(local_file)
+        assert ctx.warnings == []
+
+    def test_remote_path_calls_transport_fetch(self, tmp_path, monkeypatch):
+        """A non-existent source path with a working transport gets
+        fetched via `transport_loader.fetch_to_local` and `local_path`
+        is set to the returned local copy."""
+        import scan_pipeline as sp
+        fake_local = tmp_path / "fetched.pdf"
+        fake_local.write_text("pretend pdf bytes", encoding="utf-8")
+
+        calls = []
+
+        def fake_fetch(workdir, archive_path):
+            calls.append((str(workdir), archive_path))
+            return fake_local
+
+        # Intercept the transport_loader import inside the stage.
+        import transport_loader
+        monkeypatch.setattr(transport_loader, "fetch_to_local", fake_fetch)
+
+        ctx = self._ctx("/remote/sftp/path/nope.pdf", workdir=str(tmp_path))
+        sp._stage_fetch_to_local(ctx)
+        assert ctx.local_path == str(fake_local)
+        assert len(calls) == 1
+
+    def test_transport_failure_warns_and_continues(self, tmp_path, monkeypatch):
+        """When the transport raises, the stage records a warning and
+        leaves `local_path` empty. Extraction will see an unreadable
+        path and the no-content gate will skip — same safe behavior
+        as pre-v16.1.1 for local-only setups."""
+        import scan_pipeline as sp
+
+        def broken_fetch(workdir, archive_path):
+            raise RuntimeError("network down")
+
+        import transport_loader
+        monkeypatch.setattr(transport_loader, "fetch_to_local", broken_fetch)
+
+        ctx = self._ctx("/remote/nope.pdf", workdir=str(tmp_path))
+        sp._stage_fetch_to_local(ctx)
+        assert ctx.local_path == ""
+        assert any("transport fetch failed" in w for w in ctx.warnings)
+
+    def test_transport_missing_is_debug_only(self, tmp_path, monkeypatch):
+        """Vault-only domains / local archives hit TransportMissing on
+        every call; that is NOT an error condition and must stay out
+        of the warnings list."""
+        import scan_pipeline as sp
+        import transport_loader
+
+        class _Missing(Exception):
+            pass
+
+        _Missing.__name__ = "TransportMissing"
+
+        def missing(workdir, archive_path):
+            raise _Missing("no transport")
+
+        monkeypatch.setattr(transport_loader, "fetch_to_local", missing)
+
+        ctx = self._ctx("/remote/nope.pdf", workdir=str(tmp_path))
+        sp._stage_fetch_to_local(ctx)
+        assert ctx.local_path == ""
+        assert ctx.warnings == []
+
+    def test_pipeline_contains_fetch_stage_before_extract(self):
+        """Pipeline order invariant: fetch must run AFTER handler
+        lookup (which is extension-based and works on any path) and
+        BEFORE extract_text / extract_images (which need bytes)."""
+        import scan_pipeline as sp
+        names = [getattr(s, "__name__", str(s)) for s in sp._PIPELINE]
+        fetch_idx = names.index("_stage_fetch_to_local")
+        text_idx = names.index("_stage_extract_text")
+        images_idx = names.index("_stage_extract_images")
+        handler_idx = names.index("_stage_handler_lookup")
+        assert handler_idx < fetch_idx < text_idx
+        assert fetch_idx < images_idx
+
+
+# ---------------------------------------------------------------------------
+# v16.1.1 — content_confidence "low" accepted end-to-end
+# ---------------------------------------------------------------------------
+
+class TestContentConfidenceLow:
+    """v16.1.1 Medium 3 — `low` is emitted for 1-100 char extractions
+    and must round-trip through the schema validator without the
+    sources_read/read_bytes hack the v16.0.3 field report flagged."""
+
+    def test_compute_confidence_emits_low_for_short_text(self):
+        import scan_pipeline as sp
+        assert sp._compute_confidence("") == "none"
+        assert sp._compute_confidence("hi") == "low"
+        assert sp._compute_confidence("x" * 50) == "low"
+        assert sp._compute_confidence("x" * 101) == "high"
+
+    def test_schema_accepts_low_with_nonempty_sources_read(self):
+        """The invariant sources_read↔content_confidence must accept
+        BOTH 'high' and 'low' — the pipeline emits 'low' for files
+        whose bytes WERE read but yielded ≤100 chars of text."""
+        import schema
+        errors = schema.check_invariants({
+            "sources_read": ["path/to/short.pdf"],
+            "content_confidence": "low",
+            "read_bytes": 42,
+        })
+        assert errors == []
+
+    def test_schema_rejects_low_with_empty_sources_read(self):
+        """Empty sources_read still requires metadata-only."""
+        import schema
+        errors = schema.check_invariants({
+            "sources_read": [],
+            "content_confidence": "low",
+            "read_bytes": 0,
+        })
+        assert any("expected 'metadata-only'" in e for e in errors)

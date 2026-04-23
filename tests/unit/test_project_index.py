@@ -77,22 +77,42 @@ def test_infer_status_active_within_90_days():
     assert status.status == "active"
 
 
-def test_infer_status_on_hold_between_90_and_365():
+def test_infer_status_on_hold_between_180_and_730():
+    """v16.1.1: widened windows — active ≤180d, on-hold ≤730d."""
     today = date(2024, 12, 1)
     events = _make_events(
-        ("2024-07-01", "note", "SD"),  # ~153 days ago
+        ("2024-04-15", "note", "SD"),  # ~230 days ago → on-hold
     )
     status = pi.infer_status(events, today)
     assert status.status == "on-hold"
 
 
-def test_infer_status_completed_over_365_days():
+def test_infer_status_completed_over_730_days():
+    """v16.1.1: completed threshold is 730 days (2 years)."""
     today = date(2025, 12, 1)
     events = _make_events(
-        ("2024-01-01", "note", "SD"),  # >365 days ago
+        ("2024-07-01", "note", "SD"),  # ~518 days ago → still on-hold
     )
     status = pi.infer_status(events, today)
-    assert status.status == "completed"
+    assert status.status == "on-hold"
+    events2 = _make_events(
+        ("2023-01-01", "note", "SD"),  # >730 days ago → completed
+    )
+    status2 = pi.infer_status(events2, today)
+    assert status2.status == "completed"
+
+
+def test_infer_status_active_widened_to_180_days():
+    """v16.1.1: slow-moving projects (3-6 months between deliverables)
+    stay "active" rather than flipping to "on-hold" prematurely.
+    Pre-v16.1.1 the 90-day threshold misread normal architectural /
+    research cadences as stalled."""
+    today = date(2024, 12, 1)
+    events = _make_events(
+        ("2024-08-01", "note", "SD"),  # ~122 days ago → active under new rule
+    )
+    status = pi.infer_status(events, today)
+    assert status.status == "active"
 
 
 def test_infer_status_exactly_90_days():
@@ -168,10 +188,11 @@ def test_infer_status_timeline_end_empty_when_active():
 
 
 def test_infer_status_timeline_end_set_when_completed():
-    today = date(2025, 12, 1)
+    """v16.1.1: 730-day threshold — use a 3-year-old event."""
+    today = date(2026, 12, 1)
     events = _make_events(
-        ("2024-01-01", "note1", "SD"),
-        ("2024-03-15", "note2", "CD"),
+        ("2023-01-01", "note1", "SD"),
+        ("2023-03-15", "note2", "CD"),
     )
     status = pi.infer_status(events, today)
     assert status.status == "completed"
@@ -1062,15 +1083,25 @@ class TestStripPriorInterEventBlock:
 
 
 class TestApplyInterEventLinks:
+    """v16.1.1: `apply_inter_event_links` now validates the read payload
+    looks like a real note body (starts with YAML frontmatter) before
+    writing back. Tests here supply frontmatter-prefixed bodies so the
+    firewall doesn't reject them — the anti-data-loss tests for the
+    error-string path live below in TestApplyInterEventLinksDataLoss.
+    """
+
+    _FM_PREFIX = "---\nschema_version: 2\nplugin: vault-bridge\n---\n\n"
+
     def test_calls_obsidian_read_then_overwrite_with_section(self):
         events = _make_events(
             ("2023-02-27", "2023-02-27 施工图", "CD", "high", ""),
             ("2023-02-28", "2023-02-28 施工图", "CD", "high", ""),
         )
-        # Existing body for each note — no prior marker block.
+        # Existing body for each note — frontmatter-prefixed, no prior marker block.
+        fm = self._FM_PREFIX
         bodies = {
-            "arch-projects/P/CD/2023-02-27 施工图.md": "Prior prose.\n",
-            "arch-projects/P/CD/2023-02-28 施工图.md": "Other prose.\n",
+            "arch-projects/P/CD/2023-02-27 施工图.md": fm + "Prior prose.\n",
+            "arch-projects/P/CD/2023-02-28 施工图.md": fm + "Other prose.\n",
         }
         calls = []
 
@@ -1106,7 +1137,7 @@ class TestApplyInterEventLinks:
         def fake_runner(argv):
             calls.append(argv)
             if argv[0] == "read":
-                return "Prior prose.\n"
+                return self._FM_PREFIX + "Prior prose.\n"
             return ""
 
         stats = pi.apply_inter_event_links(
@@ -1139,6 +1170,219 @@ class TestApplyInterEventLinks:
         )
         assert stats["events_linked"] == 0
         assert stats["failures"] == 2
+
+
+class TestApplyInterEventLinksDataLoss:
+    """v16.1.1 data-loss firewall (2026-04-24 field-report addendum).
+
+    Pre-v16.1.1, `apply_inter_event_links` destroyed 22 notes on a
+    real scan: the path builder appended a second ``.md`` to filenames
+    that already ended in ``.md``, `obsidian read` returned an error
+    STRING (exit 0, stdout prefixed with ``Error: File "…" not found.``),
+    the loop treated the error string as the note body, and
+    `obsidian create --overwrite` wrote the error back over the real
+    file — destroying frontmatter, body, images, tags.
+
+    These tests pin the three safeguards:
+      1. Path builder strips a pre-existing ``.md`` extension.
+      2. Read payloads that look like CLI errors are refused.
+      3. Read payloads missing frontmatter are refused.
+    All three paths assert the `create` is NOT issued — the original
+    note stays intact.
+    """
+
+    def test_skips_overwrite_when_read_returns_error_string(self):
+        # Classic regression shape: `obsidian read` returns an
+        # ``Error: File "…" not found.`` string rather than None.
+        created = []
+
+        def fake_runner(argv):
+            if argv[0] == "read":
+                return 'Error: File "foo/bar.md.md" not found.'
+            if argv[0] == "create":
+                created.append(
+                    dict(x.split("=", 1) for x in argv if isinstance(x, str) and "=" in x)
+                )
+                return ""
+
+        events = _make_events(
+            ("2023-02-27", "2023-02-27 a", "CD", "high", "施工图 variant"),
+            ("2023-02-28", "2023-02-28 b", "CD", "high", "施工图 variant"),
+        )
+        stats = pi.apply_inter_event_links(
+            vault_name="V",
+            project_name="P",
+            domain="arch-projects",
+            events=events,
+            _obsidian_runner=fake_runner,
+        )
+        assert created == [], (
+            "apply_inter_event_links wrote an Obsidian error string as "
+            "note body — this is the v16.0.3 data-loss regression."
+        )
+        assert stats["failures"] == 2
+        assert stats["events_linked"] == 0
+
+    def test_skips_overwrite_when_read_lacks_frontmatter(self):
+        """A read that succeeds but returns a body without the leading
+        ``---\\n`` frontmatter fence is a strong sentinel that we did
+        NOT receive a real event note. Refuse to write back."""
+        created = []
+
+        def fake_runner(argv):
+            if argv[0] == "read":
+                return "just some text, no frontmatter\n"
+            if argv[0] == "create":
+                created.append(argv)
+                return ""
+
+        events = _make_events(
+            ("2023-02-27", "2023-02-27 a", "CD", "high", "施工图 variant"),
+            ("2023-02-28", "2023-02-28 b", "CD", "high", "施工图 variant"),
+        )
+        stats = pi.apply_inter_event_links(
+            vault_name="V",
+            project_name="P",
+            domain="arch-projects",
+            events=events,
+            _obsidian_runner=fake_runner,
+        )
+        assert created == []
+        assert stats["failures"] == 2
+
+    def test_path_builder_strips_existing_md_extension(self):
+        """Bug A from the addendum: `note_filename` that already ends
+        in ``.md`` must NOT have another ``.md`` appended. Previously
+        produced paths like ``…结构设计参考.md.md`` which the obsidian
+        CLI couldn't resolve."""
+        assert pi._event_note_vault_path(
+            "arch-projects", "P", "CD", "2023-02-27 施工图.md",
+        ) == "arch-projects/P/CD/2023-02-27 施工图.md"
+        # Also works for filenames without the extension.
+        assert pi._event_note_vault_path(
+            "arch-projects", "P", "CD", "2023-02-27 施工图",
+        ) == "arch-projects/P/CD/2023-02-27 施工图.md"
+
+    def test_path_builder_handles_empty_subfolder(self):
+        assert pi._event_note_vault_path(
+            "arch-projects", "P", "", "2023-02-27 施工图.md",
+        ) == "arch-projects/P/2023-02-27 施工图.md"
+
+    def test_looks_like_obsidian_error_sentinel(self):
+        """The Obsidian error-prefix detector must catch the CLI's
+        two common error shapes."""
+        assert pi._looks_like_obsidian_error(
+            'Error: File "foo.md.md" not found.'
+        ) is True
+        assert pi._looks_like_obsidian_error("Error: permission denied") is True
+        assert pi._looks_like_obsidian_error(None) is True
+        # Real frontmatter-prefixed body must pass.
+        assert pi._looks_like_obsidian_error(
+            "---\nschema_version: 2\n---\nHello\n"
+        ) is False
+
+
+class TestInterEventWikilinksStripMdExtension:
+    """v16.1.1 Bug C fix — wikilinks in the Related + prev/next sections
+    must NOT include ``.md`` in their target. Obsidian appends another
+    ``.md`` when resolving, producing broken ``[[foo.md.md]]`` paths."""
+
+    def test_related_section_strips_md_from_wikilinks(self):
+        import link_strategy as ls
+        evs = _make_events(
+            ("2023-02-27", "2023-02-27 a.md", "CD", "high", "施工图 variant"),
+            ("2023-02-28", "2023-02-28 b.md", "CD", "high", "施工图 variant"),
+        )
+        current, peer = evs
+        # Force a non-trivial related score so the section populates.
+        related = [(peer, 0.5)]
+        section = ls.build_event_related_section(related)
+        assert "[[2023-02-28 b]]" in section
+        assert "[[2023-02-28 b.md]]" not in section
+
+    def test_prev_next_section_strips_md_from_wikilinks(self):
+        import link_strategy as ls
+        evs = _make_events(
+            ("2023-02-27", "2023-02-27 a.md", "CD", "high", ""),
+            ("2023-02-28", "2023-02-28 b.md", "CD", "high", ""),
+        )
+        prev, nxt = evs[0], evs[1]
+        section = ls.build_prev_next_section(prev, nxt, "CD")
+        assert "[[2023-02-27 a]]" in section
+        assert "[[2023-02-28 b]]" in section
+        assert ".md]]" not in section
+
+
+class TestClusterLabelGanttLabels:
+    """v16.1.1 Gantt-label fix — the v16.0.3 field report flagged
+    labels reading as `md ×11 (2)` / `2502 ×4` / `1979 (1)` because
+    the tokenizer picked up the ``.md`` extension or a project-prefix
+    numeric as the universally-shared token.
+
+    The ``.md`` extension is stripped before tokenizing and added to
+    a stop-token list so it can't surface. Clusters that don't share
+    a meaningful topic fall back to the first event's stem-minus-date
+    rather than a blank word-count placeholder.
+    """
+
+    def _cluster(self, events):
+        # Minimal cluster dict shape `_cluster_label` consumes.
+        return {
+            "subfolder": events[0].subfolder if events else "",
+            "start": events[0].event_date if events else "",
+            "end": events[-1].event_date if events else "",
+            "count": len(events),
+            "events": events,
+        }
+
+    def test_md_extension_never_becomes_label(self):
+        """11 SD notes whose filenames all end in ``.md`` must NOT
+        label as ``md ×11``. The filetype token is a stop-word."""
+        events = _make_events(
+            *[(f"2025-04-{d:02d}", f"2025-04-{d:02d} note.md", "SD") for d in range(1, 12)]
+        )
+        label = pi._cluster_label(self._cluster(events), index_suffix=None)
+        assert "md" not in label.lower().split()
+        # Label should reflect SOMETHING concrete — the first event's
+        # stem (minus date) is the v16.1.1 fallback.
+        assert "note" in label.lower() or "×" in label
+
+    def test_falls_back_to_first_event_stem_when_no_shared_token(self):
+        """Events with no shared topic → fall back to first event's
+        stem (minus date prefix). Pre-v16.1.1 this produced ``N events``."""
+        events = _make_events(
+            ("2025-04-01", "2025-04-01 kickoff.md", "SD"),
+            ("2025-04-02", "2025-04-02 draft.md", "SD"),
+        )
+        label = pi._cluster_label(self._cluster(events), index_suffix=None)
+        # Either the first stem appears, or the shared-token path
+        # landed on a meaningful token — the critical invariant is
+        # the label isn't a bare word-count placeholder.
+        assert label not in ("2 events", "2 event", "_")
+        # Must not be the generic count form.
+        assert not label.startswith("2 event")
+
+    def test_shared_cjk_topic_still_wins(self):
+        """Regression: the CJK shared-topic path (施工图 ×5) must
+        continue to work — v16.1.1 only strips ``.md`` + adds
+        stop-tokens; it doesn't break the meaningful-shared-topic
+        path the pre-v16.1.1 logic already covered."""
+        events = _make_events(
+            *[(f"2023-02-{d:02d}", f"2023-02-{d:02d} 施工图.md", "CD")
+              for d in range(20, 25)]
+        )
+        label = pi._cluster_label(self._cluster(events), index_suffix=None)
+        assert "施工图" in label
+        assert "×5" in label
+
+    def test_single_event_uses_stem_not_word_count(self):
+        """A single-event cluster shouldn't read as ``1 event`` —
+        the stem (minus date) is always more informative."""
+        events = _make_events(
+            ("2025-04-28", "2025-04-28 方案设计终稿.md", "SD"),
+        )
+        label = pi._cluster_label(self._cluster(events), index_suffix=None)
+        assert "方案设计终稿" in label
 
 
 # ---------------------------------------------------------------------------

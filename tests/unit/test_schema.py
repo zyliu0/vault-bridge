@@ -79,7 +79,7 @@ EXPECTED_FILE_TYPES = {
 
 EXPECTED_EVENT_DATE_SOURCES = {"filename-prefix", "parent-folder-prefix", "mtime"}
 EXPECTED_SCAN_TYPES = {"retro", "heartbeat", "manual"}
-EXPECTED_CONTENT_CONFIDENCES = {"high", "metadata-only"}
+EXPECTED_CONTENT_CONFIDENCES = {"high", "low", "metadata-only"}
 
 
 # ---------------------------------------------------------------------------
@@ -186,7 +186,11 @@ def test_scan_type_enum_is_exactly_three_values():
     assert schema.ENUMS["scan_type"] == EXPECTED_SCAN_TYPES
 
 
-def test_content_confidence_enum_is_exactly_two_values():
+def test_content_confidence_enum_includes_low():
+    """v16.1.1: `low` was added to match what `scan_pipeline._compute_confidence`
+    emits for short-text extractions (1-100 chars). Pre-v16.1.1 the enum
+    was {'high', 'metadata-only'}, which rejected 'low' and forced
+    callers to hack sources_read + read_bytes to pass validation."""
     assert schema.ENUMS["content_confidence"] == EXPECTED_CONTENT_CONFIDENCES
 
 

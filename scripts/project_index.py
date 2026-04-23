@@ -129,13 +129,24 @@ class ProjectIndexStatus:
 # infer_status
 # ---------------------------------------------------------------------------
 
+# v16.1.1 — widened the "active" window from 90 to 180 days after the
+# v16.0.3 field report flagged a project (last event 361 days prior to
+# the scan) reading as "on-hold" when the user still considered the
+# arc alive. 90 days was aggressive — real architectural, photography,
+# and research arcs routinely go quiet for 3-6 months between
+# deliverables. 180 days covers that floor; projects truly idle for
+# 6+ months are correctly reported as "on-hold" for user review.
+_STATUS_ACTIVE_DAYS = 180
+_STATUS_ON_HOLD_DAYS = 730   # 2 years
+
+
 def infer_status(events: List[ProjectIndexEvent], today: date) -> ProjectIndexStatus:
     """Infer project status from the list of events.
 
-    Pure date-based inference (v14.4+):
-      - Latest event ≤90 days ago → "active"
-      - 90 < days ≤365 → "on-hold"
-      - >365 days → "completed"
+    Pure date-based inference (v14.4+, thresholds widened v16.1.1):
+      - Latest event ≤180 days ago → "active"
+      - 180 < days ≤730 → "on-hold"
+      - >730 days → "completed"
 
     Previous versions sniffed `summary_hint` for keywords like
     "completed" / "cancelled" / "archived" to override the date rule.
@@ -171,10 +182,10 @@ def infer_status(events: List[ProjectIndexEvent], today: date) -> ProjectIndexSt
     except ValueError:
         days_ago = 0
 
-    if days_ago <= 90:
+    if days_ago <= _STATUS_ACTIVE_DAYS:
         status = "active"
         timeline_end = ""
-    elif days_ago <= 365:
+    elif days_ago <= _STATUS_ON_HOLD_DAYS:
         status = "on-hold"
         timeline_end = ""
     else:
@@ -562,25 +573,61 @@ def _render_timeline_mermaid(
     return "\n".join(lines)
 
 
+# v16.1.1: tokens that survive the shared-intersection but read as
+# junk on a Gantt label. Extensions and single-letter stems pick up
+# across every note in a project because vault-bridge filenames end
+# in `.md` — the v16.0.3 field report's "md ×11 (2)" label was the
+# tokenizer landing on this one universally-shared token.
+_CLUSTER_LABEL_STOP_TOKENS = frozenset({"md", "txt", "pdf", "docx", "pptx", "xlsx"})
+
+
+def _strip_date_prefix(s: str) -> str:
+    """Strip a leading YYYY-MM-DD (with optional trailing space or dash)."""
+    import re as _re
+    return _re.sub(r"^\d{4}-\d{2}-\d{2}[-\s]*", "", s or "")
+
+
 def _cluster_label(cluster: dict, index_suffix: Optional[int]) -> str:
     """Derive a short task label for a cluster.
 
-    Prefers the topic tokens shared across the cluster's events (so a
-    run of ``施工图`` notes reads as ``施工图 series``); falls back to
-    ``<N> events`` when nothing shared is visible.
+    v16.1.1 — the v16.0.3 field report flagged labels reading as junk
+    (``md ×11 (2)``, ``2502 ×4``, ``1979 (1)``) because the tokenizer
+    picked up the ``.md`` extension or the project-prefix code as a
+    universally-shared token. Two structural fixes:
+
+    1. **Strip the `.md` extension** before tokenizing — the
+       universally-shared filetype token never reaches the label.
+       Extends to other common vault-note extensions.
+    2. **Fall back to the first event's stem** (minus the date
+       prefix) when no meaningful shared token survives. A single-
+       event cluster gets ``方案设计终稿``; a multi-event cluster
+       without a shared topic gets the first event's stem + ``×N``.
+
+    Prefers the topic-token intersection across the cluster's events
+    so a run of ``施工图`` notes reads as ``施工图 series``. When the
+    intersection is empty or only junk, the fallback reads as what
+    the first event is about rather than a word-count placeholder.
     """
     events = cluster["events"]
     shared_tokens: Optional[set] = None
     for ev in events:
-        # Use the same tokenizer link_strategy uses so the label reads
-        # like the Related section does.
+        # v16.1.1: strip the ``.md`` extension so the tokenizer never
+        # sees the universal filetype token. Use the file stem, not
+        # the raw filename.
+        name_stem = ev.note_filename or ""
+        if name_stem.endswith(".md"):
+            name_stem = name_stem[:-3]
         try:
             import link_strategy
-            toks = link_strategy._tokenize_for_related(ev.note_filename) | (
+            toks = link_strategy._tokenize_for_related(name_stem) | (
                 link_strategy._tokenize_for_related(ev.summary_hint or "")
             )
         except Exception:
             toks = set()
+        # Drop junk tokens regardless of whether they're the
+        # intersection or just present — nothing productive comes
+        # from labelling a cluster ``md``.
+        toks = {t for t in toks if t not in _CLUSTER_LABEL_STOP_TOKENS}
         if shared_tokens is None:
             shared_tokens = toks
         else:
@@ -601,6 +648,8 @@ def _cluster_label(cluster: dict, index_suffix: Optional[int]) -> str:
             # nonsense ordering for stroke-order-sensitive scripts
             # (施工图 → 图工施).
             first_name = events[0].note_filename if events else ""
+            if first_name.endswith(".md"):
+                first_name = first_name[:-3]
             ordered: List[str] = []
             seen: set = set()
             for ch in first_name:
@@ -608,8 +657,20 @@ def _cluster_label(cluster: dict, index_suffix: Optional[int]) -> str:
                     ordered.append(ch)
                     seen.add(ch)
             pretty = "".join(ordered)
+
     if not pretty:
-        pretty = f"{len(events)} event{'s' if len(events) != 1 else ''}"
+        # v16.1.1 fallback: rather than a useless count like "3 events",
+        # use the first event's stem (minus date prefix). Reads as what
+        # the event is actually about.
+        if events:
+            first_stem = events[0].note_filename or ""
+            if first_stem.endswith(".md"):
+                first_stem = first_stem[:-3]
+            pretty = _strip_date_prefix(first_stem).strip()
+        if not pretty:
+            pretty = f"{len(events)} event{'s' if len(events) != 1 else ''}"
+        elif len(events) > 1:
+            pretty = f"{pretty} ×{len(events)}"
     elif len(events) > 1:
         pretty = f"{pretty} ×{len(events)}"
     if index_suffix is not None:
@@ -1134,6 +1195,74 @@ def _strip_prior_inter_event_block(body: str) -> str:
     return pattern.sub("", body).rstrip() + "\n"
 
 
+_OBSIDIAN_ERROR_SENTINEL_PREFIXES = (
+    "Error: File ",
+    "Error: ",
+)
+
+
+def _looks_like_obsidian_error(body: str) -> bool:
+    """Detect when `obsidian read` stdout is actually a user-facing error
+    string, not note content.
+
+    v16.1.1 — the v16.0.3 field-report addendum documented that
+    `obsidian read` returns an error MESSAGE (exit 0, stdout prefixed
+    with ``Error: File "…" not found.``) when the path doesn't
+    resolve. A read-modify-write loop that trusts the stdout will
+    then write the error string back as the note body, destroying
+    the real file. Two defensive checks:
+
+    1. Starts with an ``Error:`` prefix the CLI uses for path-resolution
+       failures.
+    2. Lacks the leading ``---\\n`` frontmatter fence that every
+       vault-bridge event note begins with. A legitimate read of
+       an event note WILL have frontmatter; missing it is a strong
+       signal the body is not what we asked for.
+    """
+    if body is None:
+        return True
+    stripped = body.lstrip()
+    for prefix in _OBSIDIAN_ERROR_SENTINEL_PREFIXES:
+        if stripped.startswith(prefix):
+            return True
+    return False
+
+
+def _note_wikilink_stem(filename: str) -> str:
+    """Return the bare wikilink target for a note filename.
+
+    Callers write wikilinks like ``[[YYYY-MM-DD topic]]``; Obsidian
+    resolves bare names by stem. Leaving ``.md`` in the target breaks
+    resolution because Obsidian then searches for ``YYYY-MM-DD topic.md.md``.
+    The v16.0.3 field-report addendum flagged this as Bug C — it
+    aggravated the read-modify-write data-loss because the emitted
+    wikilinks pointed at filenames that would round-trip into a
+    double-``.md`` path on the next scan.
+    """
+    name = filename or ""
+    if name.endswith(".md"):
+        name = name[:-3]
+    return name
+
+
+def _event_note_vault_path(
+    domain: str, project_name: str, subfolder: str, filename: str,
+) -> str:
+    """Compose the vault-relative path for an event note, without the
+    double-``.md`` trap the v16.0.3 addendum flagged as Bug A.
+
+    ``filename`` in ``ProjectIndexEvent.note_filename`` may or may not
+    already carry a ``.md`` extension. Appending ``.md`` unconditionally
+    produced paths like ``…结构设计参考.md.md`` which the obsidian CLI
+    could not resolve; the error-string return then fed Bug B (the
+    data-loss loop). This helper normalises exactly once.
+    """
+    stem = _note_wikilink_stem(filename)
+    if subfolder:
+        return f"{domain}/{project_name}/{subfolder}/{stem}.md"
+    return f"{domain}/{project_name}/{stem}.md"
+
+
 def apply_inter_event_links(
     vault_name: str,
     project_name: str,
@@ -1146,11 +1275,25 @@ def apply_inter_event_links(
     """Append a Related + prev/next block to every event note in a project.
 
     For each event in `events`, reads the current note body via
-    `obsidian read`, strips any prior vb:related block, appends the
-    fresh block via `obsidian append`, and returns a dict of
-    `{events_linked, events_without_peers}`. Callers invoke this from
-    retro-scan / heartbeat-scan / reconcile after all events for a
-    project have been written so every event sees every peer.
+    `obsidian read`, strips any prior vb:related block, and writes
+    the fresh block back via `obsidian create ... overwrite`. Returns
+    `{events_linked, events_without_peers, failures}`. Callers invoke
+    this from retro-scan / heartbeat-scan / reconcile after all events
+    for a project have been written so every event sees every peer.
+
+    v16.1.1 — data-loss firewall (2026-04-24 field-report addendum):
+
+    * Path construction goes through `_event_note_vault_path` to stop
+      the double-``.md`` trap (`…foo.md.md` → `obsidian read` error).
+    * Every read result is checked with `_looks_like_obsidian_error`
+      before we trust it as a note body. A read that returned an
+      error string, or a body that doesn't start with YAML
+      frontmatter, triggers a per-event failure (logged) instead of
+      being written back — which previously replaced the real note
+      body with the error message.
+    * The runner contract is honoured: the legacy path where the
+      obsidian CLI returns `None` for non-read commands still works;
+      we only attempt to validate the read payload.
 
     `_obsidian_runner` is an injection hook for tests; defaults to the
     real subprocess call. Failures are swallowed per event so a single
@@ -1171,25 +1314,46 @@ def apply_inter_event_links(
         if not filename:
             stats["failures"] += 1
             continue
-        note_path = f"{domain}/{project_name}/"
         subfolder = (
             current.subfolder if not isinstance(current, dict)
             else current.get("subfolder", "")
         )
-        if subfolder:
-            note_path = f"{domain}/{project_name}/{subfolder}/{filename}.md"
-        else:
-            note_path = f"{domain}/{project_name}/{filename}.md"
+        note_path = _event_note_vault_path(
+            domain, project_name, subfolder, filename,
+        )
         try:
+            body = runner(["read", f"vault={vault_name}", f"path={note_path}"])
+            # v16.1.1 data-loss firewall: never trust the read payload
+            # without verifying it looks like a real note body. A
+            # read that failed silently (None) or returned an error
+            # string must NOT be written back — that's the data-loss
+            # path the addendum documented.
+            if body is None or _looks_like_obsidian_error(body):
+                logger.warning(
+                    "apply_inter_event_links: skipped %s "
+                    "(read returned no usable body); not overwriting.",
+                    note_path,
+                )
+                stats["failures"] += 1
+                continue
+            if not body.lstrip().startswith("---"):
+                # Vault-bridge event notes ALWAYS begin with YAML
+                # frontmatter. Absence is a strong sentinel that this
+                # is not the note we asked for.
+                logger.warning(
+                    "apply_inter_event_links: skipped %s "
+                    "(read payload missing frontmatter); not overwriting.",
+                    note_path,
+                )
+                stats["failures"] += 1
+                continue
+
             if not section:
                 stats["events_without_peers"] += 1
                 # Still strip any prior block so a note that used to
                 # have peers but no longer does doesn't carry stale
-                # links. Read-modify-write via `obsidian create` with
-                # the `overwrite` flag.
-                body = runner(["read", f"vault={vault_name}", f"path={note_path}"])
-                if body is None:
-                    continue
+                # links. Only write when the strip actually changed
+                # the body — no-op saves stay silent.
                 stripped = _strip_prior_inter_event_block(body)
                 if stripped != body:
                     runner([
@@ -1202,10 +1366,6 @@ def apply_inter_event_links(
                     ])
                 continue
 
-            body = runner(["read", f"vault={vault_name}", f"path={note_path}"])
-            if body is None:
-                stats["failures"] += 1
-                continue
             stripped = _strip_prior_inter_event_block(body)
             new_body = stripped.rstrip() + "\n\n" + section + "\n"
             runner([

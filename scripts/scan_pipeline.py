@@ -639,6 +639,14 @@ class _ScanContext:
 
     # Working state (stages fill these in)
     handler: Optional[file_type_handlers.HandlerConfig] = None
+    # v16.1.1: `local_path` is the on-disk readable path the
+    # extraction stages operate on. For local archives it equals
+    # `source_path`. For remote archives (SFTP, NAS URIs, paths that
+    # aren't mounted), `_stage_fetch_to_local` calls the transport's
+    # fetch_to_local and stores the returned local copy here. The
+    # original `source_path` stays as the archival identifier used
+    # for note frontmatter and the scan index.
+    local_path: str = ""
     text: str = ""
     read_bytes: int = 0
     sources_read: int = 0
@@ -656,8 +664,73 @@ class _ScanContext:
     skip_category: Optional[str] = None
 
 
+def _stage_fetch_to_local(ctx: _ScanContext) -> None:
+    """If the source file is not locally readable, fetch it via the transport.
+
+    v16.1.1 — pre-v16.1.1 the pipeline dispatched straight to
+    `file_type_handlers.read_text` / `extract_images`, which guard on
+    ``Path(source_path).exists()`` and return ``""`` / ``[]`` when the
+    path doesn't resolve locally. For remote archives (SFTP URLs,
+    un-mounted NFS paths, any transport that materialises on demand)
+    that guard fired BEFORE any fetch could happen — every note
+    ended up with empty text + zero images, the no-content gate
+    triggered, and the scan silently dropped 100% of the archive.
+    The v16.0.3 field-report addendum flagged it as a second
+    read-before-fetch bug.
+
+    Behaviour:
+
+    * Local paths (``Path(source_path).exists()``) short-circuit —
+      `ctx.local_path = ctx.source_path`, no transport call.
+    * Remote paths (exists-check fails) attempt
+      `transport_loader.fetch_to_local(workdir, source_path)` using
+      the legacy single-arg form which auto-resolves the default
+      transport. On success, `ctx.local_path` is the returned local
+      copy. On failure the stage records a warning and leaves
+      `local_path` unset; extraction then sees an unreadable path
+      and the no-content gate skips the file — same as pre-v16.1.1.
+    * Transport-not-configured (TransportMissing) is a routine
+      condition for vault-only domains and local archives; the
+      warning is logged at debug level only.
+    """
+    from pathlib import Path as _P
+    p = _P(ctx.source_path)
+    if p.exists():
+        ctx.local_path = ctx.source_path
+        return
+    # Remote path — try a transport fetch.
+    try:
+        import transport_loader  # local: optional on workdirs without transports
+        local = transport_loader.fetch_to_local(
+            _P(ctx.workdir), ctx.source_path,
+        )
+        if local and _P(local).exists():
+            ctx.local_path = str(local)
+            return
+        ctx.warnings.append(
+            f"transport.fetch_to_local returned missing path for {ctx.source_path!r}"
+        )
+    except Exception as exc:
+        # TransportMissing / TransportFailed / any import error — log at
+        # warning level and fall through; the extraction stages will see
+        # an unreadable path and the no-content gate will skip.
+        exc_name = type(exc).__name__
+        if exc_name == "TransportMissing":
+            logger.debug(
+                "_stage_fetch_to_local: no transport configured for %s; "
+                "leaving as local path check.", ctx.workdir,
+            )
+        else:
+            ctx.warnings.append(
+                f"transport fetch failed ({exc_name}): {exc}"
+            )
+
+
 def _stage_handler_lookup(ctx: _ScanContext) -> None:
     """Resolve the file's handler; skip if unknown or non-extractable category."""
+    # Handler lookup is extension-based; `source_path` is fine even
+    # when the file hasn't been fetched yet. The extraction stages
+    # use `local_path` (populated by `_stage_fetch_to_local`).
     ctx.handler = file_type_handlers.get_handler(ctx.source_path)
     if ctx.handler is None:
         ctx.done = True
@@ -676,8 +749,14 @@ def _stage_extract_text(ctx: _ScanContext) -> None:
     h = ctx.handler
     if h is None or not h.extract_text:
         return
+    # v16.1.1: extract from `local_path` (set by _stage_fetch_to_local),
+    # not `source_path`. Remote paths only exist locally after the
+    # fetch stage has copied them; reading `source_path` directly on
+    # an un-mounted SFTP URI would hit the `Path.exists()` guard in
+    # file_type_handlers and silently return "".
+    read_path = ctx.local_path or ctx.source_path
 
-    file_size = _safe_file_size(ctx.source_path)
+    file_size = _safe_file_size(read_path)
     est = _estimate_read_secs(file_size, ctx.throughput_bps)
     if est is not None and est > _SLOW_READ_WARN_SECS:
         ctx.warnings.append(
@@ -685,7 +764,7 @@ def _stage_extract_text(ctx: _ScanContext) -> None:
             f"~{est:.0f}s at measured transport speed"
         )
     try:
-        text = file_type_handlers.read_text(ctx.source_path, workdir=ctx.workdir)
+        text = file_type_handlers.read_text(read_path, workdir=ctx.workdir)
     except Exception as exc:
         ctx.errors.append(f"text extraction error: {exc}")
         return
@@ -709,11 +788,15 @@ def _stage_extract_images(ctx: _ScanContext) -> None:
         return
 
     tmp_dir = _make_scan_tmp_dir(ctx.workdir)
+    # v16.1.1: extract from `local_path` when present (remote archives
+    # go through _stage_fetch_to_local first). Images from containers
+    # like PDFs require the bytes to be physically readable.
+    read_path = ctx.local_path or ctx.source_path
     (
         img_attachments, img_embedded, img_grid,
         img_warnings, img_errors, img_candidates, img_prompts,
     ) = _process_images(
-        source_path=ctx.source_path,
+        source_path=read_path,
         workdir=ctx.workdir,
         vault_project_path=ctx.vault_project_path,
         event_date=ctx.event_date,
@@ -745,9 +828,15 @@ def _stage_skip_on_no_content(ctx: _ScanContext) -> None:
         ctx.skip_category = ctx.handler.category
 
 
-# Pipeline order matters: handler lookup → text → images → no-content gate.
+# Pipeline order matters:
+#   handler lookup → fetch-to-local → text → images → no-content gate.
+# v16.1.1 inserted `fetch_to_local` between handler lookup and the
+# extraction stages. Handler lookup is extension-based so it works on
+# the source path (no bytes needed); extraction stages need a local
+# file which the fetch stage materialises for remote archives.
 _PIPELINE: List = [
     _stage_handler_lookup,
+    _stage_fetch_to_local,
     _stage_extract_text,
     _stage_extract_images,
     _stage_skip_on_no_content,

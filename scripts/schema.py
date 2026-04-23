@@ -301,7 +301,17 @@ ENUMS = {
         "manual",
     },
     "content_confidence": {
+        # v16.1.1: `low` added. `scan_pipeline._compute_confidence`
+        # emits "low" for files that yielded 1-100 chars of text —
+        # the bytes WERE read, there just isn't much textual signal
+        # (e.g. cover-page PDFs, short memos, single-word XLSX
+        # cells). Pre-v16.1.1 the schema rejected "low" while the
+        # pipeline produced it, forcing callers to hack the note
+        # frontmatter back to `sources_read: []` + `read_bytes: 0`
+        # — a dishonest workaround the v16.0.3 field report flagged
+        # (5/22 notes affected in the ZSS 太子湾精神堡垒 scan).
         "high",
+        "low",
         "metadata-only",
     },
 }
@@ -329,10 +339,15 @@ def check_invariants(frontmatter: dict) -> list:
     content_confidence = frontmatter.get("content_confidence")
     read_bytes = frontmatter.get("read_bytes", 0)
 
-    if sources_read and content_confidence != "high":
+    # v16.1.1: `low` is accepted alongside `high` when sources_read is
+    # non-empty. Short-text extractions (1-100 chars) get `low` from
+    # `_compute_confidence`; rejecting them forced callers to blank
+    # sources_read + read_bytes, which lied about what the pipeline
+    # actually did.
+    if sources_read and content_confidence not in ("high", "low"):
         errors.append(
             "sources_read is non-empty but content_confidence is "
-            f"'{content_confidence}', expected 'high'"
+            f"'{content_confidence}', expected 'high' or 'low'"
         )
     if not sources_read and content_confidence != "metadata-only":
         errors.append(

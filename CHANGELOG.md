@@ -1,5 +1,105 @@
 # Changelog
 
+## v16.1.1 — data-loss firewalls + remote-path fetch + schema/label polish (field-report)
+
+Addresses the 2026-04-24 field report's remaining priorities:
+two Critical read-modify-write bugs, the content_confidence schema
+mismatch, the Gantt-label junk, and the `active`-window timing
+complaint. **Critical 1 was a silent data-loss regression — every
+retro-scan on remote archives replaced 22 event-note bodies with
+`Error: File "…" not found.`** strings. Users without a local
+cache would have permanently lost their composed bodies.
+
+### Fixed (Critical — silent data-loss)
+
+- **`apply_inter_event_links` no longer overwrites notes with
+  obsidian-CLI error strings.** Three compounding bugs produced
+  the regression:
+  - **Bug A (double `.md`):** `note_filename` already ends in
+    `.md`; the path builder appended another → `foo.md.md`. New
+    helper `_event_note_vault_path` strips a pre-existing
+    extension exactly once.
+  - **Bug B (error-string as body):** `obsidian read` returns a
+    stdout-0 user-facing error message when the path doesn't
+    resolve. The loop treated it as note content and wrote it
+    back with `--overwrite`. New helper
+    `_looks_like_obsidian_error` detects the CLI's `Error:`
+    prefix, AND the function now refuses any read payload that
+    doesn't start with `---\n` frontmatter (every vault-bridge
+    event note does). Neither trips → no overwrite, failure is
+    logged, caller sees `stats["failures"] += 1`.
+  - **Bug C (wikilink `.md`):** Related + prev/next wikilinks
+    included the `.md` extension. Obsidian appended another when
+    resolving, producing broken `[[foo.md.md]]` behavior. New
+    `_wikilink_target` in link_strategy strips the extension.
+
+### Fixed (Critical — remote-path crash)
+
+- **Scan pipeline now fetches remote archives before extraction.**
+  Pre-v16.1.1 `scan_pipeline` dispatched directly to
+  `file_type_handlers.read_text` / `extract_images`, which guard
+  on `Path(source_path).exists()` and return `""` / `[]` when
+  the path doesn't resolve locally. For remote archives (SFTP,
+  un-mounted NAS, any transport that materialises on demand)
+  that guard fired BEFORE any transport fetch could happen —
+  100% of notes got empty extractions, the no-content gate
+  triggered, and the scan silently dropped the whole archive.
+  - New `_stage_fetch_to_local` runs between handler lookup and
+    extraction. Local paths pass through unchanged; remote paths
+    go through `transport_loader.fetch_to_local`; the returned
+    local copy goes into `ctx.local_path` and extraction stages
+    read from there.
+  - `TransportMissing` (vault-only domains, local-only setups) is
+    a routine condition, logged at DEBUG only. Actual fetch
+    failures surface as a scan warning.
+
+### Fixed (Medium)
+
+- **`content_confidence` enum accepts `low`.**
+  `scan_pipeline._compute_confidence` emits `"low"` for
+  extractions that yielded 1-100 chars (cover-page PDFs, short
+  memos, single-cell XLSX, etc.), but the schema rejected
+  `low` — forcing callers to hack `sources_read: []` +
+  `read_bytes: 0` to pass validation (a lie about what the
+  pipeline did). The v16.0.3 field report flagged 5/22 notes
+  hitting this. Enum is now `{"high", "low", "metadata-only"}`;
+  the sources_read invariant accepts both `"high"` and `"low"`.
+- **Gantt labels stop reading as junk.** The v16.0.3 field
+  report flagged `md ×11 (2)` / `2502 ×4` / `1979 (1)` cluster
+  labels. Three structural fixes in `_cluster_label`:
+  - **Strip `.md` before tokenising** so the universal filetype
+    token never reaches the intersection.
+  - **Stop-token list** (`md`, `txt`, `pdf`, `docx`, `pptx`,
+    `xlsx`) drops other vault-note filetype tokens even if they
+    sneak through.
+  - **Fall back to first event's stem-minus-date** rather than
+    `N events` when no meaningful shared topic emerges. A
+    single-event cluster reads as `方案设计终稿` instead of
+    `1 event`.
+
+### Fixed (Low)
+
+- **`infer_status` "active" window widened from 90 to 180 days**
+  (`on-hold` to 730 days, `completed` >730). The v16.0.3 field
+  report flagged a project with activity through 361 days ago
+  reading as "on-hold" when the user still considered it live.
+  Real architectural, photography, and research arcs routinely
+  go quiet for 3-6 months between deliverables; the new window
+  covers that floor. Users can still override `status:` in the
+  index frontmatter directly — it's preserved across
+  regenerations.
+
+### Tests
+
+- 20 new assertions across `test_project_index.py`
+  (`TestApplyInterEventLinksDataLoss`, `TestInterEventWikilinksStripMdExtension`,
+  `TestClusterLabelGanttLabels`), `test_scan_pipeline.py`
+  (`TestStageFetchToLocal`, `TestContentConfidenceLow`), and
+  `test_schema.py`. Pre-existing `TestApplyInterEventLinks` tests
+  updated to supply frontmatter-prefixed bodies so the new
+  sentinel check doesn't reject valid inputs. `infer_status`
+  thresholds updated. Full unit suite green: **1902 passing**.
+
 ## v16.1.0 — free the LLM to compose MOCs (field-report)
 
 Addresses the 2026-04-24 field report "free the LLM to compose MOC
