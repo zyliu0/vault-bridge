@@ -734,3 +734,93 @@ class TestPatternTemplates:
         compile(content, str(stub), "exec")
         assert 'return ""' in content or "return ''" in content
         assert "return []" in content
+
+
+class TestCadDwgExternalToolsV164:
+    """v16.0.4: default DWG converter is LibreDWG (dwg2dxf), with ODA as
+    the fallback for newer format extensions. Three invariants:
+
+    1. The PATH probe accepts `dwg2dxf` as satisfying the handler.
+       Pre-v16.0.4 it only recognised ODA, so users who installed
+       LibreDWG still saw the "required external tool not found"
+       warning at the end of setup.
+    2. LibreDWG names come FIRST in the probe list so the install
+       hint surfaces LibreDWG as the default in REQUIREMENTS.md.
+    3. The generated stub calls `dwg2dxf` before falling back to
+       `ezdxf.addons.odafc`, not the other way around.
+    """
+
+    def test_dwg2dxf_satisfies_path_check(self, monkeypatch):
+        """dwg2dxf on PATH → no warning, even when ODA is missing."""
+        def _which(b):
+            return "/opt/homebrew/bin/dwg2dxf" if b == "dwg2dxf" else None
+        monkeypatch.setattr(hi.shutil, "which", _which)
+        warnings, _ = hi._check_external_tools("cad-dwg")
+        assert warnings == []
+
+    def test_odafileconverter_still_satisfies(self, monkeypatch):
+        """ODA still counts — users who already installed it must not
+        be forced to also install LibreDWG."""
+        def _which(b):
+            return "/usr/local/bin/ODAFileConverter" if b == "ODAFileConverter" else None
+        monkeypatch.setattr(hi.shutil, "which", _which)
+        warnings, _ = hi._check_external_tools("cad-dwg")
+        assert warnings == []
+
+    def test_neither_tool_produces_warning(self, monkeypatch, tmp_path):
+        """Both missing → exactly one warning mentioning both paths."""
+        monkeypatch.setattr(hi.shutil, "which", lambda b: None)
+        # Also block the macOS app-bundle short-circuit so the probe
+        # has nothing to fall back on.
+        monkeypatch.setattr(hi.Path, "exists", lambda self: False)
+        warnings, hint = hi._check_external_tools("cad-dwg")
+        assert len(warnings) == 1
+        assert "cad-dwg" in warnings[0]
+        assert "libredwg" in (hint or "").lower()
+        assert "opendesign" in (hint or "").lower()
+
+    def test_libredwg_listed_first_in_binaries(self):
+        req = hi._EXTERNAL_TOOL_REQUIREMENTS["cad-dwg"]
+        binaries = req["binaries"]
+        # First binary determines what the "Binaries checked on PATH"
+        # line in REQUIREMENTS.md shows up top — LibreDWG should lead
+        # because it's the default, auto-installable path.
+        assert binaries[0] == "dwg2dxf"
+        assert "ODAFileConverter" in binaries  # ODA still a fallback
+
+    def test_generated_dwg_stub_prefers_libredwg(self, tmp_path):
+        """The rendered cad-dwg handler must invoke dwg2dxf BEFORE
+        falling back to ezdxf.addons.odafc."""
+        from dataclasses import dataclass as _dc
+
+        @_dc
+        class _Spec:
+            pip_name: str = "ezdxf"
+            import_name: str = "ezdxf"
+            category: str = "cad-dwg"
+            extract_text: bool = True
+            extract_images: bool = True
+            preferred: bool = True
+
+        handlers_dir = tmp_path / "handlers"
+        handlers_dir.mkdir()
+        stub = hi.generate_handler_stub(
+            "dwg", _Spec(), handlers_dir, version="1.3.0", source="builtin")
+        content = stub.read_text()
+        # dwg2dxf must be invoked, and its call site must appear
+        # before the odafc import — the fallback, not the default.
+        assert "dwg2dxf" in content
+        assert "odafc" in content
+        libredwg_idx = content.find("_convert_via_libredwg")
+        oda_idx = content.find("_convert_via_oda")
+        assert libredwg_idx != -1 and oda_idx != -1
+        assert libredwg_idx < oda_idx, (
+            "LibreDWG helper must be defined before the ODA fallback"
+        )
+        # And the orchestrator must call LibreDWG first.
+        orch = content[content.find("def _convert_to_dxf("):]
+        lr_call = orch.find("_convert_via_libredwg")
+        oda_call = orch.find("_convert_via_oda")
+        assert 0 <= lr_call < oda_call, (
+            "_convert_to_dxf must try LibreDWG before ODA"
+        )

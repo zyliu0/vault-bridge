@@ -180,12 +180,25 @@ class InstallResult:
 
 _EXTERNAL_TOOL_REQUIREMENTS: dict = {
     "cad-dwg": {
-        "binaries": ["ODAFileConverter", "odafileconverter"],
+        # v16.0.4: default to LibreDWG (GNU, no EULA, brew-installable).
+        # The handler tries `dwg2dxf` first and falls back to ODA; both
+        # count as "satisfied" for PATH detection.
+        "binaries": [
+            "dwg2dxf", "dwgread",           # LibreDWG (preferred)
+            "ODAFileConverter", "odafileconverter",  # ODA (fallback)
+        ],
         "macos_app": "/Applications/ODAFileConverter.app/Contents/MacOS/ODAFileConverter",
         "install_hint": (
-            "Install the Open Design Alliance File Converter from "
-            "https://www.opendesign.com/guestfiles/oda_file_converter "
-            "and ensure the `ODAFileConverter` binary is on PATH."
+            "DWG extraction needs one of these converters:\n"
+            "  Preferred (auto-installable, no EULA):\n"
+            "    macOS:          brew install libredwg\n"
+            "    Debian/Ubuntu:  apt-get install libredwg-tools\n"
+            "    Fedora:         dnf install libredwg\n"
+            "    Arch:           pacman -S libredwg\n"
+            "  Fallback (for newer DWG format extensions LibreDWG can't\n"
+            "  parse; requires click-through EULA):\n"
+            "    ODA File Converter —\n"
+            "    https://www.opendesign.com/guestfiles/oda_file_converter"
         ),
         "severity": "required",
     },

@@ -567,6 +567,109 @@ for result in successful_results:
 save_config(Path.cwd(), cfg)
 ```
 
+### 6.5e2 — auto-install missing external tools
+
+Handlers for `.doc` / `.ppt` / `.dwg` shell out to CLI binaries
+(`soffice`, `dwg2dxf`) that pip can't provide. Pre-v16.0.4 setup
+printed a warning and walked away, leaving the user with a green
+banner and silently-broken handlers. Now setup detects missing tools
+and offers a single batched install prompt, then re-probes to confirm
+the binaries resolve.
+
+```python
+import sys
+from pathlib import Path
+sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
+from external_tools import (
+    detect_missing_tools, install_tool,
+    read_consent, write_consent, format_prompt_label,
+)
+from config import load_config, save_config
+from package_registry import default_for
+
+cfg = load_config(Path.cwd())
+
+# Categories for every handler we just installed successfully. Look
+# the category up from the package registry — install_results only
+# carries `ext`/`pip_name`, not the original spec.
+installed_categories = sorted({
+    default_for(r.ext).category
+    for r in successful_results
+    if default_for(r.ext) is not None
+})
+
+missing = detect_missing_tools(installed_categories)
+
+# Filter by consent cache: don't re-ask if the user already declined.
+to_prompt = []
+for m in missing:
+    consent = read_consent(cfg.file_type_config, m.spec.name)
+    if consent is False:
+        print(f"  (skipped — user previously declined to install {m.spec.label})")
+        continue
+    to_prompt.append(m)
+
+install_results = []
+if to_prompt:
+    # One AskUserQuestion for the whole batch — ``Install N tool(s): ...``.
+    question = format_prompt_label(to_prompt)
+    # AskUserQuestion options: "Yes (install all)" / "No (show warnings)"
+    # Recommend "Yes" because the user opted into these file types.
+```
+
+Then call AskUserQuestion with:
+
+> question: `{question}` (as rendered by `format_prompt_label`)
+>
+> Options:
+> - "Install all" (Recommended) — run each tool's package-manager command
+> - "Skip — use warnings only" — keep the old behavior; handlers no-op on
+>   affected files
+
+On "Install all":
+
+```python
+for m in to_prompt:
+    print(f"Installing {m.spec.label}...")
+    outcome = install_tool(m)
+    install_results.append(outcome)
+    write_consent(cfg.file_type_config, m.spec.name, accepted=True)
+    if outcome.ok:
+        print(f"  ✅ {m.spec.label} installed ({outcome.duration:.1f}s)")
+    else:
+        print(f"  ❌ {m.spec.label} failed: {outcome.error}")
+
+save_config(Path.cwd(), cfg)
+```
+
+On "Skip":
+
+```python
+for m in to_prompt:
+    write_consent(cfg.file_type_config, m.spec.name, accepted=False)
+save_config(Path.cwd(), cfg)
+```
+
+**Principles:**
+
+- **Default Yes** — the user opted into `.doc`/`.ppt`/`.dwg` above;
+  installing is the expected path.
+- **One question, not N** — batch the install prompts into a single
+  yes/no covering every detected tool.
+- **Honest about size/time** — `format_prompt_label` interpolates
+  `"~500 MB, 2-5 min"` into the prompt.
+- **Re-probe after install** — `install_tool` checks PATH and
+  canonical macOS app-bundle paths after the subprocess exits, so a
+  successful `brew install --cask libreoffice` that drops only into
+  `/Applications` is correctly reported as "installed".
+- **Persist consent** — re-running setup or `F — Edit file types`
+  doesn't re-ask for tools the user already decided about.
+
+Tools with no auto-install path on the current platform (notably ODA
+File Converter, which requires EULA click-through) are NOT included
+in this phase — the REQUIREMENTS.md hint written by 6.5e still covers
+those.
+
 ### 6.5f — regenerate file_type_handlers.py
 
 ```python

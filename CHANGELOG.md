@@ -1,5 +1,94 @@
 # Changelog
 
+## v16.0.4 — auto-install external tools + LibreDWG default (field-report)
+
+Addresses the v16.0.3 follow-up field report. The user-agent's core
+complaint — "why does setup not install the dependencies for me?" —
+turned setup into a checklist ending in a green banner while the
+`.doc` / `.ppt` / `.dwg` handlers silently no-op'd because `soffice`,
+`dwg2dxf`, or ODA File Converter were missing. Also closes BUG 3
+from the follow-up (Version marker reads "unknown" on marketplace-
+cached installs; every template reappears as "modified" on every
+self-update).
+
+### Added
+
+- **`scripts/external_tools.py` — batched auto-install phase.**
+  New Step 6.5e2 in `/vault-bridge:setup` detects missing CLI tools
+  needed by the just-installed handlers, shows a single
+  `AskUserQuestion` ("Install N missing tool(s): …"), and runs the
+  right package-manager command per OS:
+  - macOS:   `brew install --cask libreoffice`, `brew install libredwg`
+  - Debian:  `apt-get install libreoffice-core libredwg-tools`
+  - Fedora:  `dnf install libreoffice-core libredwg`
+  - Arch:    `pacman -S libreoffice-fresh libredwg`
+  - Windows: `winget install TheDocumentFoundation.LibreOffice`
+  After install, a PATH + canonical-macOS-app-bundle re-probe
+  catches the classic cask trap (LibreOffice drops into
+  `/Applications` but does NOT symlink `soffice` onto PATH — the
+  pre-v16.0.4 detector missed this even after a successful install).
+- **Per-tool consent cache.** Stored under
+  `Config.file_type_config["install_consent"][tool_name]`. Accept
+  once → never re-asked; decline once → no nag on re-runs. Sibling
+  `installed_packages` entries are preserved.
+- **Tools with no auto-install path stay silent.** ODA File
+  Converter still requires a manual EULA click-through; Step 6.5e2
+  skips it so the existing REQUIREMENTS.md hint from 6.5e can
+  take over. (A webbrowser-open prompt for ODA is the next
+  follow-up; out of scope here.)
+
+### Changed
+
+- **DWG default is LibreDWG**, not ODA.
+  `scripts/handlers/patterns/cad_dwg.py.tmpl` now tries
+  `dwg2dxf` first (GNU project, brew-installable, no EULA) and
+  falls back to `ezdxf.addons.odafc` only when `dwg2dxf` is
+  missing or fails on a given file. Covers the common case
+  end-to-end with a single `brew install libredwg`, no download
+  pages, no click-through. ODA remains the reference for newer
+  DWG format extensions LibreDWG can't parse — the two now
+  compose instead of compete.
+  - `handler_installer._EXTERNAL_TOOL_REQUIREMENTS["cad-dwg"]`:
+    `dwg2dxf` / `dwgread` added to the PATH probe ahead of
+    `ODAFileConverter`, and the install hint now leads with the
+    LibreDWG install commands per OS.
+
+### Fixed
+
+- **BUG 3 — `plugin_version.save_version()` stored `"unknown"` as the
+  version marker on every marketplace-cached install.** When the
+  plugin is not in a git checkout (the normal state for users who
+  installed via `/plugin marketplace`), `get_git_sha` now falls
+  back to reading `.claude-plugin/plugin.json` and returns
+  `v{version}` (e.g. `v16.0.4`) instead of the literal `"unknown"`.
+  The self-update report now shows a real version string users can
+  compare against.
+- **BUG 3 side effect — stale "installed" literals in
+  `templates_installed`.** Pre-v16.0.2 self-update wrote the literal
+  string `"installed"` as each template's hash marker.
+  `get_template_diff` compares against a 12-char SHA256 prefix, so
+  every template showed up as `modified` on every subsequent
+  self-update. `get_templates_installed` now drops entries whose
+  value isn't a valid hash; the next `/vault-bridge:self-update`
+  re-records real hashes and the diff goes quiet.
+
+### Tests
+
+- `tests/unit/test_external_tools.py` (new, 26 tests) — platform
+  detection, tool detection with both PATH and macOS-app-bundle
+  probes, subprocess mock for install success / non-zero-exit /
+  timeout / re-probe-fails, consent-cache round-trip, prompt
+  rendering.
+- `tests/unit/test_plugin_version.py` (10 new tests) — git-missing
+  fallback to plugin.json, malformed/missing-plugin.json returns
+  "unknown", stale "installed" literal migration drops entries
+  while preserving valid hashes.
+- `tests/unit/test_handler_installer.py::TestCadDwgExternalToolsV164`
+  (5 new tests) — `dwg2dxf` satisfies the cad-dwg probe, ODA still
+  counts, both missing produces one warning mentioning both paths,
+  LibreDWG leads the binaries list, the generated stub invokes
+  LibreDWG before ODA.
+
 ## v16.0.3 — v16.0.1 follow-up: LibreOffice + honest selftest (field-report)
 
 Addresses the three residual bugs from the 2026-04-23 follow-up audit:
