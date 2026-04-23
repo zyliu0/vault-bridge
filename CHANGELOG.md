@@ -1,5 +1,110 @@
 # Changelog
 
+## v16.0.1 — File-type handler audit fixes (field-report)
+
+Bug-fix release responding to the 2026-04-23 field audit of
+`/vault-bridge:setup`-generated handlers. The previous release
+generated real implementations for CAD/PSD/AI/legacy Office but left
+high-traffic formats (PDF, DOCX, PPTX, XLSX, all raster images, plain
+text) as generic `# TODO: implement` stubs that the installer smoke
+test accepted as "ok". This release ships pattern templates for every
+stubbed category and tightens install-time validation.
+
+### Pattern templates (new)
+
+- `scripts/handlers/patterns/document_pdf.py.tmpl` — pdfplumber for
+  text (200-page cap) with PyPDF2 fallback; PyMuPDF (fitz) for
+  embedded-image extraction with a pdfplumber `page.to_image()`
+  render fallback for scanned PDFs.
+- `scripts/handlers/patterns/document_office.py.tmpl` — single
+  template branching by suffix. `.docx` uses python-docx paragraphs +
+  tables + relationship-walked images; `.pptx` uses python-pptx text
+  frames + `MSO_SHAPE_TYPE.PICTURE` blobs; `.xlsx` uses
+  `openpyxl.load_workbook(read_only=True, data_only=True)` for cell
+  values and worksheet `_images` for embedded blobs.
+- `scripts/handlers/patterns/image_raster.py.tmpl` — copy-through
+  for JPG / PNG / WEBP (already web-ready); Pillow convert-to-PNG
+  for BMP / TIFF (with decompression-bomb safety resize to 3200 px);
+  first-frame extraction for GIF; pillow-heif → JPEG for HEIC / HEIF.
+- `scripts/handlers/patterns/text_plain.py.tmpl` — encoding detection
+  chain (BOM sniff → `chardet` when installed → utf-8 → gbk →
+  shift_jis → latin-1 replace). Fixes the v16.0.0 hard-coded utf-8
+  decode that mojibaked GBK Chinese files from CN NAS archives.
+  `.rtf` files pass through `striprtf.rtf_to_text` when available.
+
+### Rewritten
+
+- `scripts/handlers/patterns/document_office_legacy.py.tmpl` — drops
+  the olefile regex-on-raw-stream approach that produced 74 KB of
+  mojibake on the audit's `.ppt` sample. New logic: detect mis-named
+  OOXML (`PK\\x03\\x04` magic) and delegate to the modern office
+  handler; otherwise shell out to `antiword` / `catdoc` / `catppt`
+  with a 20-second timeout and multi-codec decode. Without an
+  external CLI, `.doc` / `.ppt` now return `""` silently instead of
+  returning garbled text.
+
+### Installer hardening
+
+- `scripts/handler_installer.py`:
+  - New `_EXTERNAL_TOOL_REQUIREMENTS` table + `_check_external_tools`
+    helper. `install_builtin` / `install_custom` now detect missing
+    `ODAFileConverter` (required for `.dwg`) and missing
+    `antiword` / `catdoc` / `catppt` (optional for `.doc` / `.ppt`)
+    during Step 6.5e, surfacing `InstallResult.warnings` with install
+    hints instead of silently accepting an install that will no-op
+    at scan time.
+  - `_write_requirements_doc` regenerates
+    `.vault-bridge/handlers/REQUIREMENTS.md` on every install run.
+    The file documents every external CLI the handlers depend on with
+    per-category install instructions for macOS / Debian.
+  - `generate_handler_stub` now preserves the explicit-`variant`
+    contract: when callers pass an explicit `variant=` argument, the
+    generic template wins over the pattern template so forced
+    capability bits take effect.
+- `scripts/handler_selftest.py` **(new)** — 260-line smoke-test
+  harness. Generates a minimal valid sample per supported extension
+  (hex-embedded PNG / JPG / GIF / BMP / WEBP / PDF; bytes for
+  UTF-8/MD/RTF; dynamic `docx`/`pptx`/`xlsx` via their own writers)
+  and invokes every installed handler's `CAPABILITIES`-claimed
+  functions against it. Any handler that claims `read_text=True` or
+  `extract_images=True` and returns empty output fails the selftest.
+- `commands/setup.md` Step 6.5g (new) — wires
+  `run_selftest(handlers_dir)` as an advisory acceptance gate after
+  file-type installation. Setup proceeds even on failures; the
+  summary names the extensions that failed so users can fix in-line
+  (e.g. `brew install antiword`).
+
+### Probe fix
+
+- `scripts/setup_probe.py`: `_check_extract` now routes the
+  container sample through `transport_loader.fetch_to_local` before
+  calling `extract_embedded_images.extract`. Previously it opened
+  the remote archive path directly, which raised
+  `FileNotFoundError` on SFTP / SMB / cloud transports and masked
+  real regressions as "6/7 probe checks pass". The production scan
+  pipeline was already fetching via transport — only the probe was
+  bypassing it.
+
+### Registry
+
+- `scripts/package_registry.py`: `openpyxl` spec flipped to
+  `extract_text=True, extract_images=True` to match the new
+  `document_office` template. Handler capabilities now reflect
+  reality instead of advertising both as False.
+
+### Tests
+
+- `tests/unit/test_new_pattern_templates.py` (new, 41 tests) —
+  covers template existence, compile, no-TODO-regression, capability
+  correctness, never-raise contract, UTF-8 / GBK / BOM encoding
+  paths for text-plain, copy-through for image-raster, OOXML-magic
+  branch and missing-CLI behavior for document-office-legacy,
+  external-tool warnings, REQUIREMENTS.md emission, and the full
+  `handler_selftest` runner (stub detection + working-handler
+  detection + summary formatting).
+
+All 1845 tests pass.
+
 ## v16.0.0 — Strip the writing pipeline (LLM-is-the-librarian)
 
 Major version because this is a sizable delete. Writing decisions

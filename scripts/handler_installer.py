@@ -15,12 +15,13 @@ Python 3.9 compatible.
 """
 import importlib.util
 import logging
+import shutil
 import subprocess
 import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -155,6 +156,8 @@ class InstallResult:
         handler_module: Dotted module path of the generated stub.
         source:         "builtin" or "web".
         error:          Error message when ok=False; "" when ok=True.
+        warnings:       Non-fatal install-time warnings (e.g. missing
+                        external CLI tools required by the category).
     """
     ok: bool
     ext: str
@@ -163,6 +166,105 @@ class InstallResult:
     handler_module: str
     source: str
     error: str = ""
+    warnings: List[str] = field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# External-tool requirements per category
+# ---------------------------------------------------------------------------
+#
+# Each entry names one or more CLI binaries that the category's handler
+# shells out to. Install-time detection surfaces a warning (never a hard
+# failure) when none are on PATH, and writes the install hints into
+# REQUIREMENTS.md alongside the generated handler stubs.
+
+_EXTERNAL_TOOL_REQUIREMENTS: dict = {
+    "cad-dwg": {
+        "binaries": ["ODAFileConverter", "odafileconverter"],
+        "macos_app": "/Applications/ODAFileConverter.app/Contents/MacOS/ODAFileConverter",
+        "install_hint": (
+            "Install the Open Design Alliance File Converter from "
+            "https://www.opendesign.com/guestfiles/oda_file_converter "
+            "and ensure the `ODAFileConverter` binary is on PATH."
+        ),
+        "severity": "required",
+    },
+    "document-office-legacy": {
+        "binaries": ["antiword", "catdoc", "catppt"],
+        "install_hint": (
+            "Install antiword and/or catdoc for legacy Office text extraction:\n"
+            "  macOS:  brew install antiword\n"
+            "          brew install catdoc   # for .ppt / catppt\n"
+            "  Debian: apt-get install antiword catdoc\n"
+            "Without these, .doc/.ppt files are skipped (return '')."
+        ),
+        "severity": "optional",
+    },
+}
+
+
+def _check_external_tools(category: str) -> Tuple[List[str], Optional[str]]:
+    """Return (warning_lines, install_hint) for a category's external tools.
+
+    Empty list when the category has no external-tool requirements or all
+    required binaries are found on PATH.
+    """
+    req = _EXTERNAL_TOOL_REQUIREMENTS.get(category)
+    if not req:
+        return [], None
+
+    binaries = req.get("binaries", []) or []
+    found = any(shutil.which(b) for b in binaries)
+    if not found:
+        mac_app = req.get("macos_app")
+        if mac_app and Path(mac_app).exists():
+            found = True
+
+    if found:
+        return [], None
+
+    severity = req.get("severity", "optional")
+    hint = req.get("install_hint", "")
+    binaries_str = " or ".join(binaries) if binaries else "(none)"
+    warning = (
+        f"[{severity}] {category}: external tool not found on PATH "
+        f"({binaries_str}). Handler will no-op on affected files until "
+        f"installed. See REQUIREMENTS.md for install instructions."
+    )
+    return [warning], hint
+
+
+def _write_requirements_doc(handlers_dir: Path) -> None:
+    """Regenerate REQUIREMENTS.md listing external tools per category."""
+    lines = [
+        "# vault-bridge handler external requirements",
+        "",
+        "Some file-type handlers shell out to command-line tools that are "
+        "not installed via `pip`. Without these tools the handler runs but "
+        "returns empty results on affected files.",
+        "",
+    ]
+    for category, req in sorted(_EXTERNAL_TOOL_REQUIREMENTS.items()):
+        severity = req.get("severity", "optional")
+        binaries = req.get("binaries", []) or []
+        lines.append(f"## {category} ({severity})")
+        lines.append("")
+        lines.append(f"Binaries checked on PATH: `{', '.join(binaries) or '(none)'}`")
+        mac_app = req.get("macos_app")
+        if mac_app:
+            lines.append(f"Also accepts macOS app bundle: `{mac_app}`")
+        lines.append("")
+        hint = req.get("install_hint", "").rstrip()
+        if hint:
+            lines.append(hint)
+        lines.append("")
+    try:
+        handlers_dir.mkdir(parents=True, exist_ok=True)
+        (handlers_dir / "REQUIREMENTS.md").write_text(
+            "\n".join(lines), encoding="utf-8"
+        )
+    except Exception as exc:
+        logger.debug("Could not write REQUIREMENTS.md: %s", exc)
 
 
 # ---------------------------------------------------------------------------
@@ -256,6 +358,12 @@ def generate_handler_stub(
     ext_clean = ext.lstrip(".").lower()
     is_stdlib = spec.pip_name == "" and spec.import_name == ""
 
+    # Capture whether the caller explicitly requested a variant BEFORE we
+    # auto-fill from the spec. Explicit variants force the generic
+    # template so the caller's read_text/extract_images override wins
+    # over the pattern template's hard-coded capabilities.
+    explicit_variant = bool(variant)
+
     # Determine variant
     if not variant:
         variant = _determine_variant(spec)
@@ -295,9 +403,13 @@ def generate_handler_stub(
     pip_name_or_stdlib = spec.pip_name if spec.pip_name else "stdlib"
     generated_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-    # Try to use a pattern template for this category
+    # Try to use a pattern template for this category. Callers that
+    # explicitly pass `variant` want to force the generic template's
+    # read_text/extract_images capability bits (e.g. a text-only stub
+    # for a package that can also do images). Skip the pattern in that
+    # case so the variant-specific generic template wins.
     render_pages_cap = spec.category in _RENDER_PAGES_CATEGORIES
-    pattern_tmpl = _load_pattern(spec.category)
+    pattern_tmpl = None if explicit_variant else _load_pattern(spec.category)
     if pattern_tmpl is not None:
         try:
             content = pattern_tmpl.format(
@@ -352,6 +464,8 @@ def _do_install(
         version = ""
         stub_path = generate_handler_stub(ext_clean, spec, handlers_dir,
                                           version=version, source=source)
+        warnings, _ = _check_external_tools(spec.category)
+        _write_requirements_doc(handlers_dir)
         return InstallResult(
             ok=True,
             ext=ext_clean,
@@ -360,6 +474,7 @@ def _do_install(
             handler_module=_handler_module_name(ext_clean, spec),
             source=source,
             error="",
+            warnings=warnings,
         )
 
     # --- pip install ---
@@ -427,6 +542,8 @@ def _do_install(
             error=f"Stub smoke-test failed: {exc}",
         )
 
+    warnings, _ = _check_external_tools(spec.category)
+    _write_requirements_doc(handlers_dir)
     return InstallResult(
         ok=True,
         ext=ext_clean,
@@ -435,6 +552,7 @@ def _do_install(
         handler_module=_handler_module_name(ext_clean, spec),
         source=source,
         error="",
+        warnings=warnings,
     )
 
 

@@ -541,10 +541,19 @@ result = install_custom(ext, spec, handlers_dir)
 
 if not result.ok:
     print(f"Warning: could not install {spec.pip_name}: {result.error}")
+
+# Surface external-tool warnings (e.g. ODA File Converter for DWG,
+# antiword/catdoc for .doc/.ppt). These are non-fatal.
+for w in result.warnings:
+    print(f"  ⚠ {w}")
 ```
 
 Collect all results. Skip stdlib packages (pip_name="" — they install instantly
 with ok=True and no network call needed).
+
+After the install loop, read `<workdir>/.vault-bridge/handlers/REQUIREMENTS.md`
+(written automatically by the installer) and include its path in the final
+summary so users can find install instructions for any missing external tools.
 
 Update `file_type_config.installed_packages` in the config with each successful
 installation:
@@ -570,7 +579,39 @@ out_path = generate(Path.cwd())
 print(f"Generated: {out_path}")
 ```
 
-### 6.5g — print summary
+### 6.5g — smoke-test every installed handler
+
+Before declaring setup successful, invoke `handler_selftest.run_selftest`
+against the generated handlers dir. The selftest generates or embeds a
+minimal sample per extension, calls `read_text` / `extract_images` as
+claimed by `CAPABILITIES`, and asserts the output is non-empty.
+
+```python
+import sys
+from pathlib import Path
+sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
+from handler_selftest import run_selftest, format_summary
+
+handlers_dir = Path.cwd() / '.vault-bridge' / 'handlers'
+results = run_selftest(handlers_dir)
+print(format_summary(results))
+
+fails = [r for r in results if not r.skipped and not r.ok]
+if fails:
+    print(
+        f"⚠ {len(fails)} handler(s) failed the smoke test. "
+        "Re-run /vault-bridge:setup and choose F — Edit file types, "
+        "or file a field report. Vault-bridge will still run — "
+        "but affected file types will be silently skipped."
+    )
+```
+
+This is advisory, not a hard gate: setup proceeds either way so users
+can fix in-line (e.g. installing antiword for `.doc`). Failures here
+mean a handler was generated from the fallback stub template and did
+not implement its claimed capabilities.
+
+### 6.5h — print summary
 
 > "File types configured:
 > - Enabled: {N_categories} categories

@@ -167,7 +167,12 @@ def run_probe(
             extract_dir.mkdir(exist_ok=True)
             check4 = _run_check(
                 "check_extract",
-                lambda: _check_extract(sample_container_path, extract_dir),
+                lambda: _check_extract(
+                    workdir,
+                    sample_container_path,
+                    extract_dir,
+                    transport_name=transport_name,
+                ),
             )
             if not check4["ok"]:
                 overall_ok = False
@@ -277,9 +282,37 @@ def _check_compress(src_path: Optional[Path], compress_dir: Path) -> Dict:
         return {"ok": False, "detail": "compress error", "error": str(exc), "_path": None}
 
 
-def _check_extract(container_path: str, extract_dir: Path) -> Dict:
-    """Check 4: extract images from a container document."""
-    path = Path(container_path)
+def _check_extract(
+    workdir: Path,
+    container_path: str,
+    extract_dir: Path,
+    transport_name: Optional[str] = None,
+) -> Dict:
+    """Check 4: extract images from a container document.
+
+    The `container_path` is an archive path (remote or local). We always
+    route it through `transport_loader.fetch_to_local` first so SFTP /
+    SMB / cloud transports work the same way the scan pipeline does.
+    Without this, SFTP archives raise FileNotFoundError here while
+    scanning would actually succeed (issue: setup_probe bypassed fetch).
+    """
+    try:
+        if transport_name:
+            local = transport_loader.fetch_to_local(
+                workdir, transport_name, container_path
+            )
+        else:
+            local = transport_loader.fetch_to_local(workdir, container_path)
+    except transport_loader.TransportMissing as exc:
+        return {"ok": False, "detail": "transport missing", "error": str(exc)}
+    except transport_loader.TransportInvalid as exc:
+        return {"ok": False, "detail": "transport invalid", "error": str(exc)}
+    except transport_loader.TransportFailed as exc:
+        return {"ok": False, "detail": "fetch failed for container", "error": str(exc)}
+    except Exception as exc:
+        return {"ok": False, "detail": "fetch error", "error": str(exc)}
+
+    path = Path(local)
     ft = path.suffix.lower().lstrip(".")
     try:
         results = extract_embedded_images.extract(path, extract_dir, ft)

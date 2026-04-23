@@ -108,11 +108,11 @@ _OPENPYXL = PackageSpec(
     import_name="openpyxl",
     category="document-office",
     extensions=["xlsx"],
-    extract_text=False,
-    extract_images=False,
+    extract_text=True,
+    extract_images=True,
     github_url="https://github.com/theorchard/openpyxl",
     preferred=True,
-    notes="Microsoft Excel spreadsheet reader.",
+    notes="Microsoft Excel spreadsheet reader; returns cell values and embedded images.",
 )
 
 _PILLOW = PackageSpec(
