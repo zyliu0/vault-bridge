@@ -1325,6 +1325,10 @@ result = pi.update_index(
     workdir=os.getcwd(),
     vault_name=os.environ['VB_VAULT'],
     today=date.today(),
+    moc_backend='auto',  # v15.1.0: LLM-authored MOC body when `claude` is
+                          # on PATH; deterministic fallback otherwise. Set
+                          # VAULT_BRIDGE_MOC_BACKEND=off to force the
+                          # deterministic path for this scan.
 )
 print(json.dumps(result))
 " VB_PROJECT=\"$PROJECT_NAME\" VB_DOMAIN=\"$DOMAIN_NAME\" \
@@ -1336,20 +1340,35 @@ after step 6j writes the note:
 
 ```bash
 NOTE_BODY=$(obsidian read vault="$VAULT_NAME" path="$VAULT_FOLDER/$NOTE_NAME.md")
-HINT=$(python3 -c "
-import os, sys
+HINTS=$(python3 -c "
+import os, sys, json, yaml
 sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
-import event_writer
+import event_writer, project_index as pi
 body = sys.stdin.read()
-# Strip frontmatter — everything after the closing ---
+fm = {}
 if body.startswith('---'):
-    _, _, rest = body[3:].partition('\n---\n')
+    raw, _, rest = body[3:].partition('\n---\n')
+    try: fm = yaml.safe_load(raw) or {}
+    except Exception: fm = {}
     body = rest
-print(event_writer.extract_abstract_callout(body))
+summary = event_writer.extract_abstract_callout(body)
+fallback = pi.derive_fallback_hint(
+    fm.get('file_type', ''),
+    pages=fm.get('pages'),
+    sheets=fm.get('sheets'),
+    images_embedded=fm.get('images_embedded'),
+    source_basename=(fm.get('source_path') or '').rsplit('/', 1)[-1],
+    captured_date=fm.get('captured_date', ''),
+)
+print(json.dumps({'summary_hint': summary, 'fallback_hint': fallback}))
 " <<< \"$NOTE_BODY\")
 # Append to the EVENTS_JSON entry for this event:
 #   {\"event_date\": ..., \"note_filename\": ..., \"subfolder\": ...,
-#    \"content_confidence\": ..., \"summary_hint\": \"$HINT\", \"parties\": []}
+#    \"content_confidence\": ...,
+#    \"summary_hint\": ...,   <- from $HINTS (may be empty)
+#    \"fallback_hint\": ...,  <- from $HINTS (derived from frontmatter)
+#    \"parties\": []}
+# On MOC rows, summary_hint wins; fallback_hint prevents bare bullets.
 ```
 
 ### 7c — apply inter-event wikilinks (v15.0.0)

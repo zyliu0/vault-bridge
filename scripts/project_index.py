@@ -105,6 +105,14 @@ class ProjectIndexEvent:
     content_confidence: str
     summary_hint: str = ""
     parties: List[str] = field(default_factory=list)
+    # v15.1.0: fallback hint used when `summary_hint` is empty.
+    # Pre-v15.1 an event with no abstract callout rendered as a bare
+    # `- ==date== — [[link]]` row on the MOC, giving the reader no clue
+    # what the event was. Callers fill this from event frontmatter
+    # (file_type + attachment count + page count / sheet count) so even
+    # stubs and image-only events carry a one-liner. See
+    # `derive_fallback_hint()` for the canonical derivation rules.
+    fallback_hint: str = ""
 
 
 @dataclass
@@ -327,15 +335,81 @@ def _parse_fm_simple(fm_text: str) -> dict:
 def _format_timeline_entry(ev: ProjectIndexEvent, *, include_hint: bool) -> str:
     """Render one timeline bullet.
 
-    With `include_hint=True` the one-sentence `summary_hint` is appended
-    after an em-dash so the reader can scan events without opening each
-    note. `include_hint=False` produces the compact `- ==DATE== — [[note]]`
-    form used by the flat Timeline section.
+    With `include_hint=True` the hint comes from (in priority order):
+      1. ``summary_hint`` — the event's abstract callout (or first
+         prose sentence, per ``event_writer.extract_abstract_callout``).
+      2. ``fallback_hint`` — a file-type-derived one-liner populated by
+         the scan command when no abstract callout was extracted
+         (v15.1.0). Without this fallback, stubs and image-only events
+         render as bare bullets on the MOC.
+    With ``include_hint=False`` produces the compact ``- ==DATE== — [[note]]``
+    form (kept for legacy callers; Substructures + Timeline both emit
+    hints post-v15.1).
     """
     line = f"- =={ev.event_date}== — [[{ev.note_filename}]]"
-    if include_hint and ev.summary_hint:
-        line += f" — {ev.summary_hint.strip()}"
+    if include_hint:
+        hint = (ev.summary_hint or "").strip() or (ev.fallback_hint or "").strip()
+        if hint:
+            line += f" — {hint}"
     return line
+
+
+def derive_fallback_hint(
+    file_type: str,
+    *,
+    pages: Optional[int] = None,
+    sheets: Optional[int] = None,
+    images_embedded: Optional[int] = None,
+    source_basename: str = "",
+    captured_date: str = "",
+) -> str:
+    """Return a human-readable fallback hint derived from frontmatter.
+
+    Scan commands call this after ``event_writer.extract_abstract_callout``
+    returns empty, before creating the ``ProjectIndexEvent``. The rules
+    intentionally produce short, non-fabricated descriptions — they
+    state what kind of event this is, not what happened at it.
+    """
+    ft = (file_type or "").lower()
+    if ft == "image-folder" and images_embedded:
+        return f"image folder, {images_embedded} file{'s' if images_embedded != 1 else ''}"
+    if ft == "folder":
+        return "folder event"
+    if ft == "pdf":
+        if pages:
+            return f"pdf, {pages} page{'s' if pages != 1 else ''}"
+        return "pdf document"
+    if ft in ("docx", "odt", "pages"):
+        return f"{ft} document"
+    if ft in ("pptx", "key", "odp"):
+        return f"{ft} presentation"
+    if ft in ("xlsx", "numbers", "ods"):
+        if sheets:
+            return f"spreadsheet, {sheets} sheet{'s' if sheets != 1 else ''}"
+        return f"{ft} spreadsheet"
+    if ft in ("dwg", "dxf", "rvt", "3dm", "skp"):
+        return f"{ft} cad model"
+    if ft in ("ai", "psd"):
+        return f"{ft} artwork"
+    if ft in ("jpg", "jpeg", "png", "webp", "gif", "tiff", "heic"):
+        return "single image"
+    if ft in ("mov", "mp4"):
+        return "video, not read"
+    if ft in ("zip", "rar", "7z", "tar"):
+        return "archive, not read"
+    if ft in ("url", "webloc"):
+        return "link shortcut"
+    if ft in ("eml", "msg"):
+        return "email message"
+    if ft in ("md", "txt", "rtf"):
+        return f"{ft} text"
+    # Generic fallback — use the captured date so at least the bullet
+    # tells the reader when the scan saw it.
+    if captured_date:
+        return f"{ft or 'file'} captured {captured_date}"
+    if source_basename:
+        return f"{ft or 'file'}: {source_basename}"
+    return ""
 
 
 def _generate_substructure_nav(
@@ -380,6 +454,182 @@ def _generate_substructure_nav(
     return "\n".join(lines).rstrip()
 
 
+_TIMELINE_CLUSTER_GAP_DAYS = 7  # contiguous-date cluster threshold
+
+
+def _cluster_contiguous_events(
+    events: List[ProjectIndexEvent],
+    *,
+    gap_days: int = _TIMELINE_CLUSTER_GAP_DAYS,
+) -> List[dict]:
+    """Group events by subfolder + contiguous date run.
+
+    Returns a list of cluster dicts:
+      ``{"subfolder": "CD", "start": "2023-02-27", "end": "2023-03-21",
+         "count": 5, "events": [ev, ...]}``
+
+    Two events land in the same cluster when they share a subfolder and
+    the gap between ordered dates is ≤ ``gap_days``. Used by
+    ``_render_timeline_mermaid`` to produce Gantt-style bars without
+    requiring LLM authorship.
+    """
+    if not events:
+        return []
+
+    # Group by subfolder first; order within each group by date.
+    by_sf: Dict[str, List[ProjectIndexEvent]] = {}
+    for ev in events:
+        by_sf.setdefault(ev.subfolder or "(root)", []).append(ev)
+
+    clusters: List[dict] = []
+    for sf, group in by_sf.items():
+        group = sorted(group, key=lambda e: (e.event_date, e.note_filename))
+        current: List[ProjectIndexEvent] = []
+        last_date: Optional[date] = None
+        for ev in group:
+            try:
+                d = date.fromisoformat(ev.event_date)
+            except ValueError:
+                continue
+            if last_date is None or (d - last_date).days <= gap_days:
+                current.append(ev)
+                last_date = d
+                continue
+            # Flush and start fresh.
+            clusters.append(_cluster_dict(sf, current))
+            current = [ev]
+            last_date = d
+        if current:
+            clusters.append(_cluster_dict(sf, current))
+
+    # Sort clusters by their start date so the Gantt reads chronologically.
+    clusters.sort(key=lambda c: c["start"])
+    return clusters
+
+
+def _cluster_dict(subfolder: str, evs: List[ProjectIndexEvent]) -> dict:
+    return {
+        "subfolder": subfolder,
+        "start": evs[0].event_date,
+        "end": evs[-1].event_date,
+        "count": len(evs),
+        "events": list(evs),
+    }
+
+
+def _render_timeline_mermaid(
+    project_name: str,
+    events: List[ProjectIndexEvent],
+) -> str:
+    """Render a Mermaid ``gantt`` block covering every event cluster.
+
+    Returns `""` when there are no events (so the MOC does not emit an
+    empty fenced block). Mermaid labels are de-duplicated per subfolder
+    by appending the cluster index when needed — same subfolder can
+    have multiple bars for multiple contiguous runs.
+    """
+    clusters = _cluster_contiguous_events(events)
+    if not clusters:
+        return ""
+
+    lines = [
+        "```mermaid",
+        "gantt",
+        f"    title {_mermaid_escape(project_name)}",
+        "    dateFormat YYYY-MM-DD",
+    ]
+    # Emit one `section` per subfolder, one task per cluster within.
+    by_sf_order: List[str] = []
+    sf_clusters: Dict[str, List[dict]] = {}
+    for c in clusters:
+        if c["subfolder"] not in sf_clusters:
+            sf_clusters[c["subfolder"]] = []
+            by_sf_order.append(c["subfolder"])
+        sf_clusters[c["subfolder"]].append(c)
+
+    for sf in by_sf_order:
+        lines.append(f"    section {_mermaid_escape(sf)}")
+        for i, c in enumerate(sf_clusters[sf], start=1):
+            label = _cluster_label(c, i if len(sf_clusters[sf]) > 1 else None)
+            # Same-day clusters need both dates so Gantt renders a 1-day bar.
+            start = c["start"]
+            end = c["end"]
+            if start == end:
+                lines.append(f"        {label} :{start}, 1d")
+            else:
+                lines.append(f"        {label} :{start}, {end}")
+    lines.append("```")
+    return "\n".join(lines)
+
+
+def _cluster_label(cluster: dict, index_suffix: Optional[int]) -> str:
+    """Derive a short task label for a cluster.
+
+    Prefers the topic tokens shared across the cluster's events (so a
+    run of ``施工图`` notes reads as ``施工图 series``); falls back to
+    ``<N> events`` when nothing shared is visible.
+    """
+    events = cluster["events"]
+    shared_tokens: Optional[set] = None
+    for ev in events:
+        # Use the same tokenizer link_strategy uses so the label reads
+        # like the Related section does.
+        try:
+            import link_strategy
+            toks = link_strategy._tokenize_for_related(ev.note_filename) | (
+                link_strategy._tokenize_for_related(ev.summary_hint or "")
+            )
+        except Exception:
+            toks = set()
+        if shared_tokens is None:
+            shared_tokens = toks
+        else:
+            shared_tokens &= toks
+
+    pretty = ""
+    if shared_tokens:
+        # Multi-char tokens (words) read better than single-char CJK.
+        words = sorted(
+            (t for t in shared_tokens if len(t) >= 2),
+            key=len, reverse=True,
+        )
+        if words:
+            pretty = words[0]
+        else:
+            # CJK chars: preserve the ORDER they appear in the first
+            # event's filename. Sorting alphabetically produces
+            # nonsense ordering for stroke-order-sensitive scripts
+            # (施工图 → 图工施).
+            first_name = events[0].note_filename if events else ""
+            ordered: List[str] = []
+            seen: set = set()
+            for ch in first_name:
+                if ch in shared_tokens and ch not in seen:
+                    ordered.append(ch)
+                    seen.add(ch)
+            pretty = "".join(ordered)
+    if not pretty:
+        pretty = f"{len(events)} event{'s' if len(events) != 1 else ''}"
+    elif len(events) > 1:
+        pretty = f"{pretty} ×{len(events)}"
+    if index_suffix is not None:
+        pretty = f"{pretty} ({index_suffix})"
+    return _mermaid_escape(pretty)
+
+
+def _mermaid_escape(text: str) -> str:
+    """Escape characters Mermaid's gantt parser treats specially."""
+    # `:` splits task label from dates; backslash-escape it. Remove
+    # backticks and quotes that break the render.
+    return (
+        (text or "")
+        .replace(":", "-")
+        .replace("`", "")
+        .replace('"', "")
+        .strip()
+    ) or "_"
+
+
 def generate_index(
     project_name: str,
     domain: str,
@@ -387,6 +637,8 @@ def generate_index(
     subfolders: List[str],
     existing: Optional[dict],
     today: date,
+    *,
+    moc_backend: str = "deterministic",
 ) -> str:
     """Generate the project index MOC note.
 
@@ -555,51 +807,37 @@ def generate_index(
                 "",
             ]
 
-    # v15.0.0 (Issue 2 priority 3b): dropped the `==highlight==` markup
-    # from Status. Highlights are meant to mark facts the USER cares
-    # about (dates, decisions, amounts literally read from source). When
-    # the MOC highlighted every status line by default, the signal
-    # inverted — users stopped seeing their own highlights as distinct.
-    auto_parts: List[str] = [
-        "## Status",
-        f"Current status: {status_obj.status}  ",
-        f"Timeline: {status_obj.timeline_start} → "
-        f"{status_obj.timeline_end or 'ongoing'}",
-        "",
-    ]
+    # v15.1.0 (Issue 2 follow-up Fix 3): visual phase-timeline Mermaid
+    # gantt block. Clusters events by subfolder + contiguous-date runs.
+    mermaid_block = _render_timeline_mermaid(project_name, sorted_events)
 
-    # Substructure navigation (grouped by subfolder, with hints) —
-    # only when there are ≥2 subfolders.
-    if substructure_nav:
-        auto_parts += ["## Substructures", ""]
-        auto_parts.append(substructure_nav)
-        auto_parts.append("")
-
-    # Timeline stands in for Substructures when the project has ≤1
-    # subfolder (see `emit_timeline` above). With ≥2 subfolders,
-    # Substructures already covers every event and Timeline is skipped.
-    if emit_timeline:
-        auto_parts += ["## Timeline (all events)"]
-        auto_parts.extend(timeline_lines if timeline_lines else ["_No events yet._"])
-        auto_parts += [""]
-    auto_parts += ["## Subfolders"]
-    auto_parts.extend(subfolder_lines if subfolder_lines else ["_None._"])
-
-    # Only emit these sections when they have content — hiding empty
-    # placeholders is the whole point of the v14.4 change.
-    if parties_text:
-        auto_parts += ["", "## Parties", parties_text]
-    if budget_content:
-        auto_parts += ["", "## Budget", budget_content]
-    if key_decisions_content:
-        auto_parts += ["", "## Key Decisions", key_decisions_content]
-    if open_items_content:
-        auto_parts += ["", "## Open Items", open_items_content]
-    if related_projects_content:
-        auto_parts += ["", "## Related Projects", related_projects_content]
-
-    # Marker-wrapped auto zone.
-    auto_block = [VB_AUTO_START, "", *auto_parts, "", VB_AUTO_END]
+    # v15.1.0 (Issue 2 follow-up Fix 1): the body inside the auto
+    # markers is composed by `moc_writer`, which picks a backend based
+    # on the `moc_backend` argument. The deterministic backend produces
+    # exactly the v15.0.0 layout (plus the Mermaid block). The
+    # claude_cli backend authors a narrative + topic-clustered body
+    # with the same inputs; if it fails for any reason it falls back
+    # to deterministic so the MOC is never left half-written.
+    from moc_writer import ComposeInput, compose_auto_zone  # local: avoid cycle
+    compose_input = ComposeInput(
+        project_name=project_name,
+        domain=domain,
+        events=sorted_events,
+        subfolders=[sf for sf in all_subfolders if sf],
+        status=status_obj,
+        parties_text=parties_text,
+        budget_content=budget_content,
+        key_decisions_content=key_decisions_content,
+        open_items_content=open_items_content,
+        related_projects_content=related_projects_content,
+        mermaid_block=mermaid_block,
+        substructure_nav=substructure_nav,
+        timeline_bullets=timeline_lines,
+        subfolder_bullets=subfolder_lines,
+        emit_timeline=emit_timeline,
+    )
+    auto_body = compose_auto_zone(compose_input, backend=moc_backend)
+    auto_block = [VB_AUTO_START, "", auto_body, "", VB_AUTO_END]
 
     # Tail preservation. With markers: honour whatever the user has
     # written after the end marker. Without markers (legacy note on
@@ -677,6 +915,8 @@ def update_index(
     workdir: str,
     vault_name: str,
     today: Optional[date] = None,
+    *,
+    moc_backend: str = "deterministic",
 ) -> dict:
     """Orchestrate reading, generating, and writing the project index note.
 
@@ -737,6 +977,7 @@ def update_index(
         subfolders=all_subfolders,
         existing=existing,
         today=today,
+        moc_backend=moc_backend,
     )
 
     created = False

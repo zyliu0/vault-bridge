@@ -108,6 +108,15 @@ def validate_content(content: str, label: str = "<stdin>") -> None:
             f"{sorted(schema.SUPPORTED_SCHEMA_VERSIONS)}, got {sv!r}"
         )
 
+    # 2c. Branch on note_type (v15.1.0). Project-index MOCs have their own
+    # required/optional field set — MOC-specific fields (status,
+    # timeline_start/end, parties, budget) are valid there but unknown on
+    # event notes. Pre-v15.1 every MOC the plugin generated failed its own
+    # validator because the generic event-note branch flagged these.
+    if schema.is_moc_frontmatter(fm):
+        _validate_moc(fm, note_path)
+        return
+
     req_fields = schema.get_required_fields(sv)
     opt_fields = schema.get_optional_fields(sv)
     field_order = schema.get_field_order(sv)
@@ -214,6 +223,69 @@ def validate_content(content: str, label: str = "<stdin>") -> None:
     # validator cared about. Reordering tolerance keeps the required
     # field list, the type checks, the enum checks, and the invariants;
     # field order is advisory only.
+
+
+def _validate_moc(fm: dict, note_path: str) -> None:
+    """Validate a project-index MOC frontmatter.
+
+    MOC fields come from ``scripts/schema.py``:
+      Required: schema_version, plugin, domain, project, note_type.
+      Optional: status, timeline_start, timeline_end, parties, budget,
+                tags, cssclasses.
+    """
+    req = set(schema.get_moc_required_fields())
+    opt = set(schema.get_moc_optional_fields())
+    allowed = req | opt
+
+    unknown = set(fm.keys()) - allowed
+    if unknown:
+        die(
+            f"{note_path}: project-index MOC has unknown field(s): "
+            f"{sorted(unknown)}. Allowed: {sorted(allowed)}"
+        )
+
+    missing = req - set(fm.keys())
+    if missing:
+        die(
+            f"{note_path}: project-index MOC missing required field(s): "
+            f"{sorted(missing)}"
+        )
+
+    for field, expected_type in schema.MOC_FIELD_TYPES.items():
+        if field not in fm:
+            continue
+        value = fm[field]
+        if expected_type is int and isinstance(value, bool):
+            die(f"{note_path}: {field} must be int, got bool ({value!r})")
+        if not isinstance(value, expected_type):
+            die(
+                f"{note_path}: {field} must be {expected_type.__name__}, "
+                f"got {type(value).__name__} ({value!r})"
+            )
+
+    for field, allowed_values in schema.MOC_ENUMS.items():
+        if field not in fm:
+            continue
+        value = fm[field]
+        if value not in allowed_values:
+            die(
+                f"{note_path}: {field}='{value}' is not a valid enum "
+                f"value. Allowed: {sorted(allowed_values)}"
+            )
+
+    for field, required_value in schema.MOC_LITERALS.items():
+        if field == "schema_version":
+            continue  # already validated
+        if fm.get(field) != required_value:
+            die(
+                f"{note_path}: {field} must be literally "
+                f"{required_value!r}, got {fm.get(field)!r}"
+            )
+
+    invariant_errors = schema.check_moc_invariants(fm)
+    if invariant_errors:
+        joined = "; ".join(invariant_errors)
+        die(f"{note_path}: MOC invariant violation(s): {joined}")
 
 
 def _extract_top_level_key_order(yaml_text: str) -> list:

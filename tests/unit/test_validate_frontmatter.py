@@ -515,3 +515,82 @@ def test_v2_short_caption_fails(tmp_path):
     assert code != 0, "3-word caption should be rejected"
     assert "too short" in stderr.lower()
     assert "image_captions[1]" in stderr
+
+
+# ---------------------------------------------------------------------------
+# v15.1.0 — project-index MOC validator branch
+# ---------------------------------------------------------------------------
+
+
+VALID_MOC_FRONTMATTER = """schema_version: 2
+plugin: vault-bridge
+domain: arch-projects
+project: "2408 Sample"
+note_type: project-index
+status: active
+timeline_start: "2024-08-15"
+timeline_end: ""
+parties: []
+budget: ""
+tags:
+  - arch-projects
+  - index
+cssclasses:
+  - project-index
+"""
+
+
+def test_moc_frontmatter_passes_validator(tmp_path):
+    """A freshly-generated MOC must pass its own validator (pre-v15.1
+    every MOC failed because the event-note branch rejected
+    `note_type`, `status`, etc. as unknown)."""
+    note = write_note(tmp_path, "moc.md", VALID_MOC_FRONTMATTER, body="# Body")
+    code, stderr = run_validator(note)
+    assert code == 0, f"MOC should pass:\n{stderr}"
+
+
+def test_moc_missing_required_field_fails(tmp_path):
+    """Removing `note_type` falls back to the event-note branch; removing
+    `domain` fails the MOC branch."""
+    fm = VALID_MOC_FRONTMATTER.replace('domain: arch-projects\n', '')
+    note = write_note(tmp_path, "moc_missing.md", fm, body="body")
+    code, stderr = run_validator(note)
+    assert code != 0
+    assert "domain" in stderr.lower()
+
+
+def test_moc_unknown_field_fails(tmp_path):
+    fm = VALID_MOC_FRONTMATTER + "event_date: 2024-08-15\n"
+    note = write_note(tmp_path, "moc_unknown.md", fm, body="body")
+    code, stderr = run_validator(note)
+    assert code != 0
+    assert "unknown" in stderr.lower()
+
+
+def test_moc_bad_status_enum_fails(tmp_path):
+    fm = VALID_MOC_FRONTMATTER.replace("status: active", "status: sparkling")
+    note = write_note(tmp_path, "moc_enum.md", fm, body="body")
+    code, stderr = run_validator(note)
+    assert code != 0
+    assert "status" in stderr.lower()
+
+
+def test_moc_bad_timeline_format_fails(tmp_path):
+    fm = VALID_MOC_FRONTMATTER.replace(
+        'timeline_start: "2024-08-15"',
+        'timeline_start: "yesterday"',
+    )
+    note = write_note(tmp_path, "moc_tl.md", fm, body="body")
+    code, stderr = run_validator(note)
+    assert code != 0
+    assert "timeline_start" in stderr.lower()
+
+
+def test_moc_optional_parties_list_valid(tmp_path):
+    fm = VALID_MOC_FRONTMATTER.replace(
+        "parties: []",
+        "parties:\n  - Alice\n  - Bob",
+    )
+    note = write_note(tmp_path, "moc_parties.md", fm, body="body")
+    code, stderr = run_validator(note)
+    assert code == 0, stderr

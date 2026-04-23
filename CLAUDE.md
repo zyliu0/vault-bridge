@@ -283,15 +283,28 @@ appear only when they have real content — empty placeholders like
   `on-hold` 90–365 days, `completed` >365 days). v14.4 dropped the
   brittle keyword-sniffing of `summary_hint`; override by editing the
   index `status:` frontmatter directly.
-- **Substructures OR Timeline, never both** (v14.7.4) — the MOC emits
-  exactly one event-list section so each wikilink appears once and
-  Obsidian's graph view shows a single edge per event instead of two.
+- **Substructures OR Timeline bullets, never both** (v14.7.4) — one
+  bullet section so each wikilink appears once and the graph view
+  shows a single edge per event.
   - **Substructures** — auto-derived when a project has events in ≥2
     distinct subfolders. Groups events under `### SF/` headings with
-    each event's one-sentence `summary_hint` alongside its link, so the
-    user can scan SD, DD, Meetings etc. without opening every note.
+    each event's `summary_hint` (or `fallback_hint` for stubs).
   - **Timeline (all events)** — stands in when the project has ≤1
-    subfolder. Chronological, with inline `summary_hint` on each row.
+    subfolder. Chronological, with inline hint per row.
+- **Phase timeline Mermaid block** (v15.1.0) — `## Phase timeline`
+  section above Substructures, rendering a `mermaid gantt` with one
+  bar per contiguous-date cluster within each subfolder. Cluster
+  labels pick shared topic tokens (preserves CJK stroke order).
+  Visual overview first, bullet detail below.
+- **Body between `<!-- vb:auto-start -->` / `<!-- vb:auto-end -->`**
+  (v15.0.0 markers, v15.1.0 authoring): rendered by
+  `scripts/moc_writer.compose_auto_zone`. Deterministic backend
+  produces the v15.0.0 layout; `claude_cli` backend lets the LLM
+  synthesise a narrative + topic clusters + open-threads section
+  grounded in the event list. Scan commands default to
+  `moc_backend="auto"` (claude_cli when available,
+  `VAULT_BRIDGE_MOC_BACKEND=off` to opt out). The frame
+  (frontmatter, H1 title, markers) stays deterministic.
 - **Subfolders** — auto-derived: lists vault subfolders that contain events.
 - **Parties** — v14.4: aggregated from `events[].parties` frontmatter
   lists, de-duplicated first-seen, rendered as `- <name>` bullets AND

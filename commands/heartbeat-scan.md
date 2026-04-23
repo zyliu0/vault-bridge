@@ -554,6 +554,9 @@ result = pi.update_index(
     workdir=os.getcwd(),
     vault_name=os.environ['VB_VAULT'],
     today=date.today(),
+    moc_backend='auto',  # v15.1.0: LLM-authored MOC when `claude` is on
+                          # PATH. VAULT_BRIDGE_MOC_BACKEND=off forces the
+                          # deterministic path.
 )
 print(json.dumps(result))
 " VB_PROJECT=\"$PROJECT_NAME\" VB_DOMAIN=\"$DOMAIN_NAME\" \

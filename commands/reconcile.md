@@ -733,7 +733,13 @@ for src, (fp, note_path) in by_path.items():
 
 results = {}
 for proj, evs in projects.items():
-    r = pi.update_index(proj, domain, evs, str(workdir), vault_name, date.today())
+    # v15.1.0: moc_backend='auto' enables LLM-authored MOC bodies when
+    # `claude` is on PATH; deterministic fallback otherwise. Set
+    # VAULT_BRIDGE_MOC_BACKEND=off to force deterministic output.
+    r = pi.update_index(
+        proj, domain, evs, str(workdir), vault_name, date.today(),
+        moc_backend='auto',
+    )
     # v15.0.0: rewire the inter-event mesh every rebuild, so any MOC
     # regenerated from scratch also gets its per-event Related + prev/next
     # blocks refreshed. Idempotent via the vb:related markers.

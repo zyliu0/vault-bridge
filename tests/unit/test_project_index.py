@@ -1139,3 +1139,137 @@ class TestApplyInterEventLinks:
         )
         assert stats["events_linked"] == 0
         assert stats["failures"] == 2
+
+
+# ---------------------------------------------------------------------------
+# v15.1.0 — Mermaid phase timeline
+# ---------------------------------------------------------------------------
+
+
+class TestRenderTimelineMermaid:
+    def _cd_run(self):
+        return _make_events(
+            ("2023-02-27", "2023-02-27 施工图", "CD"),
+            ("2023-02-28", "2023-02-28 施工图", "CD"),
+            ("2023-03-17", "2023-03-17 施工图", "CD"),
+            ("2023-03-21", "2023-03-21 施工图", "CD"),
+        )
+
+    def test_empty_events_returns_empty_string(self):
+        assert pi._render_timeline_mermaid("P", []) == ""
+
+    def test_contiguous_run_clusters_into_one_bar(self):
+        # Two CD events one day apart → one bar spanning both dates.
+        out = pi._render_timeline_mermaid(
+            "P",
+            _make_events(
+                ("2023-02-27", "2023-02-27 施工图", "CD"),
+                ("2023-02-28", "2023-02-28 施工图", "CD"),
+            ),
+        )
+        assert "```mermaid" in out
+        assert "gantt" in out
+        assert ":2023-02-27, 2023-02-28" in out
+
+    def test_gap_greater_than_threshold_splits_clusters(self):
+        out = pi._render_timeline_mermaid("P", self._cd_run())
+        # Two CD bars: Feb 27-28 and Mar 17-21 (gap of >7 days between).
+        assert ":2023-02-27, 2023-02-28" in out
+        assert ":2023-03-17, 2023-03-21" in out
+
+    def test_single_day_cluster_renders_with_1d_duration(self):
+        out = pi._render_timeline_mermaid(
+            "P",
+            _make_events(("2024-08-15", "2024-08-15 kickoff", "SD")),
+        )
+        assert ":2024-08-15, 1d" in out
+
+    def test_different_subfolders_produce_separate_sections(self):
+        out = pi._render_timeline_mermaid(
+            "P",
+            _make_events(
+                ("2024-08-15", "2024-08-15 kickoff", "SD"),
+                ("2023-02-28", "2023-02-28 施工图", "CD"),
+            ),
+        )
+        assert "section SD" in out
+        assert "section CD" in out
+
+    def test_cluster_label_uses_shared_topic_token(self):
+        out = pi._render_timeline_mermaid("P", self._cd_run())
+        # 施工图 is shared across all 4; label should surface it.
+        assert "施工图" in out
+
+
+class TestClusterContiguousEvents:
+    def test_events_sorted_within_cluster(self):
+        clusters = pi._cluster_contiguous_events(
+            _make_events(
+                ("2023-02-28", "n2", "CD"),
+                ("2023-02-27", "n1", "CD"),
+            ),
+        )
+        assert len(clusters) == 1
+        assert clusters[0]["events"][0].event_date == "2023-02-27"
+        assert clusters[0]["events"][1].event_date == "2023-02-28"
+
+    def test_invalid_date_is_skipped(self):
+        # Events with bogus event_date values shouldn't crash the cluster pass.
+        clusters = pi._cluster_contiguous_events(
+            _make_events(
+                ("not-a-date", "n1", "CD"),
+                ("2023-02-28", "n2", "CD"),
+            ),
+        )
+        # Only the valid event clusters.
+        assert sum(c["count"] for c in clusters) == 1
+
+
+# ---------------------------------------------------------------------------
+# v15.1.0 — fallback hint
+# ---------------------------------------------------------------------------
+
+
+class TestFallbackHint:
+    def test_event_with_fallback_hint_renders_in_timeline(self):
+        evs = [
+            pi.ProjectIndexEvent(
+                event_date="2024-08-15",
+                note_filename="2024-08-15 site",
+                subfolder="CA",
+                content_confidence="metadata-only",
+                summary_hint="",
+                fallback_hint="video, not read",
+            ),
+        ]
+        line = pi._format_timeline_entry(evs[0], include_hint=True)
+        assert "video, not read" in line
+
+    def test_summary_hint_wins_over_fallback(self):
+        ev = pi.ProjectIndexEvent(
+            event_date="2024-08-15",
+            note_filename="2024-08-15 site",
+            subfolder="CA",
+            content_confidence="high",
+            summary_hint="Real abstract from the note.",
+            fallback_hint="video, not read",
+        )
+        line = pi._format_timeline_entry(ev, include_hint=True)
+        assert "Real abstract" in line
+        assert "video, not read" not in line
+
+    def test_derive_fallback_hint_known_types(self):
+        assert pi.derive_fallback_hint("pdf", pages=12).startswith("pdf, 12")
+        assert pi.derive_fallback_hint("xlsx", sheets=3).startswith("spreadsheet, 3 sheet")
+        assert pi.derive_fallback_hint("dwg") == "dwg cad model"
+        assert "image folder" in pi.derive_fallback_hint(
+            "image-folder", images_embedded=7
+        )
+        assert pi.derive_fallback_hint("mov") == "video, not read"
+
+    def test_derive_fallback_hint_unknown_type_uses_captured_date(self):
+        hint = pi.derive_fallback_hint("xyz", captured_date="2024-08-15")
+        assert "2024-08-15" in hint
+
+    def test_derive_fallback_hint_empty_when_no_signal(self):
+        assert pi.derive_fallback_hint("") == ""

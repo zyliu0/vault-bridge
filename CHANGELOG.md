@@ -1,5 +1,100 @@
 # Changelog
 
+## v15.1.0 — Issue 2 follow-up (MOC body synthesis + template linking)
+
+Address the four follow-up items from the field report
+`vault-bridge-issue-2-linking-format.md`:
+
+### Fix 1 — LLM-authored MOC body (priority 3a, deferred in v15.0.0)
+
+New module `scripts/moc_writer.py` composes the markdown that goes
+between `<!-- vb:auto-start -->` and `<!-- vb:auto-end -->`. Backends:
+
+- **`"deterministic"`** (always available) — produces exactly the
+  v15.0.0 layout (Status, Phase timeline Mermaid, Substructures/
+  Timeline bullets, Subfolders, preserved user sections). Used by
+  tests and as the safe fallback.
+- **`"claude_cli"`** — shells out to
+  `claude -p --dangerously-skip-permissions` with a structured
+  events+subfolders+status prompt and parses the returned markdown.
+  The prompt explicitly asks for a 2-3 sentence project narrative,
+  topic clusters (grouping events by shared filename tokens — so a
+  run of `施工图` notes reads as "Construction drawing series"),
+  and open threads ONLY when an event's summary_hint flagged an
+  unresolved issue. Same fabrication firewall as event-note
+  composition: every claim must be grounded in the events data; no
+  fabricated parties, decisions, or numbers; every event must
+  appear at least once.
+- **`"auto"`** — claude_cli when `claude` is on PATH AND
+  `VAULT_BRIDGE_MOC_BACKEND` is not `"off"`; deterministic
+  otherwise. This is what retro-scan, heartbeat-scan, and
+  reconcile now pass by default — so users who have Claude Code
+  running get LLM synthesis automatically, and setting
+  `VAULT_BRIDGE_MOC_BACKEND=off` is a one-flag opt-out.
+
+Reliability: subprocess timeout, non-zero exit, empty output, and
+refusal-pattern matches all fall back to the deterministic body so a
+MOC is never left half-written. The frame (H1 title, frontmatter,
+markers, footer) stays machine-generated and deterministic either way.
+
+Direct-API callers of `generate_index()` / `update_index()` keep the
+deterministic default — only scan commands opt into `"auto"`, so tests
+and integration callers remain hermetic.
+
+### Fix 2 — `fallback_hint` for stub / image-only events
+
+`ProjectIndexEvent` gains a `fallback_hint: str = ""` field that the
+Timeline/Substructures rows render when `summary_hint` is empty. A
+new helper `project_index.derive_fallback_hint(file_type, pages=,
+sheets=, images_embedded=, source_basename=, captured_date=)` produces
+a short file-type-derived one-liner (`"pdf, 12 pages"`,
+`"image folder, 7 files"`, `"dwg cad model"`, `"video, not read"`,
+etc.) so bare bullets disappear. Scan commands read the just-written
+note's frontmatter and call the helper when `extract_abstract_callout`
+returns empty (see retro-scan Step 7b snippet).
+
+### Fix 3 — Visual phase-timeline Mermaid block
+
+`project_index._render_timeline_mermaid` emits a `mermaid` `gantt`
+block inside the auto zone, under a `## Phase timeline` heading.
+Events are clustered by subfolder + contiguous-date runs (gap ≤7
+days) so a 4-event construction-drawing sequence reads as a single
+bar. Cluster labels prefer shared topic tokens (preserves CJK stroke
+order, so `施工图` stays `施工图`); falls back to `"N events"`.
+Works identically in both backends — the LLM-authored path receives
+the block as a pre-computed input it's instructed to include verbatim.
+
+### MOC validator branch (`scripts/schema.py` + `validate_frontmatter.py`)
+
+MOCs now validate under a dedicated branch. `note_type:
+project-index` routes frontmatter through `_validate_moc` which
+recognises MOC-specific fields (`status`, `timeline_start`,
+`timeline_end`, `parties`, `budget`) that the event-note branch
+flagged as unknown pre-v15.1. Every MOC the plugin generates now
+passes its own validator — vault-health Check 3 was flagging 100%
+of MOCs for this before.
+
+New schema exports: `schema.MOC_NOTE_TYPE`, `schema.MOC_FIELD_TYPES`,
+`schema.MOC_ENUMS`, `schema.MOC_LITERALS`, `schema.is_moc_frontmatter`,
+`schema.get_moc_required_fields`, `schema.get_moc_optional_fields`,
+`schema.check_moc_invariants`.
+
+### Template cross-linking (follow-up ask)
+
+`scripts/template_installer.install_templates` now:
+
+1. Stamps a `<!-- vb:family-start -->` block into each installed
+   template with a wikilink to `[[vault-bridge-templates]]`.
+2. Writes `_Templates/vault-bridge/vault-bridge-templates.md` — a
+   family-index note that lists every installed template grouped by
+   category. Each template carries a backlink here, so the edge
+   exists in both directions and no template shows up as an orphan
+   in Obsidian's graph view.
+
+Idempotent: re-running the installer strips any prior family block
+before appending a fresh one. Templater `<% ... %>` expressions in
+the installed templates are preserved untouched.
+
 ## v15.0.0 — field-report Issue 1 + Issue 2 full sweep (breaking)
 
 Major version because the validator drops format-as-validation rules
