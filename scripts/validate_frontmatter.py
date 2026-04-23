@@ -38,32 +38,6 @@ def die(msg: str) -> None:
     sys.exit(2)
 
 
-# Kept in sync with scripts/vision_runner.py:_REFUSAL_PATTERNS. Inlined
-# (rather than imported) so validate_frontmatter.py stays runnable as a
-# standalone script without triggering vision_runner's heavier imports.
-_REFUSAL_PATTERNS = (
-    "i need permission",
-    "i need your permission",
-    "please approve",
-    "permission prompt",
-    "file read when prompted",
-    "don't have permission",
-    "do not have permission",
-    "cannot read the image",
-    "unable to read the image",
-    "i'm unable to read",
-    "i am unable to read",
-)
-
-
-def _looks_like_refusal(caption: str) -> bool:
-    low = (caption or "").strip().lower()
-    if not low:
-        return False
-    head = low[:200]
-    return any(pat in head for pat in _REFUSAL_PATTERNS)
-
-
 def validate(note_path: str) -> None:
     """Validate a note file at a filesystem path (for temp files only)."""
     path = Path(note_path)
@@ -177,38 +151,12 @@ def validate_content(content: str, label: str = "<stdin>") -> None:
                 f"got {fm.get(field)!r}"
             )
 
-    # 7b. Semantic check on image_captions (v14.7.4 red-line).
-    #
-    # The cross-field invariant (attachments length vs image_captions
-    # length) is checked in schema.check_invariants; here we catch the
-    # stronger failure mode: captions that are permission-refusal text
-    # ("I need permission to read the image file...") or suspiciously
-    # short non-empty strings. Empty slots stay valid — a legitimately
-    # failed per-image caption records "" and the scan surfaces it via
-    # memory-report warnings, but poisoned captions must never reach
-    # disk. See scripts/vision_runner.py:is_refusal_caption.
-    captions = fm.get("image_captions")
-    if isinstance(captions, list):
-        for i, cap in enumerate(captions):
-            if not isinstance(cap, str):
-                continue  # schema's type check will flag this
-            stripped = cap.strip()
-            if not stripped:
-                continue
-            if _looks_like_refusal(stripped):
-                die(
-                    f"{note_path}: image_captions[{i}] matches a "
-                    f"permission-refusal pattern — the vision backend "
-                    f"returned a refusal instead of a caption: "
-                    f"{stripped[:120]!r}"
-                )
-            word_count = len(stripped.split())
-            if word_count < 5:
-                die(
-                    f"{note_path}: image_captions[{i}] is too short "
-                    f"({word_count} word(s)); expected at least 5 words "
-                    f"of description: {stripped!r}"
-                )
+    # 7b. image_captions: no semantic checks post-v16.0.0. The
+    # captions side-channel was deleted (vision_runner / image_vision
+    # removed), so there's no pipeline producing refusal strings into
+    # this field any more. Legacy notes with pre-v14.7.4 poisoned
+    # captions are now cosmetic noise at worst — users can strip them
+    # on demand with reconcile.
 
     # 8. Drift case 5: cross-field invariants.
     invariant_errors = schema.check_invariants(fm)

@@ -86,41 +86,40 @@ def test_resolution_returns_dataclass():
 
 
 # ---------------------------------------------------------------------------
-# route_event()
+# route_event() — v16.0.0 always returns the fallback subfolder
+#
+# Pre-v16 this function did substring matching against a
+# `routing_patterns` list + filename-based `content_overrides`. Both
+# produced silent miscategorisations: a file whose filename happened to
+# contain a pattern token ("model", "meeting") ended up in a subfolder
+# that didn't fit the event's phase. The field report documented 4 of
+# 11 Admin notes being in the wrong subfolder for this reason. Routing
+# is now LLM work — the scan skill reads the path, project context,
+# and subfolder list and decides; Python just returns the fallback so
+# new events land somewhere while awaiting an LLM routing pass.
 # ---------------------------------------------------------------------------
 
-def test_route_first_matching_pattern():
-    domain = _domain("test", "/x/", patterns=[
-        {"match": "CD", "subfolder": "CD"},
-        {"match": "SD", "subfolder": "SD"},
-    ])
-    assert dr.route_event("/x/project/CD drawings/file.dwg", domain) == "CD"
+
+def test_route_always_returns_fallback_post_v16():
+    domain = _domain("test", "/x/", fallback="Admin")
+    # Even with substring-shaped patterns, v16 ignores them.
+    domain["routing_patterns"] = [{"match": "CD", "subfolder": "CD"}]
+    assert dr.route_event("/x/project/CD drawings/file.dwg", domain) == "Admin"
 
 
-def test_route_case_insensitive():
-    domain = _domain("test", "/x/", patterns=[
-        {"match": "meeting", "subfolder": "Meetings"},
-    ])
-    assert dr.route_event("/x/project/Meeting Notes/file.pdf", domain) == "Meetings"
-
-
-def test_route_fallback_when_no_match():
-    domain = _domain("test", "/x/", patterns=[
-        {"match": "CD", "subfolder": "CD"},
-    ], fallback="Admin")
-    assert dr.route_event("/x/project/random/file.pdf", domain) == "Admin"
-
-
-def test_route_content_override_wins():
-    domain = _domain("test", "/x/", patterns=[
-        {"match": "SD", "subfolder": "SD"},
-    ], fallback="Admin")
+def test_route_content_overrides_ignored_post_v16():
+    domain = _domain("test", "/x/", fallback="Admin")
     domain["content_overrides"] = [
         {"when": "filename contains meeting", "subfolder": "Meetings"},
     ]
-    assert dr.route_event("/x/project/SD/meeting-notes.pdf", domain) == "Meetings"
+    assert dr.route_event("/x/project/SD/meeting-notes.pdf", domain) == "Admin"
 
 
 def test_route_empty_patterns_uses_fallback():
     domain = _domain("test", "/x/", patterns=[], fallback="General")
     assert dr.route_event("/x/any/path.pdf", domain) == "General"
+
+
+def test_route_without_fallback_defaults_to_inbox():
+    domain = {"name": "x", "archive_root": "/x/"}  # no fallback key
+    assert dr.route_event("/x/any/path.pdf", domain) == "Inbox"

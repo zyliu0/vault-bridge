@@ -482,8 +482,12 @@ def test_v2_empty_caption_slots_pass(tmp_path):
     assert code == 0, f"Empty caption slots should pass:\n{stderr}"
 
 
-def test_v2_refusal_caption_fails(tmp_path):
-    """A permission-refusal string in image_captions must be rejected."""
+def test_v2_refusal_caption_passes_post_v16(tmp_path):
+    """v16.0.0: the captions side-channel was deleted with vision_runner.
+    The validator no longer rejects refusal strings or short captions
+    in `image_captions` — callers don't populate that field any more.
+    Legacy notes with pre-v14.7.4 poisoned captions become cosmetic
+    noise at worst."""
     fm = VALID_V2_WITH_IMAGES.replace(
         "images_embedded: 2\ncssclasses: []\n",
         "images_embedded: 2\n"
@@ -493,28 +497,9 @@ def test_v2_refusal_caption_fails(tmp_path):
         "the file read when prompted.\"\n"
         "cssclasses: []\n",
     )
-    note = write_note(tmp_path, "v2_caps_refusal.md", fm)
+    note = write_note(tmp_path, "v2_caps_legacy.md", fm)
     code, stderr = run_validator(note)
-    assert code != 0, "Refusal string should be rejected"
-    assert "refusal" in stderr.lower()
-    assert "image_captions[1]" in stderr
-
-
-def test_v2_short_caption_fails(tmp_path):
-    """A non-empty caption shorter than 5 words is a schema violation."""
-    fm = VALID_V2_WITH_IMAGES.replace(
-        "images_embedded: 2\ncssclasses: []\n",
-        "images_embedded: 2\n"
-        "image_captions:\n"
-        "  - \"Four painted canvas sample swatches arranged in a row.\"\n"
-        "  - \"A red cube.\"\n"
-        "cssclasses: []\n",
-    )
-    note = write_note(tmp_path, "v2_caps_short.md", fm)
-    code, stderr = run_validator(note)
-    assert code != 0, "3-word caption should be rejected"
-    assert "too short" in stderr.lower()
-    assert "image_captions[1]" in stderr
+    assert code == 0, f"Legacy poisoned captions tolerated post-v16:\n{stderr}"
 
 
 # ---------------------------------------------------------------------------

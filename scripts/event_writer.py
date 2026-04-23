@@ -1,70 +1,46 @@
-"""Event-writer layer: turns raw scan output into event diary notes.
+"""Writing helpers that survived the v16.0.0 pipeline strip.
 
-Architecture:
-  scan_pipeline (extracts) → event_writer (translates) → obsidian CLI (writes)
+Pre-v16 this module was a ~400-line pipeline: template-driven prompt
+rendering, metadata-stub skeletons, fabrication-firewall validators,
+stop-word lists, word-count bounds. v16.0.0 removed all of that in
+favour of the LLM-is-the-librarian pattern — the scan skill gives
+the host LLM the raw source, image file paths, sibling notes, and
+the MOC, and the LLM decides shape, length, and structure.
 
-Two note kinds:
-  - event note — prose, grounded in raw text + image captions. The event-writer
-    emits a prompt for the invoking Claude to execute; the response is
-    validated (stop-words, word count, verbatim-paste detection). Retry once
-    on failure, then fall back to a metadata stub.
-  - metadata stub — fixed metadata bullets, rendered deterministically in
-    Python. Used when the file could not be read (video, audio, archive,
-    unknown, or readable type that produced no content).
+What's left here is the plumbing that doesn't make writing decisions:
 
-The fabrication firewall lives inside `EventBodyValidator`.
+- `extract_abstract_callout` — pulls a one-sentence hint from the
+  top of a note for the MOC's `summary_hint`. Prefers the
+  `> [!abstract] Overview` callout; falls back to the first prose
+  sentence.
+- `assemble_note_body` — chunks image embeds into rows so the
+  Obsidian Minimal theme renders them as a grid. This is
+  theme-plumbing, not a writing decision.
+- `compose_body` — minimum-viable shim for the scan commands'
+  existing `composed = event_writer.compose_body(result, meta)`
+  call sites. Returns a `ComposedBody` whose `prompt_text` tells the
+  caller to write the note directly from the evidence it has.
+  No validator, no stub templates.
 
 Python 3.9 compatible.
 """
+from __future__ import annotations
+
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, List, Optional, Protocol
+from typing import Callable, List, Optional
 
 
-# Stop-words: deliberately empty (v15.0.0). Pre-v15 this list contained
-# project-specific phrases from one user's past fabrication incidents
-# ("pulled the back wall in", "half a storey", "40cm"). They did not
-# generalise — every new project would need its own list — and they
-# masqueraded as a fabrication firewall while the real work (verbatim-
-# paste detection + source-grounding) was already done elsewhere.
-# Kept as an empty list so callers that still reference the name do not
-# break; re-populate per-project if a future user wants the behaviour.
+# Legacy hook: per-project scripts can append to this list to flag
+# fabrication phrases they want rejected at write time. The default
+# is empty — the firewall now lives in the LLM prompt, not in Python
+# string-matching. Kept for API back-compat; no scan command reads it.
 STOP_WORDS: List[str] = []
 
-# Verbatim-paste detection: any >= N consecutive chars from raw_text present in body.
-VERBATIM_PASTE_MIN_CHARS = 60
 
-# Word count bounds: advisory, NOT enforced (v15.0.0). Pre-v15 the
-# validator rejected any event-note body outside MIN_WORDS..MAX_WORDS,
-# which forced retries + stub-fallback for notes where a short
-# field-observation (photo-only event) or a long PDF analysis would
-# have been fine. The LLM now picks the shape. Constants are retained
-# here as reference values the event-note prompt may surface as
-# guidance.
-MIN_WORDS = 100  # advisory — target floor for typical event notes
-MAX_WORDS = 200  # advisory — target ceiling; LLM may exceed for long PDFs
-
-# Abstract-callout: advisory, NOT enforced (v15.0.0). Pre-v15 every
-# event-note body had to start with `> [!abstract] Overview`, with a
-# 5-25 word single sentence. MOC `summary_hint` extraction relied on
-# finding that callout. `extract_abstract_callout` now falls back to
-# the first sentence of the body when no callout is present, so the
-# LLM can choose whether the note opens with a callout, a bullet list,
-# a quote, or plain prose. Callers that want the callout shape can
-# still request it in their prompt.
-ABSTRACT_CALLOUT_MIN_WORDS = 5
-ABSTRACT_CALLOUT_MAX_WORDS = 25
-
-# Image-grid integration: the note body writer joins embeds with a single
-# newline (no blank line) so Obsidian's Minimal theme renders them as a grid.
-
-
-_TEMPLATES_DIR = Path(__file__).resolve().parent.parent / "templates" / "event_writer"
-
-# Valid values for ComposedBody.note_kind
-NOTE_KIND_EVENT = "event"   # grounded prose diary entry
-NOTE_KIND_STUB = "stub"     # metadata-only stub
+NOTE_KIND_EVENT = "event"
+NOTE_KIND_STUB = "stub"   # retained for back-compat callers; never emitted by compose_body post-v16
 
 
 @dataclass
@@ -75,108 +51,36 @@ class ValidationResult:
 
 @dataclass
 class ComposedBody:
-    note_kind: str                # "event" or "stub"
-    body_text: str                # rendered for stub; empty for event until LLM fills it
-    prompt_text: str              # non-empty for event; empty for stub
+    note_kind: str
+    body_text: str
+    prompt_text: str
     validator: Callable[[str], ValidationResult]
 
 
-class _Result(Protocol):
-    text: str
-    attachments: List[str]
-    images_embedded: int
-    image_captions: List[str]
-    skipped: bool
-    skip_reason: str
-    handler_category: str
-    content_confidence: str
-
-
-def _load_template(name: str) -> str:
-    path = _TEMPLATES_DIR / name
-    return path.read_text(encoding="utf-8")
-
-
-def _is_stub(result) -> bool:
-    """Classification: stub if skipped or if nothing was actually read."""
-    if getattr(result, "skipped", False):
-        return True
-    has_text = bool(getattr(result, "text", "").strip())
-    has_captions = bool(getattr(result, "image_captions", []))
-    if not has_text and not has_captions:
-        return True
-    return False
-
-
-def _render_metadata_stub(meta: dict) -> str:
-    tpl = _load_template("metadata-stub.body.md")
-    source_basename = Path(meta.get("source_path", "")).name or "(unknown)"
-    return tpl.format(
-        source_basename=source_basename,
-        file_type=meta.get("file_type", "unknown"),
-        event_date=meta.get("event_date", ""),
-        project=meta.get("project", ""),
-    )
-
-
-def _render_event_note_prompt(result, meta: dict) -> str:
-    tpl = _load_template("event-note.prompt.md")
-    source_basename = Path(meta.get("source_path", "")).name or "(unknown)"
-    raw = getattr(result, "text", "") or ""
-    # Cap excerpt to avoid blowing the prompt. 4000 chars is enough for the
-    # writer to get a feel for the content without pasting the whole file.
-    excerpt = raw[:4000]
-    if len(raw) > 4000:
-        excerpt += "\n… [truncated]"
-    if not excerpt.strip():
-        excerpt = "(no extracted text — this event is image-only; rely on the captions below)"
-    captions = getattr(result, "image_captions", []) or []
-    if captions:
-        captions_block = "\n".join(f"- {c}" for c in captions)
-    else:
-        captions_block = "(no images embedded)"
-    return tpl.format(
-        event_date=meta.get("event_date", ""),
-        project=meta.get("project", ""),
-        domain=meta.get("domain", ""),
-        subfolder=meta.get("subfolder", "") or "(project root)",
-        source_basename=source_basename,
-        file_type=meta.get("file_type", "unknown"),
-        raw_text_excerpt=excerpt,
-        captions_block=captions_block,
-    )
-
+# ---------------------------------------------------------------------------
+# Abstract-callout / first-sentence hint extraction
+# ---------------------------------------------------------------------------
 
 _ABSTRACT_CALLOUT_RE = re.compile(
-    # Matches `> [!abstract] <optional title>` followed by zero or more
-    # CONTIGUOUS continuation lines starting with `>`. The inner group
-    # must NOT allow whitespace at the start of each line — `\s*` there
-    # also matches `\n`, which would greedy-swallow any later
-    # `> [!info]` / `> [!note]` callout separated only by blank lines
-    # from this one (reported in the v14.4 field review: 20 affected
-    # notes had the next callout collapsed into summary_hint).
     r"^\s*>\s*\[!abstract\][^\n]*\n((?:>[^\n]*\n?)*)",
     re.MULTILINE,
 )
 
-
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?。！？])\s+")
+
+_HINT_MIN_WORDS = 5
+_HINT_MAX_WORDS = 35
 
 
 def extract_abstract_callout(body: str) -> str:
     """Return a one-sentence summary hint for the note.
 
-    Preference order (v15.0.0 relaxation — Issue 2 priority 2b):
+    Preference order:
       1. Content of the first `> [!abstract] ...` callout, if present.
       2. First sentence of the body prose when no callout is present,
-         subject to a 5-25 word filter so an overly-long opening does
-         not dump a paragraph into the MOC summary.
+         filtered to 5-35 words so an overly-long opening does not
+         dump a paragraph into the MOC summary.
       3. Empty string when neither heuristic yields a usable hint.
-
-    Pre-v15 the absence of an abstract callout was treated as a
-    validation error, which forced retries even when the LLM had
-    written a perfectly good opening sentence. The MOC builder now
-    gets a hint either way, without constraining note shape.
     """
     m = _ABSTRACT_CALLOUT_RE.search(body or "")
     if m is not None:
@@ -190,12 +94,10 @@ def extract_abstract_callout(body: str) -> str:
                 cleaned.append(stripped[1:])
             else:
                 cleaned.append(stripped)
-        text = " ".join(part.strip() for part in cleaned if part.strip())
-        if text.strip():
-            return text.strip()
+        text = " ".join(part.strip() for part in cleaned if part.strip()).strip()
+        if text:
+            return text
 
-    # Fallback: first prose line → first sentence. Skips headings,
-    # blockquotes, embeds, and tables — those aren't summary material.
     prose = _first_nonblank_prose_line(body or "")
     if not prose:
         return ""
@@ -204,172 +106,48 @@ def extract_abstract_callout(body: str) -> str:
     if not sentence:
         return ""
     word_count = len(sentence.split())
-    # Allow modest overshoot on the ceiling — MOC rows can render a
-    # slightly longer hint; the strict upper bound was a validation
-    # rule, now advisory.
-    if ABSTRACT_CALLOUT_MIN_WORDS <= word_count <= ABSTRACT_CALLOUT_MAX_WORDS + 10:
+    if _HINT_MIN_WORDS <= word_count <= _HINT_MAX_WORDS:
         return sentence
     return ""
 
 
 def _first_nonblank_prose_line(body: str) -> str:
-    """Return the first line of body that looks like prose (not a
-    heading / list / blockquote / image embed / callout fence)."""
+    """First line of `body` that looks like prose (not a heading, list,
+    blockquote, embed, or table row)."""
     for raw in (body or "").splitlines():
         line = raw.strip()
         if not line:
             continue
-        if line.startswith("#"):          # heading
+        if line.startswith("#"):
             continue
-        if line.startswith("- "):         # bullet
+        if line.startswith("- "):
             return line[2:].strip()
         if line.startswith("* "):
             return line[2:].strip()
-        if line.startswith(">"):          # blockquote / callout
+        if line.startswith(">"):
             continue
-        if line.startswith("!["):         # image embed
+        if line.startswith("!["):
             continue
-        if line.startswith("|"):          # table row
+        if line.startswith("|"):
             continue
         return line
     return ""
 
 
-def _body_without_abstract(body: str) -> str:
-    """Return the body with the leading abstract callout removed.
-
-    Used for word-count validation — the abstract is a structured field
-    and does not count toward the diary prose length.
-    """
-    return _ABSTRACT_CALLOUT_RE.sub("", body or "", count=1).lstrip()
-
-
-def validate_event_note_body(
-    body: str,
-    raw_text: Optional[str] = None,
-) -> ValidationResult:
-    """Validate an event-note body text against the fabrication firewall.
-
-    This is the single source of truth for what counts as a valid
-    event-note body. Both the write-time closure (via `_make_validator`)
-    and the post-hoc auditor (`scripts/validate_event_note.py`) call it.
-
-    Checks (v15.0.0 — Issue 2 priority 2a):
-    - No verbatim-paste run ≥ `VERBATIM_PASTE_MIN_CHARS` chars from
-      `raw_text`. This is the core of the fabrication firewall and
-      stays enforced.
-    - Non-empty body (a zero-length response is always a failure —
-      the LLM produced nothing).
-    - Any stop-words in `STOP_WORDS` (empty by default post-v15).
-
-    Dropped in v15.0.0:
-    - Leading `> [!abstract] Overview` requirement. Hint extraction
-      still prefers the callout when present (`extract_abstract_callout`)
-      but falls back to the first sentence of body prose — the LLM
-      picks the shape.
-    - 100–200 word body bounds. A 2-line field observation for a
-      photo-only event and a 400-word PDF analysis are both fine. The
-      MIN_WORDS / MAX_WORDS constants remain as advisory guidance.
-
-    Args:
-        body: the note body text, without frontmatter.
-        raw_text: the source text that was read when the note was written.
-            When omitted (post-hoc audit), the verbatim-paste check is
-            skipped — that check depends on knowing exactly what was read,
-            which is not preserved in the vault.
-
-    Returns:
-        ValidationResult.ok is True when no fabrication indicators fire.
-    """
-    reasons: List[str] = []
-    stripped = (body or "").strip()
-
-    # Non-empty body — the only structural requirement post-v15.
-    if not stripped:
-        reasons.append("event-note body is empty")
-
-    # Stop-words (empty list by default post-v15.0.0; left wired up
-    # so per-project overrides still work).
-    low = stripped.lower()
-    for phrase in STOP_WORDS:
-        if phrase in low:
-            reasons.append(f"stop-word present: {phrase!r}")
-    # Verbatim paste detection: scan the raw_text for any window that
-    # appears verbatim in the body. Only meaningful at write time when
-    # raw_text is available.
-    if raw_text:
-        raw = raw_text
-        rn = len(raw)
-        if rn >= VERBATIM_PASTE_MIN_CHARS:
-            # Sliding window over raw text; check each window against body.
-            # Bounded step keeps this O(rn/step * len(body)) instead of O(rn*len(body)).
-            step = 20
-            for i in range(0, rn - VERBATIM_PASTE_MIN_CHARS + 1, step):
-                window = raw[i : i + VERBATIM_PASTE_MIN_CHARS]
-                if window in body:
-                    reasons.append(
-                        f"verbatim paste detected (≥{VERBATIM_PASTE_MIN_CHARS} char run from source)"
-                    )
-                    break
-    return ValidationResult(ok=not reasons, reasons=reasons)
-
-
-def _make_validator(raw_text: str) -> Callable[[str], ValidationResult]:
-    """Build a validator closure that checks a proposed event-note body."""
-
-    def validate(body: str) -> ValidationResult:
-        return validate_event_note_body(body, raw_text=raw_text)
-
-    return validate
-
-
-def compose_body(result, meta: dict) -> ComposedBody:
-    """Compose an event note body.
-
-    For a metadata stub returns fully-rendered body_text and empty prompt_text.
-    For an event note returns empty body_text plus a prompt_text the invoking
-    command feeds to Claude. The command then validates the response via
-    the returned validator.
-    """
-    validator = _make_validator(getattr(result, "text", "") or "")
-    if _is_stub(result):
-        return ComposedBody(
-            note_kind=NOTE_KIND_STUB,
-            body_text=_render_metadata_stub(meta),
-            prompt_text="",
-            validator=validator,
-        )
-    return ComposedBody(
-        note_kind=NOTE_KIND_EVENT,
-        body_text="",
-        prompt_text=_render_event_note_prompt(result, meta),
-        validator=validator,
-    )
-
+# ---------------------------------------------------------------------------
+# Image-grid assembly (theme plumbing)
+# ---------------------------------------------------------------------------
 
 IMAGE_GRID_ROW_SIZE = 3
-"""Number of image embeds per row in the Minimal-theme image grid.
+"""Embeds per row in the Obsidian Minimal-theme image grid.
 
-Obsidian renders consecutive embed lines as a single <p> tag. Minimal's
-img-grid CSS applies `grid-template-columns: repeat(auto-fit, minmax(0, 1fr))`
-to any <p> with ≥2 embeds, so putting all embeds in one paragraph gives
-ONE row with N slivers (the v14.1 field-report F5 bug). Inserting a blank
-line between groups breaks the paragraph and produces a new grid row.
-
-3 per row is a balance: portrait thumbnails read well 3-wide; 4-wide
-crops too tight on narrow panes; 2-wide wastes horizontal space. Tune
-via this constant if domain preferences change.
-"""
+Minimal's img-grid CSS renders each `<p>` with ≥2 embeds as a grid row.
+Joining all embeds in one paragraph gives a single N-column strip;
+inserting blank lines between groups breaks the paragraph and opens a
+new row. 3-wide reads well for portrait thumbnails."""
 
 
 def _chunk_embeds_into_rows(attachments: List[str], row_size: int = IMAGE_GRID_ROW_SIZE) -> str:
-    """Render attachments as blank-line-separated rows for the Minimal grid.
-
-    Each row is a block of up to `row_size` `![[...]]` lines with no blank
-    lines within the row; rows are separated by one blank line. The blank
-    line closes the paragraph so Obsidian opens a new <p>, which Minimal's
-    img-grid CSS then styles as a new grid row.
-    """
     if row_size < 1:
         row_size = 1
     rows = []
@@ -383,15 +161,7 @@ def assemble_note_body(
     attachments: List[str],
     row_size: int = IMAGE_GRID_ROW_SIZE,
 ) -> str:
-    """Assemble the final note body from prose + image embeds.
-
-    - No attachments: just the prose.
-    - 1 attachment: prose, blank line, single embed (no grid).
-    - Multiple attachments: prose, blank line, then embeds chunked into
-      rows of `row_size` with blank lines between rows. Obsidian renders
-      each chunk as its own <p>, so Minimal's img-grid CSS applies per-row
-      instead of flattening all embeds into one single-row strip.
-    """
+    """Assemble note body from prose + row-chunked image embeds."""
     prose = (body_text or "").rstrip()
     if not attachments:
         return prose
@@ -402,3 +172,119 @@ def assemble_note_body(
     if not prose:
         return grid
     return f"{prose}\n\n{grid}"
+
+
+# ---------------------------------------------------------------------------
+# compose_body — minimal shim for existing scan-command call sites
+# ---------------------------------------------------------------------------
+
+
+def validate_event_note_body(
+    body: str,
+    raw_text: Optional[str] = None,
+) -> ValidationResult:
+    """Non-empty body check (v16.0.0 — everything else is the LLM's call).
+
+    Pre-v16 this ran word-count bounds, stop-word matching, and
+    verbatim-paste detection. All of those encoded writing decisions
+    in Python; v16 moves those into the scan skill's prompt to the
+    LLM. `STOP_WORDS` is still honoured so per-project scripts can
+    opt a phrase back in.
+    """
+    reasons: List[str] = []
+    stripped = (body or "").strip()
+    if not stripped:
+        reasons.append("event-note body is empty")
+    low = stripped.lower()
+    for phrase in STOP_WORDS:
+        if phrase in low:
+            reasons.append(f"stop-word present: {phrase!r}")
+    return ValidationResult(ok=not reasons, reasons=reasons)
+
+
+def compose_body(result, meta: dict) -> ComposedBody:
+    """Return a minimal ComposedBody for the scan skill to act on.
+
+    v16.0.0 strip: no template rendering, no stub generation, no
+    validator closure. The scan skill's own markdown instructions
+    tell the host LLM how to write the note; this function just
+    hands back a ComposedBody whose `note_kind` tells the caller
+    whether to write ("event") or skip ("skip", v16 replaces the
+    pre-v16 "stub" path — stubs were an anti-pattern: noise for
+    unreadable files).
+
+    Callers that used to check `composed.note_kind == "stub"` and
+    write `composed.body_text` verbatim should now check
+    `composed.note_kind == "skip"` and not write a note at all.
+    """
+    has_text = bool(getattr(result, "text", "") or "")
+    has_captions = bool(getattr(result, "image_captions", []))
+    has_images = bool(getattr(result, "attachments", []))
+    skipped = bool(getattr(result, "skipped", False))
+
+    if skipped or not (has_text or has_captions or has_images):
+        return ComposedBody(
+            note_kind="skip",
+            body_text="",
+            prompt_text="",
+            validator=_noop_validator,
+        )
+
+    source_basename = Path(meta.get("source_path", "")).name or "(unknown)"
+    raw = getattr(result, "text", "") or ""
+    excerpt = raw[:4000] + ("\n… [truncated]" if len(raw) > 4000 else "")
+    image_paths = list(getattr(result, "image_candidate_paths", []) or [])
+    image_block = (
+        "\n".join(f"- {p}" for p in image_paths)
+        if image_paths
+        else "(no image files extracted)"
+    )
+
+    prompt = f"""# Write the note for this event
+
+You are writing an Obsidian vault note directly from the source. There is
+no writing pipeline between you and the evidence — no validator, no
+template skeleton, no word-count cap. Shape is your choice: prose, bullets,
+callouts, a table — whatever best communicates what happened. Fabrication
+firewall: every specific claim (dates, measurements, quotes, decisions,
+names) must come from the source text, an image you actually Read, or
+context the caller gives you. Do not invent.
+
+## Event metadata
+
+- Date: {meta.get("event_date", "")}
+- Project: {meta.get("project", "")}
+- Domain: {meta.get("domain", "")}
+- Subfolder: {meta.get("subfolder", "(project root)")}
+- Source: {source_basename} ({meta.get("file_type", "unknown")})
+
+## Extracted source text (evidence — never paste verbatim)
+
+{excerpt or "(no text extracted)"}
+
+## Image files you may Read
+
+{image_block}
+
+Use your Read tool on image files you want to reference in the prose.
+Do NOT rely on pre-computed captions — read the images yourself if they
+matter to the event. Images you reference inline should add information
+the prose otherwise lacks.
+
+## Output
+
+Return ONLY the note body. No frontmatter. No top-level `#` heading. No
+image embeds (the caller appends those). Reference images via
+`![[filename.jpg]]` inside prose only when the reference helps the
+reader understand what happened.
+"""
+    return ComposedBody(
+        note_kind=NOTE_KIND_EVENT,
+        body_text="",
+        prompt_text=prompt,
+        validator=lambda b: validate_event_note_body(b, raw_text=raw),
+    )
+
+
+def _noop_validator(_body: str) -> ValidationResult:
+    return ValidationResult(ok=True, reasons=[])

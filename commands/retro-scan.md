@@ -855,94 +855,46 @@ Use the returned `ScanResult` fields to populate note body and frontmatter:
 - `ScanResult.skip_reason` — `"no_content"` (readable file yielded nothing), `"read_limit_reached"` (text-only file at batch limit), or type-specific reason
 - `ScanResult.sources_read` — use for `sources_read` frontmatter field
 - `ScanResult.read_bytes` — use for `read_bytes` frontmatter field
-- `ScanResult.image_grid` — True when ≥3 images embedded; set `cssclasses: [img-grid]` and use `event_writer.assemble_note_body` (chunks embeds into rows of 3; Reading view only)
-- `ScanResult.image_candidate_paths` / `ScanResult.image_caption_prompts` — run vision over every prompt (see 6e-image), then pick ≤10 via `image_vision.select_top_k`
+- `ScanResult.image_grid` — True when ≥1 image embedded; set `cssclasses: [img-grid]` and use `event_writer.assemble_note_body` (row-chunks embeds for the Minimal theme; Reading view only)
+- `ScanResult.image_candidate_paths` — list of compressed JPEG paths. The writing LLM (that's YOU) reads these directly with the Read tool when they're worth referencing in prose. There is no pre-computed captions list any more (vision_runner / image_vision deleted in v16.0.0).
 
 Use `process_batch(source_paths, ...)` to process all events at once (no
 limit by default), or call `process_file` in a loop for single-file control.
 
-### 6e-image. Vision captioning + image curation (v14.5)
+### 6e-image. Read images directly if they help the prose (v16.0.0)
 
 The scan pipeline compressed up to `IMAGE_CANDIDATE_CAP = 20` candidate
-images per event and returned:
-- `result.image_candidate_paths` — every compressed JPEG's local path
-- `result.image_caption_prompts` — one caption prompt per candidate (same order)
+images per event and wrote the ones that made it past the dedup/size
+gate into `_Attachments/`. `result.image_candidate_paths` lists every
+compressed local JPEG path.
 
-**Run vision via `vision_runner` (v14.5).** Prior versions documented
-the vision loop in prose but nothing enforced it, so every scan shipped
-notes with `image_captions=[]` — starving the prose synthesis of
-visual evidence (field review Issue 2). The plugin now ships an
-executable runner. Call it directly — DO NOT attempt to caption images
-manually with the Read tool, that path is unreliable:
+**v16.0.0 strip:** there is no captioning pipeline. Pre-v16 the scan
+ran `vision_runner.run_captions` over every candidate to produce a
+one-sentence-per-image list, then fed those strings into the writing
+prompt — the writing LLM never saw the images, only thin descriptions
+of them. That made notes talk around images instead of about them.
 
-```python
-import sys
-sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
-import vision_runner
-import image_vision
-from scan_pipeline import IMAGE_EMBED_CAP
+Now: decide which images matter for the note you are about to write,
+Read those with the Read tool, and weave what you see into the prose.
+Leave the rest as embeds below — the reader can click through. No
+`image_captions:` frontmatter field is populated any more.
 
-event_meta = {'project': '${PROJECT}', 'event_date': '${EVENT_DATE}', 'source_basename': '${SOURCE_BASENAME}'}
+### 6f. Compose the note body (v16.0.0)
 
-# backend='auto' picks anthropic SDK if ANTHROPIC_API_KEY is set,
-# else claude-cli subprocess, else stub (returns empty). A warning
-# is recorded when the stub path runs, so the memory report surfaces
-# "we did not caption this batch".
-CAPTIONS, CAPTION_WARNINGS = vision_runner.run_captions(
-    result.image_candidate_paths,
-    event_meta,
-    backend='auto',
-    model='claude-haiku-4-5',
-)
-
-# Rank by relevance (keyword overlap with event_meta) and cap at 10.
-selected = image_vision.select_top_k(
-    CAPTIONS,
-    event_meta=event_meta,
-    k=IMAGE_EMBED_CAP,
-)
-
-FINAL_CAPTIONS = [CAPTIONS[i] for i in selected]
-FINAL_ATTACHMENTS = [result.attachments[i] for i in selected if i < len(result.attachments)]
-```
-
-If the scan pipeline already capped `result.attachments` at 10 (fewer
-candidates than prompts is possible), `selected` indices outside the
-attachments list are ignored — they referenced dropped candidates.
-
-Store `FINAL_CAPTIONS` and `FINAL_ATTACHMENTS` for the next steps — the
-event-writer consumes them to write the body, `assemble_note_body`
-chunks them into grid rows, and Step 6i persists `image_captions:` into
-the note's frontmatter so future reconciles don't need to re-run vision.
-
-Add `CAPTION_WARNINGS` to the batch's memory-report warnings list so
-stub-backend or per-image failures are surfaced to the user.
-
-### 6f. Compose the note body via event_writer (v15)
-
-Notes are EVENT DESCRIPTIONS, not dumps of extracted text. The event-writer
-layer translates raw content + vision captions into a diary note — the
-LLM picks the shape (a 2-line field observation, a prose paragraph, a
-bullet-list, a `> [!important]` callout) subject to the fabrication
-firewall. When nothing was readable the pipeline falls back to a
-**metadata stub** — fixed bullets, no prose. Never paste raw text into
-the note body.
-
-v15.0.0 dropped the strict 100–200 word + required-abstract-callout
-rules; the prompt still suggests ~100–200 words as a normal target
-while the LLM is free to write shorter / longer when the content
-warrants it.
+The event-writer does NOT decide shape. The LLM (that's YOU) reads the
+source text + any images worth looking at + prior sibling notes in
+the same subfolder + the project MOC, and writes whatever fits:
+prose, bullets, a callout, a mix. No validator constraints beyond
+"body must be non-empty."
 
 ```python
 import sys
 sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
 import event_writer
 
-# Attach the curated captions so the writer can ground body prose in them.
-result.image_captions = FINAL_CAPTIONS
-result.attachments = FINAL_ATTACHMENTS
-result.images_embedded = len(FINAL_ATTACHMENTS)
-# v14.5 (Issue 3a): img-grid cssclass triggers on ≥1 image, not ≥3.
+# v16.0.0: no captions side-channel. `result.image_candidate_paths`
+# lists every compressed image; the writing LLM Reads the ones it
+# cares about. attachments/images_embedded were set by the pipeline.
 result.image_grid = result.images_embedded >= 1  # IMAGE_GRID_MIN
 
 meta = {
@@ -956,48 +908,52 @@ meta = {
 composed = event_writer.compose_body(result, meta)
 ```
 
-**Announce the decision to the user BEFORE running the LLM** so they see
-what each event will produce. Emit one line per event, e.g.:
+**Announce the decision to the user BEFORE writing** so they see what
+each event will produce. Emit one line per event, e.g.:
 
 - `→ 250415 schematic review memo.txt — reading text + 4 images, writing event note`
-- `→ walkthrough.mp4 — video, writing metadata stub (no prose, just source pointer)`
+- `→ walkthrough.mp4 — unreadable file type, skipping (no note written)`
 - `→ empty.pdf — readable but no content extracted, skipping (no note written)`
 
 Use `composed.note_kind`, `result.skipped`, `result.images_embedded`, and
 `result.text` to pick the right wording. Print to stderr; one line per event.
 
-**If `composed.note_kind == 'stub'`:** the body is already rendered
-deterministically — use `composed.body_text` as the diary body. No LLM
-call required. Continue to 6g.
+**If `composed.note_kind == 'skip'`** (v16 replaced the old "stub"
+kind): do NOT write a note. Stubs — notes that say "I couldn't read
+this" — were noise. If the user wants visibility into an unreadable
+file they can browse the filesystem listing directly.
 
-**If `composed.note_kind == 'event'`:** execute `composed.prompt_text`
-as a sub-prompt (you are the model that runs it). The prompt is
-self-contained — it carries event metadata, the raw-text excerpt, the
-captions, and the fabrication-firewall rules. Return the diary body in
-whatever shape best communicates what happened (prose, bullets, mix).
-Then validate:
+**If `composed.note_kind == 'event'`:** read `composed.prompt_text`
+as guidance, ALSO pull in:
+
+- Prior 3 event-notes in the same subfolder (via `obsidian read`) so
+  you can compare to the previous iteration.
+- The project's MOC (via `obsidian read vault=... path=<domain>/<project>/<project>.md`)
+  so you know where this event sits in the arc.
+
+Read any image in `result.image_candidate_paths` that would help the
+prose — don't rely on pre-computed captions (there aren't any). Write
+the body in whatever shape fits the content. No word-count target.
+Ground every specific claim in evidence you actually read.
+
+Then the only validator check is non-empty body:
 
 ```python
 vresult = composed.validator(diary_body)
+if not vresult.ok:
+    # Only fires on empty output; the strict-validator path was
+    # deleted in v16.0.0.
+    raise RuntimeError(f"event body empty for {meta['source_path']}")
 ```
 
-- **`vresult.ok == True`**: use `diary_body` as the note body.
-- **`vresult.ok == False`** (first attempt): append `vresult.reasons` to
-  the prompt ("Your previous attempt failed these checks: ...") and
-  retry ONCE.
-- **`vresult.ok == False`** (second attempt): fall back to a metadata
-  stub — render the stub body via `event_writer.compose_body` with a
-  synthetic `skipped=True, skip_reason='validator_retry_exhausted'`
-  result, log `validator_retry_exhausted` to warnings, and continue.
-
-**Assemble the final body with image embeds (row-chunked grid; blank lines BETWEEN rows, not within):**
+**Assemble the final body with image embeds (row-chunked grid):**
 
 ```python
 final_body = event_writer.assemble_note_body(diary_body, result.attachments)
 ```
 
-This places the prose first, a blank line, then the `![[…]]` embeds on
-consecutive lines so Obsidian's Minimal theme renders them as a grid.
+Prose first, blank line, then `![[…]]` embeds row-chunked for the
+Minimal theme grid.
 
 ### 6e-2. Proactive wikilinks for metadata stubs
 

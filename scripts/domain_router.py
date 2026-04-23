@@ -76,26 +76,24 @@ def resolve_domain(source_path: str, config: dict) -> DomainResolution:
 def route_event(source_path: str, domain: dict) -> str:
     """Route a source path to a vault subfolder within a domain.
 
-    Checks routing_patterns (first substring match wins, case-insensitive),
-    then content_overrides (filename-based), then falls back to domain fallback.
+    v16.0.0 strip: always returns the domain's fallback subfolder. The
+    substring-matching logic (routing_patterns, content_overrides) that
+    lived here pre-v16 produced silent miscategorisations — a file
+    whose filename happened to contain a pattern token landed in a
+    subfolder that didn't fit the event's phase or purpose. Field
+    report "MOC body is still template-only" called this out: 4 of
+    11 Admin notes in a real project were obviously in the wrong
+    phase because substring matching has no semantic understanding.
+
+    The framework now hands routing decisions to the scan skill,
+    which runs inside a Claude Code session and can reason about the
+    file path + project context + subfolder list. New events land in
+    the fallback; subsequent `/vault-bridge:reconcile` runs ask the
+    LLM to re-route when ambiguous.
+
+    Domains can still declare subfolder NAMES (the convention). What
+    was removed is the hand-maintained `routing_patterns` /
+    `content_overrides` substring-matching rules — those fields are
+    now ignored when present in config.
     """
-    path_lower = source_path.lower()
-    filename_lower = source_path.rsplit("/", 1)[-1].lower() if "/" in source_path else source_path.lower()
-
-    # 1. Content overrides (filename-based) take priority
-    for override in domain.get("content_overrides", []):
-        when = override.get("when", "")
-        # Parse "filename contains X or Y or Z"
-        if "filename contains" in when:
-            keywords_str = when.split("filename contains", 1)[1].strip()
-            keywords = [k.strip() for k in keywords_str.split(" or ")]
-            if any(kw.lower() in filename_lower for kw in keywords if kw):
-                return override["subfolder"]
-
-    # 2. Path-based routing patterns (case-insensitive substring match)
-    for pattern in domain.get("routing_patterns", []):
-        if pattern["match"].lower() in path_lower:
-            return pattern["subfolder"]
-
-    # 3. Fallback
     return domain.get("fallback", "Inbox")

@@ -1,5 +1,124 @@
 # Changelog
 
+## v16.0.0 — Strip the writing pipeline (LLM-is-the-librarian)
+
+Major version because this is a sizable delete. Writing decisions
+(shape, length, captions, routing patterns, validation rules) move
+out of Python and into the scan skill's LLM prompt. Vault-bridge
+becomes a *framework*: transports + file-type handlers + folder
+convention + templates-as-starters. The LLM reads sources directly
+and writes whatever fits.
+
+### Deleted
+
+- **`scripts/vision_runner.py`** (~470 lines) — the serial /
+  batched captioning subprocess loop. Pre-v16 it made the writing
+  LLM talk around images instead of about them: each image got a
+  5-20-word caption, the writing prompt saw those strings but
+  never the images. v16 hands the writing LLM image file paths;
+  it Reads the ones it cares about and weaves observations into
+  prose inline.
+- **`scripts/image_vision.py`** (~110 lines) — the
+  `caption_prompt_for` prompt builder + `select_top_k` relevance
+  scorer. Both were artefacts of the captioning side-channel.
+- **`scripts/validate_event_note.py`** (~270 lines) — the
+  post-hoc auditor of stop-words / word-count / abstract-callout
+  constraints. Those rules were already advisory-only in v15;
+  removing the auditor closes the loop.
+- **`scripts/category_decisions.py`** (~310 lines) — the
+  interactive AskUserQuestion subflow for classifying new
+  subfolders at scan time. Pre-v16 the retro-scan wizard asked
+  the user "is `Meetings/` a thing?" for each new folder it saw.
+  Routing is LLM work now; the scan skill reasons about path +
+  project context instead.
+- **`templates/event_writer/event-note.prompt.md`**,
+  **`templates/event_writer/metadata-stub.body.md`** — the
+  pipeline-driving template skeletons. Replaced by a minimal
+  inline prompt in `event_writer.compose_body`.
+- All four tests files for the deleted modules, plus
+  `tests/integration/test_event_writer_integration.py`.
+
+### Shrunk
+
+- **`scripts/event_writer.py`**: 404 → ~170 lines. Kept:
+  `extract_abstract_callout` (MOC hint extractor, fallback to
+  first prose sentence), `assemble_note_body` (Minimal-theme
+  image-grid chunking), `compose_body` as a minimal shim returning
+  a ComposedBody whose prompt tells the LLM to write directly
+  from evidence, `validate_event_note_body` as a non-empty check
+  + opt-in `STOP_WORDS`. Dropped: `_render_event_note_prompt`,
+  `_render_metadata_stub`, `_body_without_abstract`, the word-count
+  constants (MIN_WORDS/MAX_WORDS advisory-only, now unused), the
+  `NOTE_KIND_STUB` path (new `note_kind="skip"` — callers don't
+  write a note at all for unreadable files; stubs were noise).
+- **`scripts/scan_pipeline.py`**: caption-stage integration ripped
+  out. `ScanResult.image_caption_prompts` kept as an always-empty
+  list for back-compat; the real data is `image_candidate_paths`.
+  `IMAGE_CANDIDATE_CAP` kept as a sanity cap on tmp-dir size. No
+  more `image_vision.caption_prompt_for` call.
+- **`scripts/domain_router.py:route_event`**: substring-matching
+  path-patterns + filename-`content_overrides` logic deleted
+  (~25 lines → 1 line). Always returns the domain's fallback
+  subfolder. Pre-v16 routing was a silent source of
+  miscategorisation — a file whose filename happened to contain
+  a pattern token landed in a subfolder that didn't fit the
+  event's phase. Routing is now LLM work: the reconcile skill
+  reads path + project context + subfolder list and re-routes
+  as needed.
+- **`scripts/validate_frontmatter.py`**: dropped the
+  `image_captions` semantic check (refusal-pattern matcher +
+  short-caption rule) — the captions pipeline producing those
+  strings is gone, so the check has nothing left to catch. Pre-v16
+  poisoned captions on legacy notes are now cosmetic noise at
+  worst, not validation failures.
+
+### Unchanged / kept (by design)
+
+- **Transports** (`scripts/transport_loader.py`,
+  `~/.vault-bridge/transports/*.py`) — `fetch_to_local` +
+  `list_archive` contract is framework plumbing, not writing
+  work.
+- **File-type handlers** (`scripts/file_type_handlers.py`,
+  `~/.vault-bridge/handlers/*.py`) — `read_text` +
+  `extract_images` extraction primitives stay.
+- **Attachment dedup** — `attachment_index` content-hash dedup is
+  plumbing, not a writing decision.
+- **MOC marker pattern** (`<!-- vb:auto-start --> ...
+  <!-- vb:auto-end -->`) — `moc_writer.compose_auto_zone` already
+  defaults to the LLM-authored path when `claude` is on PATH. The
+  deterministic fallback (used when the LLM call fails) is
+  preserved so the MOC body isn't destroyed in failure modes;
+  this is a safety backstop, not the primary path.
+- **Inter-event mesh** — the `## Related` + prev/next footer block
+  produced by `project_index.apply_inter_event_links` stays.
+
+### Migration
+
+- **Routing**: existing notes that landed in miscategorised
+  subfolders via the old substring matcher stay where they are.
+  `/vault-bridge:reconcile --domain <X>` (with an LLM-available
+  session) can re-route them. The
+  `routing_patterns` / `content_overrides` keys in your config
+  are ignored; you can delete them or leave them for now.
+- **Notes with pre-v14.7.4 poisoned `image_captions`**: no longer
+  fail validation. If you want to clean them up, a one-shot
+  reconcile can strip the field.
+- **Metadata stubs**: if you had notes written as "metadata-only
+  events" under v15, they remain valid. Future scans won't
+  write new stubs — unreadable files produce no note.
+- **Scan commands**: retro-scan Step 6e-image (vision captioning)
+  is gone; heartbeat-scan's event-note path is deferred
+  (heartbeat can't safely spawn a writing LLM). Heartbeat now
+  logs "needs retro-scan" for anything that would have been an
+  event note.
+
+### LOC delta
+
+~1,400 lines deleted from `scripts/`, ~600 lines deleted from
+`tests/`, ~30 lines deleted from command `.md` files. What's left
+is mostly transport + handler extraction, attachment dedup, MOC
+framing, and validator shape-checking.
+
 ## v15.1.0 — Issue 2 follow-up (MOC body synthesis + template linking)
 
 Address the four follow-up items from the field report

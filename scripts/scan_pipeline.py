@@ -48,8 +48,10 @@ logger = logging.getLogger(__name__)
 _SKIP_CATEGORIES = frozenset({"video", "audio", "archive"})
 
 # Hard cap on how many candidate images the pipeline will compress per event.
-# Pipelines that extract many images from a single container (e.g. a slide
-# deck) stop after this many, to bound the vision-captioning cost upstream.
+# v16.0.0: retained as a sanity cap so a slide deck with 200 images doesn't
+# balloon the tmp dir. The writing LLM decides which of the compressed
+# files to Read inline — there is no pre-computed caption side-channel
+# any more (vision_runner.py deleted).
 IMAGE_CANDIDATE_CAP = 20
 
 # Hard cap on how many images get embedded in a single event note. Anything
@@ -111,15 +113,16 @@ class ScanResult:
     sources_read: int
     content_confidence: str
     image_grid: bool = False            # True when images_embedded >= IMAGE_GRID_MIN
-    # v14: every compressed candidate image and the prompt the caller runs to
-    # caption it (order-aligned). Populated even when images_embedded is
-    # capped at IMAGE_EMBED_CAP, so the caller can see everything that was
-    # available before curation.
+    # v16.0.0: every compressed candidate image path, in order. The writing
+    # LLM decides which of these to Read inline; there is no pre-computed
+    # caption list any more (vision_runner.py + image_vision.py deleted).
     image_candidate_paths: List[str] = field(default_factory=list)
-    image_caption_prompts: List[str] = field(default_factory=list)
-    # Captions filled in by the command spec after running the prompts.
-    # Empty by default — populated only when the caller injects vision output.
+    # Retained as an always-empty list for back-compat with callers that
+    # still assign to `result.image_captions = [...]`. The writing LLM
+    # Reads images directly; nothing in-process populates this field
+    # post-v16.0.0.
     image_captions: List[str] = field(default_factory=list)
+    image_caption_prompts: List[str] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -363,9 +366,6 @@ def _process_images(
         (attachments, images_embedded, image_grid,
          warnings, errors, candidate_paths, caption_prompts)
     """
-    # Lazy import — avoid cycles.
-    import image_vision
-
     attachments: List[str] = []
     warnings: List[str] = []
     errors: List[str] = []
@@ -447,16 +447,11 @@ def _process_images(
     if not compressed_paths:
         return attachments, images_embedded, False, warnings, errors, candidate_paths, caption_prompts
 
-    # Record candidates + caption prompts for every compressed image — even
-    # beyond the embed cap, so the caller can run vision over them and
-    # re-rank via image_vision.select_top_k if desired.
-    event_meta = {
-        "event_date": event_date,
-        "source_basename": Path(source_path).name,
-    }
+    # v16.0.0: record candidate image paths so the writing LLM can Read
+    # them directly. No caption prompts — the captions side-channel was
+    # deleted along with vision_runner / image_vision.
     for c in compressed_paths:
         candidate_paths.append(str(c))
-        caption_prompts.append(image_vision.caption_prompt_for(str(c), event_meta))
 
     # Step 3: Enforce embed cap. No subfolder split.
     embed_set = compressed_paths[:IMAGE_EMBED_CAP]

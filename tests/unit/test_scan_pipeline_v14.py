@@ -138,7 +138,10 @@ class TestScanResultNewFields:
         assert len(result.image_candidate_paths) == 3
         assert all(isinstance(p, str) for p in result.image_candidate_paths)
 
-    def test_has_caption_prompts_field(self, tmp_path):
+    def test_caption_prompts_field_empty_post_v16(self, tmp_path):
+        """v16.0.0: the caption side-channel is gone. The field is
+        retained as an always-empty list for back-compat with callers
+        that still assign to it; the pipeline never populates it."""
         import scan_pipeline
         img = tmp_path / "photo.jpg"
         _write_fake_jpeg(img)
@@ -155,10 +158,7 @@ class TestScanResultNewFields:
                     dry_run=True,
                 )
         assert hasattr(result, "image_caption_prompts")
-        assert len(result.image_caption_prompts) == 2
-        # Each prompt is non-empty and references the image path.
-        for prompt, path in zip(result.image_caption_prompts, result.image_candidate_paths):
-            assert path in prompt
+        assert result.image_caption_prompts == []
 
     def test_has_image_captions_field_default_empty(self, tmp_path):
         """image_captions defaults to [] until the command spec fills it via vision."""

@@ -450,7 +450,7 @@ For each delta file, follow the same per-event pipeline as retro-scan:
    - `result.sources_read` — use for `sources_read` frontmatter field
    - `result.read_bytes` — use for `read_bytes` frontmatter field
    - `result.image_grid` — True when ≥3 images embedded; set `cssclasses: [img-grid]` and call `event_writer.assemble_note_body` (row-chunked embeds; v14.3 F5)
-   - `result.image_candidate_paths` / `result.image_caption_prompts` — run vision over each prompt, feed captions to `image_vision.select_top_k` to choose ≤10 embeds
+   - `result.image_candidate_paths` — list of compressed image paths. v16.0.0: there is no captioning pipeline. The writing LLM (you) reads images directly with the Read tool when they'd help the prose.
    - `result.warnings` / `result.errors` — log these for the heartbeat memory report
 
    **No-content enforcement:** readable files yielding no text and no images return `skipped=True, skip_reason="no_content"`. No metadata stub is written for them.
@@ -481,22 +481,20 @@ For each delta file, follow the same per-event pipeline as retro-scan:
         'file_type': '$FILE_TYPE',
     }
     composed = event_writer.compose_body(result, meta)
-    if composed.note_kind == 'event':
-        # Autonomous mode cannot run the event-note prompt safely. Fall
-        # back to a metadata stub and log the skip for retro-scan follow-up.
-        result.skipped = True
-        result.skip_reason = 'needs_retro_scan'
-        composed = event_writer.compose_body(result, meta)
-        warnings.append('event-note downgraded to metadata-stub in heartbeat; retro-scan recommended')
+    if composed.note_kind == 'skip':
+        # Unreadable file: skip this one, log for retro-scan follow-up.
+        warnings.append('heartbeat skipping unreadable file; retro-scan recommended')
+        continue  # no note written
 
-    body_text = composed.body_text
-    final_body = event_writer.assemble_note_body(body_text, result.attachments)
+    # v16.0.0: heartbeat is autonomous and does NOT run the event-note
+    # prompt (can't safely spawn a writing LLM from a cron). Log the
+    # event as "needs retro-scan" so the user picks it up interactively.
+    warnings.append('event-note deferred to retro-scan — heartbeat is autonomous')
     ```
 
-5b. For metadata stubs (now all heartbeat notes): inject proactive
-   wikilinks before writing. Run `link_strategy.find_linking_candidates()` and
-   append `## Related notes` wikilinks via `link_strategy.build_related_notes_section()`.
-   This is non-interactive — if no candidates found, write the stub as-is.
+5b. Deferred events are logged with timestamp + source path in the
+    heartbeat memory report. `/vault-bridge:retro-scan <path>` picks
+    them up later.
 6. Apply the fabrication firewall stop-word list
 7. Build frontmatter with the required fields in canonical order:
    `schema_version: 2`, `plugin: vault-bridge`, `domain`, `project`,
