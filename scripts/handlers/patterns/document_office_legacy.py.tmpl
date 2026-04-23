@@ -18,9 +18,15 @@ Extraction strategy (first success wins):
    are sometimes actually modern OOXML zips (PK magic). We check the
    first four bytes; if they are `PK\\x03\\x04`, we forward to the
    modern handler in the same handlers directory.
-2. **External CLI.** `antiword` (`.doc`), `catdoc` (`.doc`), or `catppt`
-   (`.ppt`) — whichever is on PATH. These produce real text.
-3. **Empty string.** When no fallback is available, return "" — and
+2. **Antiword / catdoc / catppt** (for .doc / .ppt): whichever is on
+   PATH. These produce real text.
+3. **LibreOffice headless** (`soffice` or `libreoffice`): the macOS
+   fallback. `antiword` was removed from Homebrew on 2025-06-21 and
+   `catdoc` never shipped on Homebrew, so on modern macOS the antiword
+   branch always fails. Most macOS users with .doc/.ppt files already
+   have LibreOffice installed — we shell out with
+   `soffice --headless --convert-to txt` and read the output file.
+4. **Empty string.** When no fallback is available, return "" — and
    log the install hints via logger.debug for diagnostics.
 
 The previous olefile-based approach (regex over raw OLE2 streams) is
@@ -35,6 +41,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -43,11 +50,16 @@ CAPABILITIES = {{
     "read_text": True,
     "extract_images": False,
     "render_pages": False,
-    "requires_external_tool": "antiword or catdoc (optional)",
+    "requires_external_tool": "antiword, catdoc, or LibreOffice (any one)",
 }}
 
 _OOXML_MAGIC = b"PK\x03\x04"
 _CLI_TIMEOUT_SECS = 20
+_SOFFICE_TIMEOUT_SECS = 60
+_SOFFICE_BINARIES = ("soffice", "libreoffice")
+_SOFFICE_MACOS_APPS = (
+    "/Applications/LibreOffice.app/Contents/MacOS/soffice",
+)
 
 
 def read_text(path: str) -> str:
@@ -70,14 +82,27 @@ def read_text(path: str) -> str:
 
     suffix = Path(path).suffix.lower()
 
-    # 2. External CLI.
+    # 2. antiword / catdoc / catppt (Linux-friendly fast path).
     try:
         if suffix == ".doc":
-            return _run_doc_extractor(path)
-        if suffix == ".ppt":
-            return _run_ppt_extractor(path)
+            text = _run_doc_extractor(path)
+            if text:
+                return text
+        elif suffix == ".ppt":
+            text = _run_ppt_extractor(path)
+            if text:
+                return text
     except Exception as exc:
         logger.debug("CLI extraction failed for %s: %s", path, exc)
+
+    # 3. LibreOffice headless fallback (macOS-friendly — antiword is no
+    #    longer on Homebrew as of 2025-06-21, and catdoc never shipped).
+    try:
+        text = _run_soffice(path)
+        if text:
+            return text
+    except Exception as exc:
+        logger.debug("LibreOffice extraction failed for %s: %s", path, exc)
 
     return ""
 
@@ -182,3 +207,53 @@ def _decode_cli_bytes(raw: bytes) -> str:
         except Exception:
             continue
     return raw.decode("latin-1", errors="replace")
+
+
+def _find_soffice() -> str:
+    """Return the path to a LibreOffice headless binary, or ''."""
+    for name in _SOFFICE_BINARIES:
+        exe = shutil.which(name)
+        if exe:
+            return exe
+    for app in _SOFFICE_MACOS_APPS:
+        if Path(app).exists():
+            return app
+    return ""
+
+
+def _run_soffice(path: str) -> str:
+    """Shell out to LibreOffice headless and return converted text.
+
+    Writes to a per-call temp dir so concurrent invocations don't
+    collide, then reads the resulting `<stem>.txt` back. Returns ''
+    when soffice is absent, the conversion fails, or the output file
+    is missing.
+    """
+    exe = _find_soffice()
+    if not exe:
+        return ""
+    with tempfile.TemporaryDirectory() as td:
+        try:
+            proc = subprocess.run(
+                [exe, "--headless", "--convert-to", "txt", "--outdir", td, path],
+                capture_output=True,
+                timeout=_SOFFICE_TIMEOUT_SECS,
+                check=False,
+            )
+        except Exception as exc:
+            logger.debug("soffice invocation failed for %s: %s", path, exc)
+            return ""
+        if proc.returncode != 0:
+            logger.debug(
+                "soffice returned %d for %s: %s",
+                proc.returncode, path, proc.stderr[:200],
+            )
+            return ""
+        out_file = Path(td) / f"{{Path(path).stem}}.txt"
+        if not out_file.exists():
+            return ""
+        try:
+            return _decode_cli_bytes(out_file.read_bytes())
+        except Exception as exc:
+            logger.debug("soffice output read failed: %s", exc)
+            return ""

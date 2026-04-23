@@ -28,6 +28,7 @@ from __future__ import annotations
 import importlib.util
 import io
 import logging
+import shutil
 import struct
 import tempfile
 import zlib
@@ -36,6 +37,20 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
+
+
+# Extensions that cannot be smoke-tested with a synthetic sample —
+# generating them requires either an external tool we can't depend on
+# or a binary fixture we don't ship. Each value is the reason string
+# reported back to the user so setup output is honest about WHY the
+# smoke test was skipped.
+_SKIP_REASONS: Dict[str, str] = {
+    "dwg": "requires ODA File Converter (external tool)",
+    "3dm": "no synthetic generator (rhino3dm cannot write from Python)",
+    "doc": "no synthetic generator (legacy OLE binary not writable from Python)",
+    "ppt": "no synthetic generator (legacy OLE binary not writable from Python)",
+    "psd": "no synthetic generator (needs real PSD fixture)",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -137,20 +152,33 @@ def _make_pdf() -> bytes:
 
 
 def _make_docx() -> Optional[bytes]:
+    """Tiny .docx with a paragraph AND an embedded PNG.
+
+    The handler claims `extract_images=True` so the fixture must
+    include at least one image for the smoke-test to exercise that
+    capability. Without the embed the selftest false-FAILs even
+    though the handler works correctly on real files.
+    """
     try:
         import docx  # type: ignore
     except Exception:
         return None
     doc = docx.Document()
     doc.add_paragraph("vault-bridge selftest — docx content line.")
+    try:
+        doc.add_picture(io.BytesIO(_PNG_SAMPLE))
+    except Exception as exc:
+        logger.debug("_make_docx: embedded-image insert failed: %s", exc)
     buf = io.BytesIO()
     doc.save(buf)
     return buf.getvalue()
 
 
 def _make_pptx() -> Optional[bytes]:
+    """Tiny .pptx with a title AND an embedded PNG (see _make_docx note)."""
     try:
         import pptx  # type: ignore
+        from pptx.util import Emu  # type: ignore
     except Exception:
         return None
     prs = pptx.Presentation()
@@ -158,12 +186,23 @@ def _make_pptx() -> Optional[bytes]:
     title = slide.shapes.title
     if title is not None:
         title.text = "vault-bridge selftest"
+    try:
+        slide.shapes.add_picture(
+            io.BytesIO(_PNG_SAMPLE),
+            left=Emu(914400),
+            top=Emu(914400),
+            width=Emu(914400),
+            height=Emu(914400),
+        )
+    except Exception as exc:
+        logger.debug("_make_pptx: embedded-image insert failed: %s", exc)
     buf = io.BytesIO()
     prs.save(buf)
     return buf.getvalue()
 
 
 def _make_xlsx() -> Optional[bytes]:
+    """Tiny .xlsx with cells AND an embedded PNG (see _make_docx note)."""
     try:
         import openpyxl  # type: ignore
     except Exception:
@@ -172,9 +211,89 @@ def _make_xlsx() -> Optional[bytes]:
     ws = wb.active
     ws["A1"] = "vault-bridge"
     ws["B1"] = "selftest"
+    try:
+        from openpyxl.drawing.image import Image as XLImage  # type: ignore
+        # openpyxl.Image wants a file path; write the PNG to a
+        # tempfile long enough for wb.save() to consume it.
+        with tempfile.NamedTemporaryFile(
+            suffix=".png", delete=False
+        ) as tf:
+            tf.write(_PNG_SAMPLE)
+            tf_path = tf.name
+        try:
+            ws.add_image(XLImage(tf_path), "D4")
+            buf = io.BytesIO()
+            wb.save(buf)
+            return buf.getvalue()
+        finally:
+            try:
+                Path(tf_path).unlink()
+            except Exception:
+                pass
+    except Exception as exc:
+        logger.debug("_make_xlsx: embedded-image insert failed: %s", exc)
+        # Fall back to an image-less xlsx — better than no sample at all.
+        buf = io.BytesIO()
+        wb.save(buf)
+        return buf.getvalue()
+
+
+def _make_tiff() -> Optional[bytes]:
+    try:
+        from PIL import Image  # type: ignore
+    except Exception:
+        return None
     buf = io.BytesIO()
-    wb.save(buf)
+    Image.new("RGB", (1, 1), color=(255, 0, 0)).save(buf, format="TIFF")
     return buf.getvalue()
+
+
+def _make_heif() -> Optional[bytes]:
+    """Generate a single-pixel HEIF. Requires pillow-heif to be installed."""
+    try:
+        import pillow_heif  # type: ignore
+        try:
+            pillow_heif.register_heif_opener()
+        except Exception:
+            pass
+        from PIL import Image  # type: ignore
+    except Exception:
+        return None
+    buf = io.BytesIO()
+    try:
+        Image.new("RGB", (1, 1), color=(0, 255, 0)).save(
+            buf, format="HEIF"
+        )
+    except Exception as exc:
+        logger.debug("_make_heif: save failed: %s", exc)
+        return None
+    return buf.getvalue()
+
+
+def _make_dxf() -> Optional[bytes]:
+    """Generate a tiny DXF with one TEXT entity via ezdxf."""
+    try:
+        import ezdxf  # type: ignore
+    except Exception:
+        return None
+    try:
+        doc = ezdxf.new("R2010")
+        msp = doc.modelspace()
+        # ezdxf 1.x: `add_text` returns a Text entity; the preferred
+        # placement API differs across releases. Passing dxfattribs
+        # avoids the `.set_pos`/`.set_placement` split.
+        msp.add_text("vault-bridge", dxfattribs={"insert": (0, 0)})
+        buf = io.StringIO()
+        doc.write(buf)
+        return buf.getvalue().encode("utf-8")
+    except Exception as exc:
+        logger.debug("_make_dxf: failed: %s", exc)
+        return None
+
+
+def _make_ai() -> bytes:
+    """Modern .ai is a PDF container — reuse the PDF sample."""
+    return _make_pdf()
 
 
 _SAMPLES: Dict[str, Tuple[bytes, str]] = {}
@@ -196,14 +315,20 @@ def _load_samples() -> None:
         "md": _make_md(),
         "rtf": _make_rtf(),
         "pdf": _make_pdf(),
+        "ai": _make_ai(),
     }
     for ext, data in static_map.items():
         _SAMPLES[ext] = (data, ext)
 
-    dynamic = {
+    dynamic: Dict[str, Optional[bytes]] = {
         "docx": _make_docx(),
         "pptx": _make_pptx(),
         "xlsx": _make_xlsx(),
+        "tiff": _make_tiff(),
+        "tif": _make_tiff(),
+        "heic": _make_heif(),
+        "heif": _make_heif(),
+        "dxf": _make_dxf(),
     }
     for ext, data in dynamic.items():
         if data:
@@ -252,7 +377,20 @@ def _selftest_one(handler_path: Path) -> SelftestResult:
     data, suffix = generate_sample(ext)
     if data is None:
         result.skipped = True
-        result.skip_reason = f"no sample generator for .{ext}"
+        # Prefer the curated reason over a generic "no generator" so
+        # setup output distinguishes "can't write .3dm from Python"
+        # from "requires ODA File Converter" from "pillow-heif not
+        # installed — a real dependency issue that should be fixed".
+        if ext in _SKIP_REASONS:
+            result.skip_reason = _SKIP_REASONS[ext]
+        elif ext in ("heic", "heif"):
+            result.skip_reason = "pillow-heif not installed"
+        elif ext in ("tif", "tiff"):
+            result.skip_reason = "Pillow not installed"
+        elif ext == "dxf":
+            result.skip_reason = "ezdxf not installed"
+        else:
+            result.skip_reason = f"no sample generator for .{ext}"
         return result
 
     mod = _load_handler(handler_path)

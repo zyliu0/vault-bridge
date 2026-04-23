@@ -190,13 +190,20 @@ _EXTERNAL_TOOL_REQUIREMENTS: dict = {
         "severity": "required",
     },
     "document-office-legacy": {
-        "binaries": ["antiword", "catdoc", "catppt"],
+        # LibreOffice is the preferred fallback on macOS — antiword was
+        # removed from Homebrew on 2025-06-21 and catdoc never shipped
+        # on Homebrew. Any one of these is enough; the handler tries
+        # antiword/catdoc first, then falls back to soffice --headless.
+        "binaries": ["antiword", "catdoc", "catppt", "soffice", "libreoffice"],
+        "macos_app": "/Applications/LibreOffice.app/Contents/MacOS/soffice",
         "install_hint": (
-            "Install antiword and/or catdoc for legacy Office text extraction:\n"
-            "  macOS:  brew install antiword\n"
-            "          brew install catdoc   # for .ppt / catppt\n"
-            "  Debian: apt-get install antiword catdoc\n"
-            "Without these, .doc/.ppt files are skipped (return '')."
+            "Install any ONE of these for legacy Office text extraction:\n"
+            "  macOS (recommended):  brew install --cask libreoffice\n"
+            "                        (or install LibreOffice.app)\n"
+            "  Debian/Ubuntu:        apt-get install antiword catdoc\n"
+            "                        apt-get install libreoffice\n"
+            "Without any of these, .doc/.ppt files return '' and log\n"
+            "a debug message. Scans treat them as no_content events."
         ),
         "severity": "optional",
     },

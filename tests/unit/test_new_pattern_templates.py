@@ -343,3 +343,198 @@ class TestHandlerSelftest:
         out = handler_selftest.format_summary(results)
         assert "FAIL" in out
         assert "png" in out
+
+
+class TestSyntheticSamplesContainImages:
+    """v16.0.3 fix (BUG 1 from field follow-up): the docx/pptx/xlsx
+    synthetic samples MUST contain at least one embedded image so the
+    `extract_images=True` capability check isn't a false-FAIL on
+    handlers that actually work on real files.
+    """
+
+    def test_docx_sample_has_embedded_image_extractable(self, tmp_path):
+        data, _ = handler_selftest.generate_sample("docx")
+        assert data is not None
+        source = _render("document_office.py.tmpl", ext="docx")
+        mod = _load_module(source, name="doc_office_docx")
+        sample = tmp_path / "sample.docx"
+        sample.write_bytes(data)
+        out_dir = tmp_path / "out"
+        images = mod.extract_images(str(sample), str(out_dir))
+        assert len(images) >= 1
+
+    def test_pptx_sample_has_embedded_image_extractable(self, tmp_path):
+        data, _ = handler_selftest.generate_sample("pptx")
+        assert data is not None
+        source = _render("document_office.py.tmpl", ext="pptx")
+        mod = _load_module(source, name="doc_office_pptx")
+        sample = tmp_path / "sample.pptx"
+        sample.write_bytes(data)
+        out_dir = tmp_path / "out"
+        images = mod.extract_images(str(sample), str(out_dir))
+        assert len(images) >= 1
+
+    def test_xlsx_sample_has_embedded_image_extractable(self, tmp_path):
+        data, _ = handler_selftest.generate_sample("xlsx")
+        assert data is not None
+        source = _render("document_office.py.tmpl", ext="xlsx")
+        mod = _load_module(source, name="doc_office_xlsx")
+        sample = tmp_path / "sample.xlsx"
+        sample.write_bytes(data)
+        out_dir = tmp_path / "out"
+        images = mod.extract_images(str(sample), str(out_dir))
+        assert len(images) >= 1
+
+
+class TestNewSampleGenerators:
+    """v16.0.3 (BUG 2): new generators for tiff/heic/dxf/ai; curated
+    skip reasons for extensions that cannot be synthetically generated."""
+
+    def test_tiff_generator_emits_valid_bytes(self):
+        data, suffix = handler_selftest.generate_sample("tiff")
+        assert suffix == "tiff"
+        assert data and data[:2] in (b"II", b"MM")  # TIFF magic
+
+    def test_ai_reuses_pdf_sample(self):
+        data, suffix = handler_selftest.generate_sample("ai")
+        assert suffix == "ai"
+        assert data and data.startswith(b"%PDF-")
+
+    def test_dxf_generator_emits_valid_bytes(self):
+        data, suffix = handler_selftest.generate_sample("dxf")
+        # ezdxf may or may not be installed in the runner env. If it
+        # is, we expect bytes. If not, None is acceptable.
+        if data is not None:
+            assert suffix == "dxf"
+            # DXF files start with a section header
+            assert b"SECTION" in data or data.startswith(b"0\n")
+
+    def test_dwg_skip_reason_names_external_tool(self, tmp_path):
+        handlers_dir = tmp_path / "handlers"
+        handlers_dir.mkdir()
+        (handlers_dir / "cad_dwg_dwg.py").write_text(
+            "CAPABILITIES = {'read_text': True, 'extract_images': True, 'render_pages': True}\n"
+            "def read_text(path): return ''\n"
+            "def extract_images(path, out_dir): return []\n",
+            encoding="utf-8",
+        )
+        results = handler_selftest.run_selftest(handlers_dir)
+        assert len(results) == 1
+        r = results[0]
+        assert r.skipped is True
+        assert "ODA File Converter" in r.skip_reason
+
+    def test_psd_skip_reason_is_curated(self, tmp_path):
+        handlers_dir = tmp_path / "handlers"
+        handlers_dir.mkdir()
+        (handlers_dir / "raster_psd_psd.py").write_text(
+            "CAPABILITIES = {'read_text': True, 'extract_images': True, 'render_pages': True}\n"
+            "def read_text(path): return ''\n"
+            "def extract_images(path, out_dir): return []\n",
+            encoding="utf-8",
+        )
+        results = handler_selftest.run_selftest(handlers_dir)
+        assert results[0].skip_reason.startswith("no synthetic generator")
+        assert "no sample generator for" not in results[0].skip_reason
+
+
+class TestLibreOfficeFallback:
+    """BUG 4: document_office_legacy template must try LibreOffice
+    headless when antiword/catdoc are absent. This is the macOS fix —
+    antiword left Homebrew on 2025-06-21 and catdoc never shipped."""
+
+    def test_soffice_is_invoked_when_antiword_absent(self, tmp_path, monkeypatch):
+        """When antiword/catdoc are missing but soffice is on PATH, the
+        handler must shell out to `soffice --headless --convert-to txt`
+        and return the decoded output file. Previously it returned ''
+        silently on macOS even when LibreOffice was installed."""
+        # Simulate: no antiword/catdoc, but soffice present.
+        fake_soffice = str(tmp_path / "fake-soffice")
+        Path(fake_soffice).write_text("#!/bin/sh\nexit 0\n")
+        Path(fake_soffice).chmod(0o755)
+
+        calls = []
+        class _Proc:
+            returncode = 0
+            stdout = b""
+            stderr = b""
+
+        def fake_which(name):
+            if name in ("soffice", "libreoffice"):
+                return fake_soffice
+            return None
+
+        def fake_run(cmd, **kwargs):
+            calls.append(cmd)
+            # Simulate soffice writing sample.txt to --outdir
+            if "--outdir" in cmd:
+                outdir_idx = cmd.index("--outdir") + 1
+                input_path = cmd[-1]
+                stem = Path(input_path).stem
+                (Path(cmd[outdir_idx]) / f"{stem}.txt").write_text(
+                    "vault-bridge extracted text\n", encoding="utf-8"
+                )
+            return _Proc()
+
+        source = _render("document_office_legacy.py.tmpl")
+        mod = _load_module(source, name="legacy_soffice")
+        monkeypatch.setattr(mod.shutil, "which", fake_which)
+        monkeypatch.setattr(mod.subprocess, "run", fake_run)
+
+        sample = tmp_path / "real.doc"
+        # OLE magic so the PK/OOXML branch is skipped.
+        sample.write_bytes(b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1" + b"\x00" * 512)
+
+        result = mod.read_text(str(sample))
+        assert "vault-bridge extracted text" in result
+        # At least one soffice invocation happened.
+        assert any("--convert-to" in str(c) for c in calls)
+
+    def test_soffice_absent_returns_empty_string(self, tmp_path, monkeypatch):
+        """No antiword/catdoc AND no soffice — still never raises, returns ''."""
+        source = _render("document_office_legacy.py.tmpl")
+        mod = _load_module(source, name="legacy_no_tools")
+        monkeypatch.setattr(mod.shutil, "which", lambda _: None)
+        # Ensure macOS app path doesn't exist on the runner
+        original_exists = Path.exists
+        monkeypatch.setattr(
+            Path,
+            "exists",
+            lambda self: False if "/Applications/LibreOffice" in str(self)
+            else original_exists(self),
+        )
+        sample = tmp_path / "real.doc"
+        sample.write_bytes(b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1" + b"\x00" * 512)
+        assert mod.read_text(str(sample)) == ""
+
+
+class TestInstallerRecognizesLibreOffice:
+    """BUG 4: the installer's external-tool detection table must treat
+    soffice/libreoffice as satisfying the document-office-legacy
+    requirement so a user who installed LibreOffice doesn't see a
+    bogus 'CLI missing' warning."""
+
+    def test_no_warning_when_soffice_on_path(self, tmp_path, monkeypatch):
+        olefile_spec = pr.PackageSpec(
+            pip_name="olefile",
+            import_name="olefile",
+            category="document-office-legacy",
+            extensions=["doc"],
+            extract_text=True, extract_images=False,
+            github_url="", preferred=True,
+        )
+        # shutil.which returns None for antiword but a fake path for soffice.
+        def fake_which(name):
+            return "/usr/local/bin/soffice" if name == "soffice" else None
+        monkeypatch.setattr(hi.shutil, "which", fake_which)
+        monkeypatch.setattr(
+            hi.subprocess, "run",
+            lambda *a, **kw: types.SimpleNamespace(returncode=0, stderr="", stdout=""),
+        )
+        monkeypatch.setattr(hi.importlib.util, "find_spec", lambda _: types.SimpleNamespace())
+        monkeypatch.setattr(hi, "get_installed_version", lambda _: "0.47")
+        handlers_dir = tmp_path / "handlers"
+        result = hi.install_builtin("doc", olefile_spec, handlers_dir)
+        assert result.ok is True
+        # No external-tool warning — soffice satisfies the requirement.
+        assert not any("document-office-legacy" in w for w in result.warnings)

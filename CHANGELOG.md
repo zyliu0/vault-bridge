@@ -1,5 +1,69 @@
 # Changelog
 
+## v16.0.3 — v16.0.1 follow-up: LibreOffice + honest selftest (field-report)
+
+Addresses the three residual bugs from the 2026-04-23 follow-up audit:
+selftest false-FAILs on working Office handlers (BUG 1), silent
+selftest skips on extensions we *can* test (BUG 2), and broken .doc/
+.ppt support on modern macOS (BUG 4). BUG 3 shipped in v16.0.2 and
+BUG 5 was already fixed in v16.0.1.
+
+### Fixed
+
+- **BUG 1 — Office synthetic samples now embed an image.**
+  `handler_selftest._make_docx / _make_pptx / _make_xlsx` now stuff a
+  32×32 PNG into every generated sample. The docx/pptx/xlsx handlers
+  claim `extract_images=True` — without an embed, the selftest
+  correctly observed `extract_images=[]` and reported FAIL on
+  handlers that work perfectly against real files. Setup output now
+  reflects handler health, not fixture limitations.
+- **BUG 2 — Honest skip reasons + more synthetic generators.**
+  New generators for `tiff` (Pillow), `heic` / `heif` (pillow-heif),
+  `dxf` (ezdxf), and `ai` (reuses the PDF sample since modern `.ai`
+  is a PDF container). Extensions that genuinely cannot be
+  synthesised from Python (`3dm`, `doc`, `ppt`, `psd`, `dwg`) now
+  report curated skip reasons like "requires ODA File Converter
+  (external tool)" or "no synthetic generator (legacy OLE binary
+  not writable from Python)" instead of the generic "no sample
+  generator for .xxx".
+- **BUG 4 — LibreOffice headless fallback for .doc/.ppt.**
+  `document_office_legacy.py.tmpl` now adds a third extraction path
+  after antiword/catdoc: `soffice --headless --convert-to txt
+  --outdir <tmp> <path>`, with a 60-second timeout and multi-codec
+  decode of the output file. Homebrew removed `antiword` on
+  2025-06-21 and never shipped `catdoc`, so on modern macOS the
+  previous handler returned `""` for every `.doc`/`.ppt` file; the
+  LibreOffice branch closes that gap for the many macOS users who
+  already have LibreOffice installed. The installer's external-tool
+  detection table now treats `soffice` / `libreoffice` /
+  `/Applications/LibreOffice.app/…` as satisfying the
+  `document-office-legacy` requirement, so users with LibreOffice
+  no longer see a bogus "CLI missing" warning at setup time.
+
+### Verified (no change needed)
+
+- **BUG 5** (`setup_probe._check_extract` bypassing
+  `transport.fetch_to_local`) was fixed in v16.0.1. The follow-up
+  audit flagged it as unverified; source confirms it routes through
+  `fetch_to_local` before the extractor runs.
+
+### Tests
+
+`tests/unit/test_new_pattern_templates.py` gains 11 new tests:
+- `TestSyntheticSamplesContainImages` (3 tests) — docx/pptx/xlsx
+  samples actually yield ≥1 extracted image when fed through the
+  real handlers. Prevents BUG 1 from regressing.
+- `TestNewSampleGenerators` (5 tests) — tiff / ai / dxf generators
+  emit valid bytes; dwg and psd produce curated skip reasons that
+  name the actual blocker.
+- `TestLibreOfficeFallback` (2 tests) — the legacy Office handler
+  invokes `soffice --convert-to txt` and reads back the output file;
+  still never raises when no tool is available.
+- `TestInstallerRecognizesLibreOffice` (1 test) — no external-tool
+  warning when `soffice` is on PATH.
+
+Full suite: 1859/1859 passing.
+
 ## v16.0.2 — `save_version` marker self-verification (field-report)
 
 Fixes a small but persistent bug in `/vault-bridge:self-update`: the
