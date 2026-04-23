@@ -1,66 +1,44 @@
 """Compose the body of a project-index MOC.
 
-Architecture:
-    project_index.generate_index (frame: frontmatter, markers, title)
-        └─▶ moc_writer.compose_auto_zone (body content inside markers)
+v16.1.0 — the LLM is the librarian (mandate restated).
 
-v15.1.0 (Issue 2 follow-up Fix 1): the body inside the
-`<!-- vb:auto-start -->` / `<!-- vb:auto-end -->` markers used to be a
-fixed concatenation: Status line, Substructures bullets, Subfolders.
-No synthesis, no narrative, no topic clustering — the MOC read like a
-catalogue instead of an index. `compose_auto_zone` now takes a backend
-parameter so callers can opt into an LLM-authored body while
-deterministic stays the default (safe, no subprocess, no network).
+The auto zone's body used to be produced by one of two paths: a
+deterministic Python string-concat (which read like a catalogue, no
+synthesis, no arc), or a `claude -p --dangerously-skip-permissions`
+subprocess spawn (which had no workspace access and couldn't Read the
+notes the main session just wrote). Both routed composition AROUND
+the session that had the context.
 
-Backends
---------
-- ``"deterministic"`` (default) — Python string-concat that produces
-  exactly the v15.0.0 body. Used by tests and as the fallback when
-  `claude_cli` is unavailable.
-- ``"claude_cli"`` — shells out to
-  ``claude -p --dangerously-skip-permissions`` with an events+
-  subfolders+status prompt and parses the returned markdown. Same
-  fabrication firewall as event-note composition: every claim must
-  be grounded in the events data; no fabricated parties, decisions,
-  or numbers. On timeout, non-zero exit, or suspected refusal, falls
-  back to deterministic so a MOC is never left half-written.
-- ``"auto"`` — claude_cli if `claude` is on PATH and
-  ``VAULT_BRIDGE_MOC_BACKEND`` is not set to ``"off"``; deterministic
-  otherwise. This matches the spec's rollout advice: opt-in for
-  users who actively want LLM synthesis, zero-surprise for everyone
-  else.
+v16.1.0 makes composition the main session's responsibility. Python
+writes the MOC frame (frontmatter, H1, markers, Gantt block,
+Substructures nav) with a deterministic body as the durable baseline.
+The interactive caller (commands/retro-scan.md, commands/reconcile.md)
+then issues an explicit LLM turn that Reads the just-written event
+notes and any top-level source briefs, and overwrites the body between
+``<!-- vb:auto-start -->`` / ``<!-- vb:auto-end -->`` with synthesised
+prose. No subprocess, no backend switch.
+
+Non-interactive callers (commands/heartbeat-scan.md) still write the
+deterministic body and stop — heartbeat is autonomous and has no
+interactive LLM turn to spawn. The deterministic output is always
+valid markdown; it is just the floor, not the ceiling.
+
+Public API
+----------
+    ComposeInput                  — structured inputs built by project_index
+    compose_auto_zone(data, …)    — returns the deterministic body
+    describe_compose_task(data)   — builds the metadata the command uses
+                                    to drive the LLM composition turn
 
 Python 3.9 compatible.
 """
 from __future__ import annotations
 
-import os
-import re
-import shutil
-import subprocess
 from dataclasses import dataclass
-from pathlib import Path
-from typing import List, Optional, Sequence, TYPE_CHECKING
+from typing import List, Sequence, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from project_index import ProjectIndexEvent, ProjectIndexStatus
-
-
-_DEFAULT_MODEL = "claude-haiku-4-5"
-_BATCH_TIMEOUT_SECS = 240.0
-
-# Refusal patterns — shared in spirit with vision_runner but duplicated
-# here to avoid a cross-module import that would make moc_writer's test
-# harness unwieldy. The LLM sometimes refuses to touch a MOC body for
-# the same reasons it refuses image reads (permission prompts, sandbox).
-_REFUSAL_PATTERNS = (
-    "i need permission",
-    "i don't have permission",
-    "do not have permission",
-    "i'm unable to",
-    "i am unable to",
-    "please approve",
-)
 
 
 @dataclass
@@ -82,56 +60,33 @@ class ComposeInput:
     emit_timeline: bool = False
 
 
-def compose_auto_zone(
-    data: ComposeInput,
-    *,
-    backend: str = "deterministic",
-    model: str = _DEFAULT_MODEL,
-    subprocess_runner=None,
-) -> str:
+def compose_auto_zone(data: ComposeInput, *, backend: str = "deterministic", **_ignored) -> str:
     """Return the markdown body to place between the auto markers.
 
+    v16.1.0: the body is always deterministic. The LLM-authored body
+    is produced by the interactive caller (retro-scan / reconcile
+    command) issuing a post-write overwrite turn — not by this
+    function spawning a subprocess. See module docstring.
+
+    ``backend`` is kept as a kwarg for backwards compatibility with
+    pre-v16.1.0 call sites (``moc_backend='auto'``). Any value other
+    than ``"deterministic"`` is silently treated as deterministic —
+    callers that used to opt in to ``claude_cli`` now get the
+    deterministic baseline and should upgrade to the new command flow
+    if they want LLM synthesis.
+
     Args:
-        data: the structured inputs gathered by `project_index.generate_index`.
-        backend: ``"auto"``, ``"claude_cli"``, or ``"deterministic"``.
-        model: the Claude model to use for the ``claude_cli`` backend.
-        subprocess_runner: injection hook for tests; defaults to the
-            real `subprocess.run`.
+        data:    the structured inputs gathered by `project_index.generate_index`.
+        backend: ignored in v16.1.0; retained for back-compat.
 
-    Raises:
-        ValueError: backend is not a known value.
+    Returns:
+        Markdown string for the content between the auto markers.
     """
-    actual = _resolve_backend(backend)
-    if actual == "deterministic":
-        return _render_deterministic(data)
-    if actual == "claude_cli":
-        try:
-            out = _render_claude_cli(data, model, subprocess_runner)
-        except Exception:
-            # Red-line fallback: if the LLM path fails for any reason
-            # the MOC still gets written — deterministic output is
-            # always better than a half-written or missing auto zone.
-            return _render_deterministic(data)
-        if not out.strip() or _looks_like_refusal(out):
-            return _render_deterministic(data)
-        return _postprocess_llm_output(out)
-    raise ValueError(f"moc_writer: unknown backend {backend!r}")
-
-
-def _resolve_backend(backend: str) -> str:
-    if backend == "auto":
-        if os.environ.get("VAULT_BRIDGE_MOC_BACKEND", "").lower() == "off":
-            return "deterministic"
-        if shutil.which("claude"):
-            return "claude_cli"
-        return "deterministic"
-    if backend in ("deterministic", "claude_cli"):
-        return backend
-    raise ValueError(f"moc_writer: unknown backend {backend!r}")
+    return _render_deterministic(data)
 
 
 # ---------------------------------------------------------------------------
-# Deterministic backend — the v15.0.0 body, unchanged output
+# Deterministic backend — the v15.0.0 body layout, unchanged
 # ---------------------------------------------------------------------------
 
 def _render_deterministic(data: ComposeInput) -> str:
@@ -178,185 +133,85 @@ def _render_deterministic(data: ComposeInput) -> str:
 
 
 # ---------------------------------------------------------------------------
-# claude_cli backend — single subprocess, LLM authors the body
+# Compose-task describer — hands the interactive caller what it needs to
+# drive the post-write LLM turn. The command serialises this dict into
+# its prompt; the LLM then Reads the listed notes, composes, and
+# overwrites the auto body.
 # ---------------------------------------------------------------------------
 
-def _render_claude_cli(
-    data: ComposeInput,
-    model: str,
-    subprocess_runner,
-) -> str:
-    prompt = build_moc_prompt(data)
-    runner = subprocess_runner or subprocess.run
-    base_cmd = ["claude", "-p", prompt, "--dangerously-skip-permissions"]
-    try_cmd = base_cmd + ["--model", model]
-    try:
-        r = runner(
-            try_cmd,
-            capture_output=True,
-            text=True,
-            timeout=_BATCH_TIMEOUT_SECS,
-        )
-    except subprocess.TimeoutExpired:
-        raise RuntimeError(
-            f"moc_writer[claude_cli]: call timed out after {_BATCH_TIMEOUT_SECS}s"
-        )
-    if r.returncode != 0:
-        # Older CLIs may reject --model; retry without.
-        r = runner(
-            base_cmd,
-            capture_output=True,
-            text=True,
-            timeout=_BATCH_TIMEOUT_SECS,
-        )
-        if r.returncode != 0:
-            raise RuntimeError(
-                f"moc_writer[claude_cli]: non-zero exit: "
-                f"{(r.stderr or '').strip() or 'no stderr'}"
-            )
-    return (r.stdout or "").strip()
+AUTO_START_MARKER = "<!-- vb:auto-start -->"
+AUTO_END_MARKER = "<!-- vb:auto-end -->"
 
 
-def build_moc_prompt(data: ComposeInput) -> str:
-    """Build the prompt the child Claude uses to author the MOC body.
+def describe_compose_task(data: ComposeInput) -> dict:
+    """Return metadata the retro-scan / reconcile command uses to drive
+    the MOC body LLM composition turn.
 
-    Exposed (not prefixed) so tests can assert the prompt structure
-    without running the subprocess.
+    The command serialises the returned dict into its LLM instruction.
+    Keys are stable across v16.1.x so command changes don't require
+    re-releasing the Python module:
+
+    * ``project_name``, ``domain`` — identify the MOC.
+    * ``notes_to_read`` — filenames of the event notes the LLM should
+      Read before composing. Ordered chronologically so the LLM sees
+      the arc in sequence.
+    * ``subfolders`` — present for the LLM's section-planning.
+    * ``markers`` — start/end markers bracketing the auto zone the
+      LLM should overwrite. NEVER emit the markers themselves in the
+      composed output.
+    * ``suggested_sections`` — soft guidance, not a schema. The LLM
+      picks what the data supports.
+    * ``fabrication_rules`` — mirrors the event-note firewall.
+    * ``mermaid_block`` — pre-rendered Gantt the LLM should emit
+      verbatim as ``## Phase timeline``.
+    * ``preserved_sections`` — user-edited content the LLM must
+      preserve verbatim under its original heading.
+
+    No network calls; no subprocess spawns. Pure data.
     """
-    status = data.status
-    lines = [
-        "# Task",
-        "",
-        "Write the BODY of an Obsidian project-index note (Map of Content).",
-        "You are writing the content that goes between two markers. The",
-        "frame (H1 title, frontmatter, markers) is handled by the caller —",
-        "do NOT emit them. Return ONLY the body markdown.",
-        "",
-        "# Project",
-        "",
-        f"- **Name:** {data.project_name}",
-        f"- **Domain:** {data.domain}",
-        f"- **Status:** {status.status}",
-        f"- **Timeline:** {status.timeline_start} → {status.timeline_end or 'ongoing'}",
-    ]
-    if status.parties:
-        lines.append(f"- **Parties:** {', '.join(status.parties)}")
-    lines.append("")
+    events_sorted = sorted(data.events, key=lambda e: e.event_date)
+    notes_to_read = [ev.note_filename for ev in events_sorted]
 
-    lines.append("# Events")
-    lines.append("")
-    lines.append("One row per event. Subfolder groups them; summary_hint is")
-    lines.append("what that event's note says (empty when no abstract).")
-    lines.append("")
-    for ev in sorted(data.events, key=lambda e: (e.subfolder, e.event_date)):
-        hint = (ev.summary_hint or ev.fallback_hint or "").strip() or "_(no hint)_"
-        lines.append(
-            f"- `{ev.event_date}` [{ev.subfolder or '(root)'}] "
-            f"[[{ev.note_filename}]] — {hint}"
-        )
-    lines.append("")
+    preserved = {}
+    if data.parties_text:
+        preserved["Parties"] = data.parties_text
+    if data.budget_content:
+        preserved["Budget"] = data.budget_content
+    if data.key_decisions_content:
+        preserved["Key Decisions"] = data.key_decisions_content
+    if data.open_items_content:
+        preserved["Open Items"] = data.open_items_content
+    if data.related_projects_content:
+        preserved["Related Projects"] = data.related_projects_content
 
-    if data.subfolders:
-        lines += ["# Subfolders in this project", ""]
-        for sf in data.subfolders:
-            if sf:
-                lines.append(f"- `{sf}`")
-        lines.append("")
-
-    if data.mermaid_block:
-        lines += [
-            "# Pre-computed phase timeline (Mermaid gantt)",
-            "",
-            "Include this block verbatim in your output (you may move it",
-            "to wherever fits your narrative).",
-            "",
-            data.mermaid_block,
-            "",
-        ]
-
-    _append_preserved(lines, "Parties", data.parties_text)
-    _append_preserved(lines, "Budget", data.budget_content)
-    _append_preserved(lines, "Key Decisions", data.key_decisions_content)
-    _append_preserved(lines, "Open Items", data.open_items_content)
-    _append_preserved(lines, "Related Projects", data.related_projects_content)
-
-    lines += [
-        "# Output structure",
-        "",
-        "Produce the BODY markdown. Suggested sections (include only",
-        "those the data supports):",
-        "",
-        "1. **`## Status`** — one line summarising current status and a",
-        "   one-line timeline. No `==highlight==` wrapping.",
-        "2. **Short narrative paragraph** — 2-3 sentences synthesising the",
-        "   project's arc from the events data. Grounded in the event",
-        "   hints + subfolder names; no fabricated decisions or numbers.",
-        "3. **`## Phase timeline`** — include the Mermaid block above,",
-        "   verbatim.",
-        "4. **`## Topic clusters`** — group events by shared topic tokens",
-        "   (e.g. a run of `施工图` drawings → \"Construction drawing",
-        "   series\"). Link each event as `[[name]]`. Skip when there are",
-        "   no obvious clusters.",
-        "5. **`## Open threads`** — ONLY when an event's summary_hint",
-        "   explicitly flagged an unresolved issue. Do NOT invent these.",
-        "6. **`## Subfolders`** — compact flat list.",
-        "7. **Preserved user sections** — if the caller showed you",
-        "   Parties / Budget / Key Decisions / Open Items / Related",
-        "   Projects content above, include them verbatim under their",
-        "   existing headings.",
-        "",
-        "# Fabrication firewall",
-        "",
-        "- Ground every claim in the events table. If an event is not",
-        "  in the list, do not mention it.",
-        "- Do not invent dates, amounts, dimensions, decisions, or party",
-        "  names. Use only what is in this prompt.",
-        "- Keep the tone neutral-reportive. First-person OK but no",
-        "  invented voices.",
-        "- Preserve every wikilink target spelling — they are note",
-        "  filenames.",
-        "- Every event in the table MUST appear at least once in your",
-        "  output (either under Phase timeline, Topic clusters, or an",
-        "  explicit Events list). No event may be dropped.",
-        "",
-        "Return ONLY the body markdown. No preamble, no explanation, no",
-        "fenced code blocks wrapping the whole output.",
-    ]
-    return "\n".join(lines)
-
-
-def _append_preserved(lines: List[str], heading: str, content: str) -> None:
-    stripped = (content or "").strip()
-    if not stripped:
-        return
-    lines += [f"# Preserved `## {heading}` content (emit verbatim)", "", stripped, ""]
-
-
-# ---------------------------------------------------------------------------
-# Output post-processing
-# ---------------------------------------------------------------------------
-
-_FENCE_RE = re.compile(r"^```(?:markdown|md)?\s*\n?", re.IGNORECASE)
-
-
-def _postprocess_llm_output(raw: str) -> str:
-    """Strip wrapping code fences / marker fragments the LLM sometimes adds."""
-    text = raw.strip()
-    # Strip an outer ```markdown ... ``` fence if present.
-    if text.startswith("```"):
-        text = _FENCE_RE.sub("", text, count=1)
-        if text.rstrip().endswith("```"):
-            text = text.rstrip()[:-3].rstrip()
-    # Strip any accidentally-included marker fragments.
-    text = text.replace("<!-- vb:auto-start -->", "").replace(
-        "<!-- vb:auto-end -->", ""
-    )
-    return text.strip()
-
-
-def _looks_like_refusal(text: str) -> bool:
-    low = (text or "").strip().lower()
-    if not low:
-        return False
-    head = low[:200]
-    return any(pat in head for pat in _REFUSAL_PATTERNS)
+    return {
+        "project_name": data.project_name,
+        "domain": data.domain,
+        "notes_to_read": notes_to_read,
+        "subfolders": [sf for sf in data.subfolders if sf],
+        "markers": {
+            "start": AUTO_START_MARKER,
+            "end": AUTO_END_MARKER,
+        },
+        "suggested_sections": [
+            "one-paragraph 'what this project is' grounded in the earliest brief",
+            "chronological arc with turning-point dates linked as wikilinks",
+            "decisions / specs locked in (materials, dimensions, site coordinates)",
+            "open questions the notes flag as unresolved",
+            "## Phase timeline — emit the pre-rendered Mermaid Gantt block verbatim",
+            "## Subfolders — compact list",
+        ],
+        "fabrication_rules": [
+            "Ground every specific date, amount, dimension, name, or decision "
+            "in an event note you Read. No inference beyond the sources.",
+            "Preserve every wikilink target spelling — they are note filenames.",
+            "Every event the scan wrote MUST appear at least once, either as "
+            "a wikilink in the arc or under a topic cluster. No event silently "
+            "dropped.",
+            "No `==highlight==` wrapping on the Status line.",
+            "Never emit the `vb:auto-start` / `vb:auto-end` markers themselves; "
+            "write only the BODY that goes between them.",
+        ],
+        "mermaid_block": data.mermaid_block,
+        "preserved_sections": preserved,
+    }

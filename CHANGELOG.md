@@ -1,5 +1,85 @@
 # Changelog
 
+## v16.1.0 — free the LLM to compose MOCs (field-report)
+
+Addresses the 2026-04-24 field report "free the LLM to compose MOC
+and read images". Two bugs, one structural cause: the plugin routed
+narrative work *around* the main session instead of *to* it. The
+MOC had no body (deterministic catalogue OR a blind subprocess spawn
+with no workspace access); image-only event notes got one-sentence
+stubs because the scan processed events in a Python batch that never
+paused the writing LLM to Read an image. Fixed by stripping pipeline,
+not adding it.
+
+### Changed
+
+- **retro-scan Step 6 is per-event, not batch.** Walk events one at
+  a time: `process_file` per event, Read images, compose body, write
+  note, THEN move on. `process_batch` is explicitly forbidden in the
+  command; the library function stays for tool callers. The v16.0.3
+  field report's 10-image D5 Render case (MaterialID / AO /
+  Reflection / ZDepth / AI passes) got a one-sentence body because
+  the LLM never Read a single JPEG — by the time composition ran,
+  the event had scrolled off. Per-event pacing keeps images fresh.
+- **retro-scan Step 6e-image is a mandate.** For every event with
+  ≥1 path in `result.image_candidate_paths`, the LLM MUST Read at
+  least one image with the Read tool before composing the body.
+  Practical guidance for candidate-count tiers and workflow-
+  signal detection is in the updated command.
+- **retro-scan Step 7b-moc (new) — LLM-authored MOC body.**
+  `project_index.update_index` now writes the MOC FRAME (frontmatter,
+  H1, Gantt, Substructures nav, markers) with the deterministic
+  body as a durable baseline. A new Step 7b-moc issues an explicit
+  LLM composition turn: Read the project's notes + top-level briefs,
+  Read the MOC frame, overwrite the content between `vb:auto-start`
+  and `vb:auto-end` with synthesised prose grounded in the notes.
+  No subprocess spawn, no backend dispatch — the main session
+  composes because it is the only entity that has Read the sources.
+  The `/obsidian-markdown` skill is referenced for idiomatic
+  callouts / wikilinks / embeds.
+- **reconcile --rebuild-indexes** gets the same LLM-authored MOC
+  body overwrite step as retro-scan.
+- **heartbeat-scan stays deterministic for the MOC body.** Autonomous
+  runs have no interactive LLM turn to spawn; the deterministic
+  baseline is the final output. Users who want LLM-authored MOC
+  bodies run `/vault-bridge:retro-scan` or `/vault-bridge:reconcile
+  --rebuild-indexes` interactively.
+
+### Removed
+
+- **`moc_writer._render_claude_cli`** and its scaffolding
+  (`build_moc_prompt`, `_resolve_backend`, `_postprocess_llm_output`,
+  `_looks_like_refusal`, `_REFUSAL_PATTERNS`, `_DEFAULT_MODEL`,
+  `_BATCH_TIMEOUT_SECS`, `_FENCE_RE`). The subprocess path spawned
+  a fresh Claude with no workspace access and a 240 s timeout — it
+  could never Read the just-written notes, so even the "LLM" backend
+  was blind. Replaced by the Step 7b-moc turn in the calling command.
+- **`compose_auto_zone` `backend` dispatch.** The kwarg is retained
+  for backwards compatibility — pre-v16.1.0 callers passing
+  `backend='auto'` or `backend='claude_cli'` silently get the
+  deterministic body — but no longer selects a subprocess.
+
+### Added
+
+- **`moc_writer.describe_compose_task(data)`** — returns a stable
+  dict the retro-scan / reconcile command serialises into its LLM
+  instruction: `notes_to_read` (chronological), `subfolders`,
+  `markers`, `suggested_sections`, `fabrication_rules`,
+  `mermaid_block`, `preserved_sections`. No network, no subprocess.
+
+### Tests
+
+- `tests/unit/test_moc_writer.py` rewritten — deletes
+  `TestClaudeCliBackend` (7 tests), `TestBuildMocPrompt` (5 tests),
+  `TestBackendResolution` (6 tests). Adds `TestBackendBackCompat`
+  (3 tests — stale callers get deterministic, no raise), rewrites
+  `TestDescribeComposeTask` (8 tests — notes chronological, markers
+  exposed, fabrication rules cover wikilinks/events/markers,
+  preserved sections only when non-empty). End-to-end
+  `TestGenerateIndexIntegration` confirms
+  `moc_backend` kwarg is ignored.
+- Full unit suite green: 1882 passing.
+
 ## v16.0.4 — auto-install external tools + LibreDWG default (field-report)
 
 Addresses the v16.0.3 follow-up field report. The user-agent's core

@@ -96,6 +96,10 @@ class TestDetectMissingTools:
             et.shutil, "which",
             lambda b: "/opt/homebrew/bin/brew" if b == "brew" else None,
         )
+        # Block the macOS app-bundle short-circuit too; a test machine
+        # that actually has LibreOffice installed at the canonical
+        # path would otherwise report the spec as satisfied.
+        monkeypatch.setattr(et.Path, "exists", lambda self: False)
         missing = et.detect_missing_tools(["document-office-legacy"])
         assert len(missing) == 1
         assert missing[0].spec.name == "libreoffice"

@@ -552,9 +552,11 @@ result = pi.update_index(
     workdir=os.getcwd(),
     vault_name=os.environ['VB_VAULT'],
     today=date.today(),
-    moc_backend='auto',  # v15.1.0: LLM-authored MOC when `claude` is on
-                          # PATH. VAULT_BRIDGE_MOC_BACKEND=off forces the
-                          # deterministic path.
+    # v16.1.0: heartbeat is autonomous and has no interactive LLM
+    # turn to spawn a MOC-body composition over — the deterministic
+    # baseline is the final output for heartbeat scans. Users who
+    # want LLM-authored MOC bodies should run /vault-bridge:retro-scan
+    # or /vault-bridge:reconcile --rebuild-indexes interactively.
 )
 print(json.dumps(result))
 " VB_PROJECT=\"$PROJECT_NAME\" VB_DOMAIN=\"$DOMAIN_NAME\" \

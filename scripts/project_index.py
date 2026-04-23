@@ -638,7 +638,7 @@ def generate_index(
     existing: Optional[dict],
     today: date,
     *,
-    moc_backend: str = "deterministic",
+    moc_backend: str = "deterministic",  # v16.1.0: ignored — always deterministic.
 ) -> str:
     """Generate the project index MOC note.
 
@@ -811,13 +811,15 @@ def generate_index(
     # gantt block. Clusters events by subfolder + contiguous-date runs.
     mermaid_block = _render_timeline_mermaid(project_name, sorted_events)
 
-    # v15.1.0 (Issue 2 follow-up Fix 1): the body inside the auto
-    # markers is composed by `moc_writer`, which picks a backend based
-    # on the `moc_backend` argument. The deterministic backend produces
-    # exactly the v15.0.0 layout (plus the Mermaid block). The
-    # claude_cli backend authors a narrative + topic-clustered body
-    # with the same inputs; if it fails for any reason it falls back
-    # to deterministic so the MOC is never left half-written.
+    # v16.1.0: the auto-zone body is the deterministic baseline. The
+    # interactive caller (retro-scan / reconcile command) follows up
+    # with an explicit LLM composition turn that Reads the just-written
+    # notes and overwrites the auto body with synthesised prose. The
+    # deterministic body is the durable floor — if the LLM turn fails
+    # or is skipped (heartbeat-scan is non-interactive), the MOC still
+    # has a valid body. `moc_backend` is retained as a kwarg for
+    # backward compatibility but no longer selects a subprocess
+    # backend; it is silently ignored.
     from moc_writer import ComposeInput, compose_auto_zone  # local: avoid cycle
     compose_input = ComposeInput(
         project_name=project_name,
@@ -836,7 +838,7 @@ def generate_index(
         subfolder_bullets=subfolder_lines,
         emit_timeline=emit_timeline,
     )
-    auto_body = compose_auto_zone(compose_input, backend=moc_backend)
+    auto_body = compose_auto_zone(compose_input)
     auto_block = [VB_AUTO_START, "", auto_body, "", VB_AUTO_END]
 
     # Tail preservation. With markers: honour whatever the user has
@@ -916,7 +918,7 @@ def update_index(
     vault_name: str,
     today: Optional[date] = None,
     *,
-    moc_backend: str = "deterministic",
+    moc_backend: str = "deterministic",  # v16.1.0: ignored, kept for back-compat.
 ) -> dict:
     """Orchestrate reading, generating, and writing the project index note.
 
@@ -977,7 +979,6 @@ def update_index(
         subfolders=all_subfolders,
         existing=existing,
         today=today,
-        moc_backend=moc_backend,
     )
 
     created = False

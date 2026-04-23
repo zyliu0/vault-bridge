@@ -704,20 +704,37 @@ then STOP before processing. No file reads, no note writes, no index updates.
 
 ## Step 6 — process each event
 
-For each detected event, in chronological order:
+**v16.1.0 — per-event pacing is mandatory.** Walk events one at a time
+in chronological order. For each event you:
+
+1. Run `scan_pipeline.process_file` (single file, not `process_batch`).
+2. If the pipeline returned image candidates, **Read at least one**
+   with the Read tool before writing the body.
+3. Compose the body. Ground every specific claim in text or images
+   you actually Read.
+4. Write the note via `obsidian create`.
+5. THEN move to the next event.
+
+Do NOT collect every event's `ScanResult` into a list and
+batch-compose bodies afterwards — by the time you reach composition
+the images are no longer in context, and you fall back to sentence-
+long stubs like "目录: /_f-a-n/…" that the v16.0.3 field report
+flagged. The Python layer still owns fetch, compress, attachment
+naming, and frontmatter assembly; the body composition slot is an
+LLM-authored content hook, turn by turn, with images fresh.
 
 ### Read rate
 
-`process_batch` has no default read limit — all files are fully read.
-Pass `--max-reads N` on the CLI (or `max_reads=N` in Python) to cap text
-extraction at N files per batch, for example when throttling on a very
-large archive. Visual/CAD files (`render_pages=True`) always have their
-images extracted regardless of any cap.
+Single-file iteration means `process_file` per event. Pass `--max-reads N`
+on the CLI to cap text extraction at N events for this scan (e.g.
+throttling on a very large archive). Visual/CAD files
+(`render_pages=True`) always have their images extracted regardless of
+any cap.
 
-This is a hard rule baked into the plugin. It cannot be overridden by the
-user mid-scan. The limit exists because the model shares context across
-the session — large file reads accumulate in cache even when individual
-files are small.
+This is a hard rule baked into the plugin. It cannot be overridden by
+the user mid-scan. The limit exists because the model shares context
+across the session — large file reads accumulate in cache even when
+individual files are small.
 
 ### 6a. Compute event_date
 
@@ -858,26 +875,44 @@ Use the returned `ScanResult` fields to populate note body and frontmatter:
 - `ScanResult.image_grid` — True when ≥1 image embedded; set `cssclasses: [img-grid]` and use `event_writer.assemble_note_body` (row-chunks embeds for the Minimal theme; Reading view only)
 - `ScanResult.image_candidate_paths` — list of compressed JPEG paths. The writing LLM (that's YOU) reads these directly with the Read tool when they're worth referencing in prose. There is no pre-computed captions list any more (vision_runner / image_vision deleted in v16.0.0).
 
-Use `process_batch(source_paths, ...)` to process all events at once (no
-limit by default), or call `process_file` in a loop for single-file control.
+**Call `process_file` per event**, inside the Step 6 loop. `process_batch`
+exists in the library for batch tools but **MUST NOT** be used by the
+retro-scan command — it defeats per-event image reading (v16.1.0 rule).
 
-### 6e-image. Read images directly if they help the prose (v16.0.0)
+### 6e-image. Read images before composing (v16.1.0 mandate)
 
 The scan pipeline compressed up to `IMAGE_CANDIDATE_CAP = 20` candidate
 images per event and wrote the ones that made it past the dedup/size
 gate into `_Attachments/`. `result.image_candidate_paths` lists every
 compressed local JPEG path.
 
-**v16.0.0 strip:** there is no captioning pipeline. Pre-v16 the scan
-ran `vision_runner.run_captions` over every candidate to produce a
-one-sentence-per-image list, then fed those strings into the writing
-prompt — the writing LLM never saw the images, only thin descriptions
-of them. That made notes talk around images instead of about them.
+**v16.1.0 — the mandate:** For every event with at least one path in
+`result.image_candidate_paths`, you MUST Read at least one image with
+the Read tool BEFORE composing the body. The v16.0.3 field report's
+10-image D5 Render case (MaterialID, AO, Reflection, ZDepth, plus
+three AI-denoised passes) got a one-sentence body because the LLM
+never Read a single JPEG — by the time composition ran, the event was
+context that had already scrolled off.
 
-Now: decide which images matter for the note you are about to write,
-Read those with the Read tool, and weave what you see into the prose.
-Leave the rest as embeds below — the reader can click through. No
-`image_captions:` frontmatter field is populated any more.
+Practical guidance:
+
+- For **1-3 candidates**: Read all of them.
+- For **≥4 candidates**: Read 2-4 deliberately chosen ones. Look for
+  filename hints suggesting a workflow (render passes, layer exports,
+  before/after pairs, multi-angle views) and cover the workflow, not
+  all N images.
+- For **folder-level events** (multiple source images under one
+  parent): Read a sample that covers the folder's variety.
+- If the Read tool refuses or an image is corrupt: log it and proceed
+  — the note says "referenced but not embedded" via the existing
+  metadata-stub fallback in Step 6e-2. Do NOT fabricate.
+
+Weave what you actually Read into the prose — visual specifics
+(render passes, colour palettes, subject, composition), workflow
+signals (software, pipeline stage), evolution compared to sibling
+images. Leave the rest as embeds below — the reader can click
+through. No `image_captions:` frontmatter field is populated any
+more; there is no captioning pipeline.
 
 ### 6f. Compose the note body (v16.0.0)
 
@@ -1281,10 +1316,10 @@ result = pi.update_index(
     workdir=os.getcwd(),
     vault_name=os.environ['VB_VAULT'],
     today=date.today(),
-    moc_backend='auto',  # v15.1.0: LLM-authored MOC body when `claude` is
-                          # on PATH; deterministic fallback otherwise. Set
-                          # VAULT_BRIDGE_MOC_BACKEND=off to force the
-                          # deterministic path for this scan.
+    # v16.1.0: this writes the FRAME (frontmatter, H1, Gantt,
+    # Substructures nav, markers) with the deterministic body as a
+    # durable baseline. Step 7.5 below overwrites the auto body
+    # with LLM-authored prose grounded in the notes just written.
 )
 print(json.dumps(result))
 " VB_PROJECT=\"$PROJECT_NAME\" VB_DOMAIN=\"$DOMAIN_NAME\" \
@@ -1326,6 +1361,109 @@ print(json.dumps({'summary_hint': summary, 'fallback_hint': fallback}))
 #    \"parties\": []}
 # On MOC rows, summary_hint wins; fallback_hint prevents bare bullets.
 ```
+
+### 7b-moc — overwrite the MOC auto body with synthesised prose (v16.1.0)
+
+Step 7b wrote the MOC frame (frontmatter, H1, Gantt block, Substructures
+nav, markers) with a deterministic body between the
+`<!-- vb:auto-start -->` / `<!-- vb:auto-end -->` markers. That body
+is the durable baseline — a catalogue, not a narrative. For each
+project touched in this scan you now compose the narrative yourself,
+grounded in the notes and briefs you just wrote.
+
+Fetch the compose-task metadata once per project:
+
+```bash
+python3 -c "
+import os, sys, json
+from datetime import date
+sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
+import project_index as pi
+import moc_writer
+
+events = [pi.ProjectIndexEvent(**e) for e in json.loads(os.environ['VB_EVENTS_JSON'])]
+subfolders = sorted({e.subfolder for e in events if e.subfolder})
+status = pi.infer_status(events, date.today())
+# The same ComposeInput project_index builds internally — reconstructed
+# here so the command gets the stable dict it needs for the LLM turn.
+compose_input = moc_writer.ComposeInput(
+    project_name=os.environ['VB_PROJECT'],
+    domain=os.environ['VB_DOMAIN'],
+    events=events,
+    subfolders=subfolders,
+    status=status,
+)
+print(json.dumps(moc_writer.describe_compose_task(compose_input)))
+" VB_PROJECT=\"$PROJECT_NAME\" VB_DOMAIN=\"$DOMAIN_NAME\" \
+  VB_EVENTS_JSON=\"$EVENTS_JSON\"
+```
+
+The returned dict carries:
+
+- `project_name`, `domain`
+- `notes_to_read` — filenames of every event note, chronological
+- `subfolders` — non-empty subfolder list
+- `markers` — `{start, end}` — the auto-zone delimiters you MUST NOT
+  emit in your composed output
+- `suggested_sections` — soft guidance
+- `fabrication_rules` — the firewall
+- `preserved_sections` — user-edited `Parties` / `Budget` / `Key
+  Decisions` / `Open Items` / `Related Projects` content to emit
+  verbatim under its original heading
+
+**Then compose the body yourself** — this is an explicit LLM turn,
+not a subprocess spawn:
+
+1. **Read the MOC as written by Step 7b** via
+   `obsidian read vault="$VAULT_NAME" path="$DOMAIN/$PROJECT/$PROJECT.md"`.
+   Locate the auto-start and auto-end markers and note the frame
+   content around them (frontmatter, H1, anything outside the
+   markers). You will keep the frame bit-exact.
+2. **Read every note in `notes_to_read`** via
+   `obsidian read vault="$VAULT_NAME" path="$DOMAIN/$PROJECT/$SUBFOLDER/$NOTE.md"`.
+   You wrote these; they are the primary source. Read them again so
+   the details are fresh.
+3. **Read the top-level briefs** — any PDF / PPTX / DOCX / MD file
+   directly under the project root that looks like a brief, RFP, or
+   kickoff document (often the earliest-dated note). These ground
+   the "what this project is" paragraph.
+4. **Use the `/obsidian-markdown` skill** for callouts, wikilinks,
+   and embeds so the output is idiomatic.
+5. **Compose the body** between the markers. Include whatever the
+   data supports — paragraphs, bullets, mermaid blocks, callouts,
+   wikilinks. There is no word-count target. There is no rigid
+   section schema. Suggested anchor points from the task:
+   - One paragraph of "what this project is" grounded in the earliest
+     brief, with a wikilink to the source note.
+   - Chronological arc with turning-point dates linked as wikilinks.
+   - Decisions / specs locked in (materials, dimensions, site
+     coordinates) — cite the note each came from.
+   - Open questions — only when a note flagged one. Do not invent.
+   - `## Phase timeline` — emit the pre-rendered Mermaid gantt block
+     from `mermaid_block` verbatim.
+   - `## Subfolders` — compact list.
+   - Any preserved user section — verbatim under its existing
+     heading.
+6. **Fabrication firewall** — every specific date, dimension, name,
+   amount, or decision must come from a note or brief you Read.
+   Preserve wikilink target spelling. Every event in
+   `notes_to_read` MUST appear at least once in your output (as a
+   wikilink somewhere). Never emit `vb:auto-start` /
+   `vb:auto-end` themselves in the body.
+7. **Write the MOC back** via
+   `obsidian create vault="$VAULT_NAME" name="$PROJECT" path="$DOMAIN/$PROJECT" content="<frame + your new body + tail>" overwrite silent`.
+   The frame and tail stay bit-exact; only the content between the
+   markers changes.
+
+**Fallback:** if you cannot complete the composition turn (obsidian
+CLI errors, empty body, etc.), do NOT overwrite the MOC — the
+deterministic baseline from Step 7b remains in place. Log the
+failure in Step 9's memory report as `moc_llm_compose_failed:
+[{project, reason}, …]` and move on.
+
+This step is the heart of the v16.1.0 rewrite. The main session is
+the only entity that has Read the sources — it is the entity that
+synthesises. The plugin prepares the canvas; the LLM fills it in.
 
 ### 7c — apply inter-event wikilinks (v15.0.0)
 
