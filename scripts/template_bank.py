@@ -46,6 +46,18 @@ def _file_hash(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()[:12]
 
 
+def file_hash(path: Path) -> str:
+    """Public alias for the template-source hash used by `get_template_diff`.
+
+    Callers that have just installed a template need the exact hash that
+    the diff comparison will produce later, so they can persist it as
+    the per-template marker in `plugin-version.json`. Using anything
+    else (e.g. the string ``"installed"``) makes `get_template_diff`
+    treat every installed template as modified on the next run.
+    """
+    return _file_hash(path)
+
+
 @dataclass
 class DiffResult:
     added: list[TemplateFile]

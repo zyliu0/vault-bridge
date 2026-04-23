@@ -203,3 +203,84 @@ class TestInstallTemplatesWithFamilyIndex:
         # No subprocess calls in dry-run mode.
         assert mock_sub.run.call_count == 0
         assert "architecture/phase-event.md" in result.skipped
+
+
+class TestInstallResultHashes:
+    """v16.0.2 regression: install_templates must return source-file
+    hashes so callers can persist them as the plugin-version.json marker.
+
+    Pre-v16.0.2, `commands/self-update.md` stored the literal string
+    ``"installed"`` as each marker. `get_template_diff` compares markers
+    against a 12-char SHA256 prefix, so no stored marker ever matched —
+    every template was reported as modified on every self-update.
+    """
+
+    def test_install_result_exposes_hashes_dict(self, tmp_path):
+        (tmp_path / "templates" / "architecture").mkdir(parents=True)
+        src = tmp_path / "templates" / "architecture" / "phase-event.md"
+        src.write_text("body a\n")
+
+        with patch.object(template_installer, "subprocess") as mock_sub:
+            mock_sub.run.return_value = type(
+                "R", (), {"returncode": 0, "stdout": "", "stderr": ""}
+            )()
+            result = template_installer.install_templates(
+                ["architecture/phase-event.md"],
+                plugin_root=tmp_path,
+                vault_name="V",
+            )
+
+        assert "architecture/phase-event.md" in result.hashes
+        marker = result.hashes["architecture/phase-event.md"]
+        assert isinstance(marker, str) and len(marker) == 12
+        assert marker != "installed"
+
+    def test_hashes_match_template_bank_diff_marker(self, tmp_path):
+        """The marker the installer returns must satisfy
+        get_template_diff so no false-positive 'modified' is reported."""
+        import template_bank
+
+        (tmp_path / "templates" / "architecture").mkdir(parents=True)
+        src = tmp_path / "templates" / "architecture" / "phase-event.md"
+        src.write_text("body b\n")
+
+        with patch.object(template_installer, "subprocess") as mock_sub:
+            mock_sub.run.return_value = type(
+                "R", (), {"returncode": 0, "stdout": "", "stderr": ""}
+            )()
+            result = template_installer.install_templates(
+                ["architecture/phase-event.md"],
+                plugin_root=tmp_path,
+                vault_name="V",
+            )
+
+        # Mock list_templates to read from our temp bank.
+        original_list = template_bank.list_templates
+        try:
+            template_bank.list_templates = lambda plugin_root=None: original_list(tmp_path)
+            diff = template_bank.get_template_diff(result.hashes)
+        finally:
+            template_bank.list_templates = original_list
+
+        # With the real hash as marker, nothing appears modified.
+        assert diff.modified == []
+        assert diff.added == []
+
+    def test_pre_fix_marker_would_show_template_as_modified(self, tmp_path):
+        """Control case: storing 'installed' (the v16.0.0 bug) makes
+        get_template_diff flag the template as modified forever."""
+        import template_bank
+
+        (tmp_path / "templates").mkdir()
+        src = tmp_path / "templates" / "x.md"
+        src.write_text("body c\n")
+
+        original_list = template_bank.list_templates
+        try:
+            template_bank.list_templates = lambda plugin_root=None: original_list(tmp_path)
+            diff = template_bank.get_template_diff({"x.md": "installed"})
+        finally:
+            template_bank.list_templates = original_list
+
+        assert len(diff.modified) == 1
+        assert diff.modified[0].relative_path == "x.md"

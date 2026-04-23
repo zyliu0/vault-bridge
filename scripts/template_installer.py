@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-from template_bank import list_templates
+from template_bank import file_hash, list_templates
 
 _TEMPLATES_DIR = Path(__file__).resolve().parent.parent / "templates"
 
@@ -30,6 +30,17 @@ class InstallResult:
     installed: list[str]
     skipped: list[str]
     errors: list[str]
+    # Map of relative_path -> source-file hash for every template just
+    # written. Callers MUST persist these into `plugin-version.json`
+    # under `templates_installed` so the next `get_template_diff` run
+    # can compare apples to apples. Pre-v16.0.2 callers stored the
+    # literal string "installed", which never matched a SHA256 prefix —
+    # every template then showed up as modified on every self-update.
+    hashes: dict = None  # type: ignore[assignment]
+
+    def __post_init__(self) -> None:
+        if self.hashes is None:
+            self.hashes = {}
 
 
 def install_templates(
@@ -53,7 +64,7 @@ def install_templates(
     """
     root = plugin_root or (_TEMPLATES_DIR.parent)
     templates_dir = root / "templates"
-    result = InstallResult(installed=[], skipped=[], errors=[])
+    result = InstallResult(installed=[], skipped=[], errors=[], hashes={})
 
     for rel_path in template_paths:
         src = templates_dir / rel_path
@@ -76,6 +87,12 @@ def install_templates(
             content = _inject_family_footer(content, rel_path)
             _write_to_vault(vault_name, dest_path, content)
             result.installed.append(rel_path)
+            # v16.0.2: record the source-file hash so callers can
+            # persist it as the plugin-version.json marker. The hash
+            # function matches `template_bank.list_templates`, which
+            # `get_template_diff` compares against — same source of
+            # truth on both sides.
+            result.hashes[rel_path] = file_hash(src)
         except Exception as e:
             result.errors.append(f"failed to install {rel_path}: {e}")
 

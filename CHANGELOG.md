@@ -1,5 +1,43 @@
 # Changelog
 
+## v16.0.2 — `save_version` marker self-verification (field-report)
+
+Fixes a small but persistent bug in `/vault-bridge:self-update`: the
+per-template marker in `~/.vault-bridge/plugin-version.json` was
+stored as the literal string `"installed"` instead of the template's
+source-file hash. `template_bank.get_template_diff` compares markers
+against a 12-char SHA256 prefix, so the "installed" sentinel never
+matched — every previously-installed template showed up as modified
+on every self-update run. Templates were written correctly; the
+drift was cosmetic but made the diff report untrustworthy.
+
+### Changed
+
+- `scripts/template_bank.py` — exposes `file_hash(path)` as a public
+  alias for the internal `_file_hash` helper so the installer and the
+  diff use the same source of truth for marker values.
+- `scripts/template_installer.py` — `InstallResult` gains a `hashes:
+  dict[str, str]` field keyed by relative template path. The installer
+  computes and populates each hash immediately after a successful
+  write. Existing callers that ignore the field continue to work.
+- `commands/self-update.md` — replaces `templates_installed[p] =
+  'installed'` with `templates_installed[p] = result.hashes.get(p, '')`,
+  merges against any pre-existing marker dict so untouched templates
+  keep their stored hash, and prunes deleted entries.
+
+### Tests
+
+- `tests/unit/test_template_installer.py` adds a
+  `TestInstallResultHashes` class with three regressions:
+  1. `InstallResult.hashes` is populated with a real 12-char hex digest
+     for each installed template.
+  2. Feeding those hashes back to `get_template_diff` reports no
+     modifications — end-to-end roundtrip verified.
+  3. Control case: storing the literal `"installed"` reproduces the
+     v16.0.0 false-modified behavior.
+
+Full suite: 1848/1848 passing.
+
 ## v16.0.1 — File-type handler audit fixes (field-report)
 
 Bug-fix release responding to the 2026-04-23 field audit of
