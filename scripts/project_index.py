@@ -1046,15 +1046,21 @@ def update_index(
     updated = False
     base_created = False
 
-    # Write index note if changed or new
+    # Write index note if changed or new — both branches now go through
+    # vault_writer.write_note, which is always create-or-modify and is
+    # the sanctioned text-write path post-v16.2.0 (Bug A).
+    import vault_writer  # local import keeps top-level imports lean
     if existing_text is None:
-        _obsidian_create(vault_name, vault_path, new_content)
+        vault_writer.write_note(vault_name, vault_path, new_content)
         created = True
     elif new_content.strip() != existing_text.strip():
-        _obsidian_create(vault_name, vault_path, new_content, overwrite=True)
+        vault_writer.write_note(vault_name, vault_path, new_content)
         updated = True
 
-    # Write base file if missing
+    # Write base file if missing — `_obsidian_create(..., overwrite=False)`
+    # is preserved here because Base files are only ever generated, never
+    # overwritten; refuse-on-collision is the right semantic. vault_writer
+    # is create-or-modify by design.
     try:
         base_check = subprocess.run(
             ["obsidian", "read", f"vault={vault_name}", f"path={base_path}"],
@@ -1078,9 +1084,14 @@ def update_index(
 def _obsidian_create(vault_name: str, path: str, content: str, overwrite: bool = False) -> None:
     """Write a text file to the vault via obsidian eval + app.vault.create/modify.
 
-    Uses the JS API directly so the exact path (including extension) is
-    honoured — critical for .base files and notes in deep folders.
-    Mirrors the approach used by vault_binary.py for binary writes.
+    Pre-v16.2.0 callers used this for any file write inside the index
+    pipeline. v16.2.0 introduces ``vault_writer.write_note`` as the
+    canonical create-or-modify entry point — new callers should use
+    that. This function survives only because it uniquely supports the
+    refuse-on-collision (``overwrite=False``) semantic that
+    ``update_index`` once needed for ``.base`` files. ``vault_writer``
+    is always create-or-modify by design (Bug A: one sanctioned path,
+    no per-call mode flag).
     """
     import json as _json
 

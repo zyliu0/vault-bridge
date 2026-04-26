@@ -848,9 +848,12 @@ Present via AskUserQuestion:
 
 If yes:
 1. Read the template content from `${CLAUDE_PLUGIN_ROOT}/templates/vault-bridge-note.md`
-2. Install via obsidian CLI:
-   ```bash
-   obsidian create vault="$VAULT_NAME" name="vault-bridge-note" path="_Templates" content="$TEMPLATE_CONTENT" silent overwrite
+2. Install via `vault_writer.write_note` (v16.2.0, Bug A — the only
+   sanctioned text-write path):
+   ```python
+   import sys; sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
+   import vault_writer
+   vault_writer.write_note(VAULT_NAME, "_Templates/vault-bridge-note.md", TEMPLATE_CONTENT)
    ```
 
 ## Step 9 — verify and report

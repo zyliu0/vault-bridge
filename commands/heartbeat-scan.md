@@ -90,6 +90,30 @@ if [ -n "$VAULT_NAME" ]; then
 fi
 ```
 
+### Step 0c — vault-write probe (v16.2.0, Bug A)
+
+Before any writes, round-trip a 1-byte canary through `vault_writer.probe`
+to verify the sanctioned write path is healthy. Heartbeat is autonomous,
+so a probe failure is not interactive — log and exit 0 (skip this run).
+
+```bash
+python3 -c "
+import sys
+sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
+import vault_writer
+out = vault_writer.probe('$VAULT_NAME')
+if not out['ok']:
+    print(f'PROBE_FAILED: {out.get(\"detail\") or out.get(\"error\")}', file=sys.stderr)
+    sys.exit(1)
+" || {
+  echo "vault-bridge: write probe failed, heartbeat skipping (vault_writer offline)" >> $(pwd)/.vault-bridge/heartbeat.log
+  exit 0
+}
+```
+
+`vault_writer` is the only sanctioned text-write path. There is no FS
+fallback — heartbeat aborts the run rather than guessing a vault root.
+
 ## Step 1 — load config
 
 Load the v3 config:
@@ -510,11 +534,19 @@ For each delta file, follow the same per-event pipeline as retro-scan:
    `parent-folder-prefix`, `mtime`.
    The `content_confidence` enum is the same: `high`, `low`, or `none`
    (heartbeat uses the values from `ScanResult.content_confidence` directly).
-8. Write the note via obsidian CLI (never the Write tool directly):
-   ```bash
-   obsidian create vault="$VAULT_NAME" name="$NOTE_NAME" path="$VAULT_FOLDER" content="$FULL_CONTENT" silent overwrite
+8. Write the note via `vault_writer.write_note` (v16.2.0, Bug A — the
+   only sanctioned text-write path; never `Path.write_text`, never a
+   guessed vault filesystem root):
+   ```python
+   import sys; sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
+   import vault_writer, vault_paths
+   note_path = vault_paths.event_note_path(domain, project, subfolder, f"{NOTE_NAME}.md")
+   out = vault_writer.write_note(VAULT_NAME, note_path, FULL_CONTENT)
+   if not out['ok']:
+       raise SystemExit(f"vault_writer failed: {out.get('error')}")
    ```
-   If Obsidian is not running, STOP and log the error.
+   If Obsidian is not running, `vault_writer` returns `ok=False` with an
+   error — STOP and log it. NEVER fall back to a filesystem write.
 9. **Validate** — read back and validate:
    ```
    obsidian read vault="$VAULT_NAME" path="$VAULT_FOLDER/$NOTE_NAME.md" | python3 ${CLAUDE_PLUGIN_ROOT}/scripts/validate_frontmatter.py --stdin

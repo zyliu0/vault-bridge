@@ -1,5 +1,78 @@
 # Changelog
 
+## v16.2.0 — sanctioned vault-write path: vault_writer + probe (Bug A)
+
+Addresses **Bug A** of the 2026-04-27 LAGI 2025 field report: a
+retro-scan driver bypassed the `obsidian` CLI and wrote 438 notes
+directly to a guessed vault filesystem root. The bypass was invented
+because per-event `obsidian eval` overhead (~150 ms × 568 events)
+made a sanctioned path feel too slow. v16.2.0 ships the missing
+sanctioned path AND removes the rationale for ever inventing a
+fast bypass again.
+
+### Added
+
+- **`scripts/vault_writer.py`** — the only sanctioned text-write path
+  to the vault. Three public entry points:
+  - `write_note(vault_name, vault_path, content, runner=None) -> dict` —
+    single-note create-or-modify via `obsidian eval` +
+    `app.vault.create`/`app.vault.modify`. Returns
+    `{ok, vault_path, bytes_written, error}`. Refuses absolute paths
+    up front; the firewall is loud, not silent.
+  - `write_notes_batch(vault_name, items, runner=None, chunk_size=50) -> dict` —
+    many notes per `obsidian eval` invocation. Per-note overhead
+    drops from ~150 ms to <2 ms with the default chunk size, which
+    removes the throughput rationale for any FS-direct bypass. Returns
+    `{ok, written, failed, results: [...]}` with per-item success.
+  - `probe(vault_name, runner=None) -> dict` — round-trips a 1-byte
+    canary into `_vb-probe/`, verifies, then deletes the namespace.
+    Scan commands MUST call this at start and abort on failure;
+    **never fall back**.
+
+- **Scan-start vault-write probe.** `retro-scan`, `heartbeat-scan`, and
+  `reconcile` now call `vault_writer.probe()` at start — interactive
+  scans abort with an error, heartbeat (autonomous) logs and exits 0.
+
+- **`tests/unit/test_vault_writer.py`** — 21 cases covering single + batch
+  + probe + JSON-escape (CJK/spaces/quotes) + absolute-path refusal +
+  module surface (no FS-fallback exports).
+
+### Changed
+
+- **All command specs route writes through `vault_writer`.** Replaced
+  the prior `obsidian create vault=… name=… path=… content=… silent
+  overwrite` shell snippets in `retro-scan`, `heartbeat-scan`,
+  `reconcile`, `research`, `visualization`, and `setup` with Python
+  calls to `vault_writer.write_note` / `write_notes_batch`. The
+  refuse-on-collision branch (Base files in `update_index`) keeps
+  the inline `_obsidian_create` helper because `vault_writer` is
+  always create-or-modify by design.
+
+- **`scripts/project_index.py::update_index`** writes the index note
+  via `vault_writer.write_note` (consolidating both create-new and
+  modify-existing branches into one call).
+
+- **`CLAUDE.md`** documents `vault_writer` as the sanctioned write
+  path and explicitly lists what is forbidden (`vault_fs_root()`,
+  `Path.write_text`, `fast_write`).
+
+### Removed
+
+- **No `vault_fs_root()`, no `fast_write`, no FS fallback ever.** The
+  test suite's `test_module_does_not_export_filesystem_fallback`
+  guards the module surface against regressions.
+
+### Why this is the right shape
+
+Bug A's root cause was incentive: the existing sanctioned path was
+slow per-event, and operators (LLMs running retro-scan) regressed
+to FS-direct writes for throughput. Bug B/C/D/E are all downstream
+content-quality issues that depend on Bug A landing first. Shipping
+`vault_writer` (with batching that removes the speed rationale) and
+scan-start probes (that fail-loud on any drift) closes the door on
+the 2026-04-27 LAGI data-loss class of regression before composition
+work in v16.3.0 begins.
+
 ## v16.1.1 — data-loss firewalls + remote-path fetch + schema/label polish (field-report)
 
 Addresses the 2026-04-24 field report's remaining priorities:

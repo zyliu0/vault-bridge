@@ -112,6 +112,29 @@ if [ -n "$VAULT_NAME" ]; then
 fi
 ```
 
+### Step 0c — vault-write probe (v16.2.0, Bug A)
+
+Round-trip a 1-byte canary through `vault_writer.probe` before any
+real reconciliation. Reconcile is interactive — abort the run on
+failure rather than falling back to anything else:
+
+```bash
+python3 -c "
+import sys
+sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
+import vault_writer
+out = vault_writer.probe('$VAULT_NAME')
+if not out['ok']:
+    print(f'PROBE_FAILED: {out.get(\"detail\") or out.get(\"error\")}', file=sys.stderr)
+    sys.exit(1)
+print(f'probe: ok ({out[\"detail\"]})')
+" || exit 1
+```
+
+`vault_writer` is the only sanctioned text-write path. Reconcile
+never falls back to `Path.write_text` or a vault filesystem root —
+the lack of any such helper is the forcing function (Bug A).
+
 ## Step 1 — load config
 
 Load the v3 config and resolve the domain:
@@ -521,13 +544,18 @@ Reconstruct the full note content:
 {original body text, unchanged}
 ```
 
-Write it back via the obsidian CLI (never the Edit tool on vault files).
-The `path=` argument MUST be the full `{domain}/{project}/{subfolder}` folder —
-compute via `vault_paths.event_folder(domain, project, subfolder)`:
+Write it back via `vault_writer.write_note` (v16.2.0, Bug A — the only
+sanctioned text-write path; never the Edit tool, never `Path.write_text`,
+never a guessed vault filesystem root). Compose the full vault path via
+`vault_paths.event_note_path(domain, project, subfolder, note_filename)`:
 
-```bash
-# VAULT_FOLDER was computed via vault_paths.event_folder(domain, project, subfolder)
-obsidian create vault="$VAULT_NAME" name="$NOTE_NAME" path="$VAULT_FOLDER" content="$FULL_CONTENT" silent overwrite
+```python
+import sys; sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
+import vault_writer, vault_paths
+note_path = vault_paths.event_note_path(domain, project, subfolder, f"{NOTE_NAME}.md")
+out = vault_writer.write_note(VAULT_NAME, note_path, FULL_CONTENT)
+if not out['ok']:
+    raise SystemExit(f"vault_writer failed: {out.get('error')}")
 ```
 
 The body stays byte-for-byte identical (unless --re-read added a warning callout).

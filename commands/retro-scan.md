@@ -165,6 +165,33 @@ if [ -n "$VAULT_NAME" ]; then
 fi
 ```
 
+### Step 1a — vault-write probe (v16.2.0, Bug A)
+
+Round-trip a 1-byte canary into `_vb-probe/` to verify the write path
+end-to-end before any real notes are composed. Aborts the scan on
+failure — `vault_writer` is the only sanctioned write path; **never
+fall back to filesystem writes**.
+
+```bash
+python3 -c "
+import sys
+from pathlib import Path
+sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
+import vault_writer
+out = vault_writer.probe('$VAULT_NAME')
+if not out['ok']:
+    print(f'PROBE_FAILED: {out.get(\"detail\") or out.get(\"error\")}', file=sys.stderr)
+    sys.exit(1)
+print(f'probe: ok ({out[\"detail\"]})')
+"
+```
+
+If the probe fails the scan MUST stop and ask the user to open Obsidian
+and retry. Do not attempt to write any notes via `Path.write_text`,
+`fs.writeFileSync`, or any other path — `vault_writer` is the only
+sanctioned write path. There is no `vault_fs_root()` helper and there
+is no fallback. The lack of one is the forcing function.
+
 ## Step 1 — load config and resolve domain
 
 Load the v4 config:
@@ -464,10 +491,11 @@ If user chooses "Yes":
    ```
 
 2. For each note, read it via `obsidian read`, rewrite the `project:`
-   frontmatter value to `$NEW_NAME`, then use `obsidian create` with the
-   new path (`$NEW_NAME/{subfolder}/{filename}`) + `silent overwrite`.
-   After the new note is written, delete the old one with
-   `obsidian delete vault="$VAULT_NAME" path="$OLD_NOTE_PATH"`.
+   frontmatter value to `$NEW_NAME`, then use
+   `vault_writer.write_note(VAULT_NAME, new_path, body)` (v16.2.0 — the
+   sanctioned write path; create-or-modify semantics replace the prior
+   `silent overwrite` flag). After the new note is written, delete the
+   old one with `obsidian delete vault="$VAULT_NAME" path="$OLD_NOTE_PATH"`.
 
 3. Rewrite the scan index so future lookups see the new path:
    ```bash
@@ -712,7 +740,8 @@ in chronological order. For each event you:
    with the Read tool before writing the body.
 3. Compose the body. Ground every specific claim in text or images
    you actually Read.
-4. Write the note via `obsidian create`.
+4. Write the note via `vault_writer.write_note(VAULT_NAME, note_path, content)` —
+   the only sanctioned text-write path (v16.2.0, Bug A).
 5. THEN move to the next event.
 
 Do NOT collect every event's `ScanResult` into a list and
@@ -796,9 +825,11 @@ VAULT_FOLDER = event_folder(DOMAIN, PROJECT, SUBFOLDER)
 ```
 
 Pass `VAULT_FOLDER` (the full 3-segment path) as `vault_project_path` to
-`scan_pipeline.process_file` and as `path=` to `obsidian create`. The previous
-2-segment form (`$PROJECT/$SUBFOLDER`) caused event notes to land at the
-vault root instead of inside their domain folder — v14 fixes this.
+`scan_pipeline.process_file`. For the actual note write, compose the
+full vault path via `vault_paths.event_note_path(...)` and pass it to
+`vault_writer.write_note` (v16.2.0). The previous 2-segment form
+(`$PROJECT/$SUBFOLDER`) caused event notes to land at the vault root
+instead of inside their domain folder — v14 fixes this.
 
 ```bash
 python3 ${CLAUDE_PLUGIN_ROOT}/scripts/scan_pipeline.py process "$SOURCE_PATH" \
@@ -1185,38 +1216,57 @@ Field rules:
 - `cssclasses: [img-grid]` when `result.image_grid == True`
   (v14.5: ≥1 image); `cssclasses: []` otherwise.
 
-### 6j. Write the note via obsidian CLI
+### 6j. Write the note via vault_writer (v16.2.0, Bug A)
 
-Build the full note content (frontmatter + body) as a string. The `path=`
-argument MUST be the full `{domain}/{project}/{subfolder}` folder (use
-`vault_paths.event_folder(domain, project, subfolder)` — never the old
-2-segment `$PROJECT/$SUBFOLDER`). Write via the `obsidian` CLI — never the
-Write tool directly:
+Build the full note content (frontmatter + body) as a string. The vault
+path MUST be the full `{domain}/{project}/{subfolder}/{note}.md` (use
+`vault_paths.event_note_path(domain, project, subfolder, note_filename)`).
 
-```bash
-# VAULT_FOLDER was computed earlier via vault_paths.event_folder(...)
-# e.g. "arch-projects/2408 Sample/SD"
-obsidian create vault="$VAULT_NAME" name="$NOTE_NAME" path="$VAULT_FOLDER" content="$FULL_CONTENT" silent overwrite
+Write via `scripts/vault_writer.py` — the **only sanctioned text-write
+path**. There is no `Path.write_text`, no `vault_fs_root()`, no
+`fast_write`. The lack of any FS-direct helper is the forcing function;
+do not invent one. `vault_writer.write_note` always
+create-or-modifies idempotently and goes through `obsidian eval` +
+`app.vault.create`/`app.vault.modify`.
+
+```python
+import sys
+from pathlib import Path
+sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
+import vault_writer, vault_paths
+
+note_path = vault_paths.event_note_path(domain, project, subfolder, f"{NOTE_NAME}.md")
+out = vault_writer.write_note(VAULT_NAME, note_path, FULL_CONTENT)
+if not out['ok']:
+    raise SystemExit(f"vault_writer failed for {note_path}: {out.get('error')}")
 ```
 
-Where:
-- `$VAULT_NAME` — from config.vault_name
-- `$NOTE_NAME` — the note filename without `.md` extension
-- `$VAULT_FOLDER` — `{domain}/{project}/{subfolder}` from `event_folder()`
-- `$FULL_CONTENT` — the complete note including `---` frontmatter fences and body.
-  Use `\n` for newlines in the content string.
+For mass writes within a single project, prefer the batched API — one
+subprocess invocation handles up to 50 notes by default, dropping
+per-note overhead from ~150 ms (one `obsidian eval` per note) to <2 ms:
+
+```python
+items = [(vault_paths.event_note_path(domain, project, ev.subfolder, ev.name + '.md'), ev.body)
+         for ev in events]
+out = vault_writer.write_notes_batch(VAULT_NAME, items)
+if out['failed']:
+    for r in out['results']:
+        if not r['ok']:
+            print(f"FAILED: {r['vault_path']}: {r.get('error')}", file=sys.stderr)
+    raise SystemExit(f"{out['failed']} of {len(items)} writes failed")
+```
 
 If a canvas was generated (see 6f-2), also write it under the same folder:
 
-```bash
-obsidian create vault="$VAULT_NAME" name="$CANVAS_NAME" path="$VAULT_FOLDER" content="$CANVAS_JSON" silent overwrite
+```python
+canvas_path = vault_paths.event_note_path(domain, project, subfolder, f"{CANVAS_NAME}.canvas")
+vault_writer.write_note(VAULT_NAME, canvas_path, CANVAS_JSON)
 ```
 
-Where `$CANVAS_NAME` is `{event_date} {short-topic}` (obsidian CLI adds the extension based on content).
-
-If the obsidian CLI is not available or errors with "Obsidian is not running",
-STOP and tell the user: "Obsidian must be running for vault-bridge to write
-notes. Please open Obsidian and retry."
+If `vault_writer.write_note` returns `ok=False` with an error mentioning
+"Obsidian is not running" or similar, STOP and tell the user: "Obsidian
+must be running for vault-bridge to write notes. Please open Obsidian
+and retry." NEVER fall back to a filesystem write.
 
 ### 6k. VALIDATE — the hard stop
 
@@ -1450,8 +1500,13 @@ not a subprocess spawn:
    `notes_to_read` MUST appear at least once in your output (as a
    wikilink somewhere). Never emit `vb:auto-start` /
    `vb:auto-end` themselves in the body.
-7. **Write the MOC back** via
-   `obsidian create vault="$VAULT_NAME" name="$PROJECT" path="$DOMAIN/$PROJECT" content="<frame + your new body + tail>" overwrite silent`.
+7. **Write the MOC back** via `vault_writer.write_note` (the only
+   sanctioned text-write path post-v16.2.0 — see Step 6j):
+   ```python
+   import vault_writer, vault_paths
+   moc_path = vault_paths.project_index_path(domain, project)
+   vault_writer.write_note(VAULT_NAME, moc_path, FRAME + your_new_body + TAIL)
+   ```
    The frame and tail stay bit-exact; only the content between the
    markers changes.
 
@@ -1500,17 +1555,18 @@ Step 9 memory report so the user sees mesh-wiring coverage.
 ### 7d — create the Obsidian template (once)
 
 If the template `_Templates/vault-bridge-project-index.md` does not exist
-in the vault, create it:
+in the vault, create it via `vault_writer` (v16.2.0 — sanctioned write path):
 
 ```bash
 obsidian read vault="$VAULT_NAME" path="_Templates/vault-bridge-project-index.md" 2>/dev/null || {
-  obsidian create vault="$VAULT_NAME" name="vault-bridge-project-index" \
-    path="_Templates" content="$(python3 -c "
+  python3 -c "
 import sys
 sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
-import project_index as pi
-print(pi._TEMPLATE_PLACEHOLDER)
-")" silent
+import project_index as pi, vault_writer
+vault_writer.write_note('$VAULT_NAME',
+    '_Templates/vault-bridge-project-index.md',
+    pi._TEMPLATE_PLACEHOLDER)
+"
 }
 ```
 

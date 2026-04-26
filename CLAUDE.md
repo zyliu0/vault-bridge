@@ -17,8 +17,18 @@ Obsidian instance.
 | Zone | Access | Tools |
 |------|--------|-------|
 | Archive (NAS/drive) | Read-only, per-domain | `mcp__nas__*` or `Read`/`Glob` |
-| Vault (Obsidian) | Via CLI only, **real notes only** | `obsidian create`, `obsidian read`, `obsidian search`, `obsidian append`, `obsidian property:set` |
+| Vault (Obsidian) | Reads via `obsidian` CLI; writes via `scripts/vault_writer.py` (text) and `scripts/vault_binary.py` (binary). **Real notes only.** | `vault_writer.write_note`, `vault_writer.write_notes_batch`, `vault_writer.probe`, `vault_binary.write_binary`, `obsidian read`, `obsidian search`, `obsidian append`, `obsidian property:set` |
 | Project state (`<workdir>/.vault-bridge/`) | Read-write | Python scripts via `Bash` |
+
+**v16.2.0 — Bug A.** `scripts/vault_writer.py` is the only sanctioned
+text-write path to the vault. It always goes through `obsidian eval` +
+`app.vault.create`/`app.vault.modify`. There is no `vault_fs_root()`
+helper. There is no `Path.write_text` fallback. There is no
+`fast_write`. The lack of any FS-direct helper is the forcing function
+that prevents drivers from regressing to wrong-vault-path data-loss
+bugs (LAGI 2025 field report). Scan commands MUST call
+`vault_writer.probe(vault_name)` at start and abort on failure —
+**never fall back**.
 
 **Only REAL notes go in the vault.** The vault receives: diary notes written
 by retro/heartbeat/reconcile, their companion `.canvas` files, `_Attachments/`

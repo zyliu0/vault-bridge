@@ -379,10 +379,15 @@ If the user chooses "Append -2", update `STEM` to `$STEM-2`.
 
 ## Step 12 — write and validate
 
-Write the report to the vault:
+Write the report to the vault via `vault_writer.write_note` (v16.2.0,
+Bug A — the only sanctioned text-write path):
 
-```bash
-obsidian create vault="$VAULT_NAME" name="$STEM" path="$VAULT_PATH" content="$CONTENT" silent overwrite
+```python
+import sys; sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
+import vault_writer
+out = vault_writer.write_note(VAULT_NAME, f"{VAULT_PATH}/{STEM}{EXT}", CONTENT)
+if not out['ok']:
+    raise SystemExit(f"vault_writer failed: {out.get('error')}")
 ```
 
 Read it back and validate:

@@ -223,20 +223,29 @@ Requirements:
 
 ## Step 8 — write artifact to vault
 
-Write the generated content to the vault using the obsidian CLI:
+Write the generated content to the vault via `vault_writer.write_note`
+(v16.2.0, Bug A — the only sanctioned text-write path; never
+`Path.write_text`, never a guessed vault root):
 
-```bash
-obsidian create vault="$VAULT_NAME" name="$STEM" path="$VAULT_PATH" content="$ARTIFACT_CONTENT" silent overwrite
+```python
+import sys; sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
+import vault_writer
+ext = ".canvas" if VIZ_TYPE == "canvas" else ".md"
+out = vault_writer.write_note(VAULT_NAME, f"{VAULT_PATH}/{STEM}{ext}", ARTIFACT_CONTENT)
+if not out['ok']:
+    raise SystemExit(f"vault_writer failed: {out.get('error')}")
 ```
 
 Where:
-- `$VAULT_NAME` — from config
-- `$STEM` — the stem without extension (obsidian CLI handles extension from content)
-- `$VAULT_PATH` — the resolved vault folder (Step 4)
-- `$ARTIFACT_CONTENT` — the full generated content
+- `VAULT_NAME` — from config
+- `STEM` — the stem without extension (compose the full vault path
+  including extension before passing to `write_note`)
+- `VAULT_PATH` — the resolved vault folder (Step 4)
+- `ARTIFACT_CONTENT` — the full generated content
 
-If the obsidian CLI errors with "Obsidian is not running", STOP and tell
-the user: "Obsidian must be running for vault-bridge to write visualization artifacts.
+If `vault_writer` returns `ok=False` with an error mentioning "Obsidian
+is not running" or similar, STOP and tell the user: "Obsidian must be
+running for vault-bridge to write visualization artifacts.
 Please open Obsidian and retry."
 
 ## Step 9 — validate
