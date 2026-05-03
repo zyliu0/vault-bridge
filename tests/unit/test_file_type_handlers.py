@@ -837,6 +837,7 @@ _EXTENDED_VALID_CATEGORIES = {
     "vector-ai",
     "raster-psd",
     "cad-3dm",
+    "cad-skp",  # v16.4.0 (AUDIT-5)
 }
 
 

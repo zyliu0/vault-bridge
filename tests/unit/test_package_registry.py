@@ -208,11 +208,22 @@ class TestBuiltinRegistry:
             assert "pillow-heif" in pip_names
 
     def test_br9_text_extensions_are_stdlib(self):
-        for ext in ("txt", "md", "rtf"):
+        # v16.4.0 (AUDIT-4): rtf is now backed by `striprtf` (a real
+        # package) plus a soffice fallback — not stdlib. txt and md
+        # remain stdlib.
+        for ext in ("txt", "md"):
             entries = pr.BUILTIN_REGISTRY.get(ext, [])
             assert len(entries) >= 1, f"No entry for text ext '{ext}'"
             stdlib_entries = [s for s in entries if s.pip_name == "" and s.import_name == ""]
             assert len(stdlib_entries) >= 1, f"No stdlib entry for '{ext}'"
+
+    def test_br9b_rtf_is_striprtf_with_soffice_fallback(self):
+        """v16.4.0 (AUDIT-4): RTF now has a real package (striprtf)
+        rather than the stdlib placeholder."""
+        entries = pr.BUILTIN_REGISTRY.get("rtf", [])
+        assert len(entries) >= 1
+        pip_names = [s.pip_name for s in entries]
+        assert "striprtf" in pip_names
 
     def test_br10_all_entries_are_lists_of_package_spec(self):
         for ext, entries in pr.BUILTIN_REGISTRY.items():

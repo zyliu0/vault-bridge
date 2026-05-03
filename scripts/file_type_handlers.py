@@ -194,6 +194,22 @@ _CAD_3DM = HandlerConfig(
     render_pages=False,
 )
 
+# v16.4.0 (AUDIT-5) — SketchUp .skp. SketchUp's binary format is
+# closed; the only first-class reader is SketchUp's own SDK (C++,
+# requires a desktop install). The stub handler probes for an
+# optional `skp2obj` / `skp2unity` CLI; when neither is present it
+# emits a metadata-only summary (size, mtime) and surfaces a
+# warning so the user can install a converter or skip the file
+# rather than silently get "unknown file type".
+_CAD_SKP = HandlerConfig(
+    category="cad-skp",
+    extract_text=True,
+    extract_images=False,
+    compress=False,
+    run_vision=False,
+    render_pages=False,
+)
+
 HANDLERS: Dict[str, HandlerConfig] = {
     # document-pdf
     "pdf": _PDF,
@@ -230,6 +246,8 @@ HANDLERS: Dict[str, HandlerConfig] = {
     "dwg": _CAD_DWG,
     # cad-3dm (Rhino 3DM via rhino3dm — metadata only, no rendering)
     "3dm": _CAD_3DM,
+    # cad-skp (SketchUp — metadata-only stub via optional skp2obj CLI)
+    "skp": _CAD_SKP,
     # video
     "mp4": _VIDEO,
     "mov": _VIDEO,
@@ -250,6 +268,9 @@ HANDLERS: Dict[str, HandlerConfig] = {
     "md": _TEXT,
     "rst": _TEXT,
     "csv": _TEXT,
+    # RTF — v16.4.0 (AUDIT-4). striprtf is the reader; soffice is the
+    # fallback when striprtf is absent.
+    "rtf": _TEXT,
     # archive
     "zip": _ARCHIVE,
     "rar": _ARCHIVE,
@@ -351,6 +372,47 @@ def _docx_read_text(path: str) -> str:
         return ""
 
 
+def _xlsx_read_text(path: str) -> str:
+    """Extract text from an XLSX using openpyxl.
+
+    v16.4.0 (AUDIT-1b) — pre-v16.4 ``_extract_text_office`` returned
+    ``""`` for xlsx, which combined with the empty image extractor
+    in ``extract_embedded_images`` produced 0 bytes / 0 images for
+    every spreadsheet. The audit's representative XLSX (`220928
+    exhibition size.xlsx`) has 1.2 KB of legitimate content (a
+    component-size table) plus 40 inline images — none of which
+    landed in any note. openpyxl reads the cell grid; the per-cell
+    text is concatenated tab-separated per row, with one
+    ``# {sheet_name}`` heading per worksheet.
+    """
+    try:
+        import openpyxl  # type: ignore
+        wb = openpyxl.load_workbook(path, data_only=True, read_only=True)
+        parts: List[str] = []
+        for sheet in wb.worksheets:
+            parts.append(f"# {sheet.title}")
+            for row in sheet.iter_rows(values_only=True):
+                # Drop trailing all-empty cells but preserve interior
+                # blanks so column alignment stays meaningful.
+                cells = [
+                    "" if v is None else str(v)
+                    for v in row
+                ]
+                while cells and cells[-1] == "":
+                    cells.pop()
+                if cells:
+                    parts.append("\t".join(cells))
+            parts.append("")  # blank line between sheets
+        try:
+            wb.close()
+        except Exception:
+            pass
+        return "\n".join(parts).strip()
+    except Exception as exc:
+        logger.debug("XLSX text extraction failed for %s: %s", path, exc)
+        return ""
+
+
 def _pptx_read_text(path: str) -> str:
     """Extract text from a PPTX using python-pptx. Returns '' on any failure."""
     try:
@@ -368,12 +430,100 @@ def _pptx_read_text(path: str) -> str:
 
 
 def _plain_read_text(path: str) -> str:
-    """Read a plain-text file. Returns '' on any failure."""
+    """Read a plain-text file. Returns '' on any failure.
+
+    v16.4.0 (AUDIT-4): for ``.rtf`` files, runs the bytes through
+    ``striprtf`` to get unformatted text. striprtf is a tiny pure-Python
+    package; if it's absent we fall back to soffice headless and finally
+    to a literal byte read (which gives the user RTF source, not ideal
+    but better than ``""``).
+    """
+    p = Path(path)
+    ext = p.suffix.lstrip(".").lower()
+    if ext == "rtf":
+        return _rtf_read_text(path)
     try:
-        return Path(path).read_text(encoding="utf-8", errors="replace")
+        return p.read_text(encoding="utf-8", errors="replace")
     except Exception as exc:
         logger.debug("Plain text read failed for %s: %s", path, exc)
         return ""
+
+
+def _rtf_read_text(path: str) -> str:
+    """Extract text from an RTF document.
+
+    Pipeline: striprtf → soffice headless → literal-bytes fallback.
+    Never raises.
+    """
+    # 1. striprtf is the lightweight pure-Python path.
+    try:
+        from striprtf.striprtf import rtf_to_text  # type: ignore
+        raw = Path(path).read_text(encoding="utf-8", errors="replace")
+        out = rtf_to_text(raw)
+        if out and out.strip():
+            return out
+    except ImportError:
+        pass
+    except Exception as exc:
+        logger.debug("striprtf failed for %s: %s", path, exc)
+
+    # 2. LibreOffice headless fallback — works without striprtf.
+    text = _soffice_convert_to_txt(path)
+    if text:
+        return text
+
+    # 3. Last resort — return the raw bytes so the user sees RTF source
+    # rather than a silent skip. The garbled-extract gate in scan_pipeline
+    # will likely flag it; that's the right signal that a striprtf install
+    # is needed.
+    try:
+        return Path(path).read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return ""
+
+
+def _soffice_convert_to_txt(path: str) -> str:
+    """Shell out to LibreOffice headless and return the converted text.
+
+    Used as a shared fallback for RTF (and could be reused for other
+    plain-but-tricky formats). Returns '' on any failure.
+    """
+    import shutil as _shutil
+    import subprocess as _sp
+    import tempfile as _tf
+    binaries = ("soffice", "libreoffice")
+    macos_apps = ("/Applications/LibreOffice.app/Contents/MacOS/soffice",)
+    exe = ""
+    for name in binaries:
+        found = _shutil.which(name)
+        if found:
+            exe = found
+            break
+    if not exe:
+        for app in macos_apps:
+            if Path(app).exists():
+                exe = app
+                break
+    if not exe:
+        return ""
+    with _tf.TemporaryDirectory() as td:
+        try:
+            proc = _sp.run(
+                [exe, "--headless", "--convert-to", "txt", "--outdir", td, path],
+                capture_output=True, timeout=60, check=False,
+            )
+        except Exception as exc:
+            logger.debug("soffice convert failed for %s: %s", path, exc)
+            return ""
+        if proc.returncode != 0:
+            return ""
+        out_file = Path(td) / f"{Path(path).stem}.txt"
+        if not out_file.exists():
+            return ""
+        try:
+            return out_file.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            return ""
 
 
 # ---------------------------------------------------------------------------
@@ -408,7 +558,10 @@ def _extract_text_office(path, workdir, ext):
         return _docx_read_text(path)
     if ext in ("pptx", "ppt"):
         return _pptx_read_text(path)
-    # xlsx/xls — no text extraction wired yet
+    if ext == "xlsx":
+        # v16.4.0 (AUDIT-1b) — wire openpyxl-based xlsx text extraction.
+        return _xlsx_read_text(path)
+    # xls handled via legacy spreadsheet path / soffice fallback.
     return ""
 
 

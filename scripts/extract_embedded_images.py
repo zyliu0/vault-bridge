@@ -51,10 +51,7 @@ def extract(src_path: Path, out_dir: Path, file_type: str) -> List[Path]:
     if ft in _IMAGE_TYPES:
         return [src_path]
 
-    if ft == "xlsx":
-        return []
-
-    if ft not in _CONTAINER_TYPES:
+    if ft not in _CONTAINER_TYPES and ft != "xlsx":
         return []
 
     # Ensure output directory exists
@@ -70,6 +67,14 @@ def extract(src_path: Path, out_dir: Path, file_type: str) -> List[Path]:
         return _extract_docx(src_path, out_dir)
     elif ft == "pptx":
         return _extract_pptx(src_path, out_dir)
+    elif ft == "xlsx":
+        # v16.4.0 (AUDIT-1b). Pre-v16.4 this was an explicit early
+        # ``return []``. The audit's representative XLSX had 40
+        # inline images that all dropped silently. openpyxl exposes
+        # ``ws._images`` with ``.image.ref`` pointing at the raw
+        # bytes; we round-trip through PIL so the output is in a
+        # format the downstream compressor understands.
+        return _extract_xlsx(src_path, out_dir)
 
     return []
 
@@ -257,5 +262,82 @@ def _extract_pptx(src_path: Path, out_dir: Path) -> List[Path]:
                     "extract_pptx: error extracting shape %s slide %d: %s",
                     getattr(shape, "name", "?"), slide_idx, exc
                 )
+
+    return results
+
+
+def _extract_xlsx(src_path: Path, out_dir: Path) -> List[Path]:
+    """Extract embedded images from an XLSX file using openpyxl.
+
+    v16.4.0 (AUDIT-1b). XLSX files use OOXML's ``xl/media/`` part
+    just like docx/pptx — openpyxl exposes them via
+    ``Worksheet._images`` (each entry has ``.image.ref`` pointing
+    at the underlying ``Image`` object whose ``.fp`` holds the raw
+    bytes). We sniff the magic bytes to derive a reasonable
+    extension so the downstream compressor doesn't have to guess.
+
+    Falls back gracefully on any failure — empty list, no exception
+    propagates.
+    """
+    try:
+        import openpyxl  # type: ignore
+        from openpyxl.drawing.image import Image as OpenpyxlImage  # type: ignore
+    except ImportError:
+        logger.warning("extract_xlsx: openpyxl not available")
+        return []
+
+    results: List[Path] = []
+    src_stem = src_path.stem
+
+    try:
+        wb = openpyxl.load_workbook(str(src_path), data_only=True)
+    except Exception as exc:
+        logger.warning("extract_xlsx: could not open %s: %s", src_path, exc)
+        return []
+
+    idx = 0
+    try:
+        for sheet_idx, ws in enumerate(wb.worksheets):
+            for img in getattr(ws, "_images", []) or []:
+                try:
+                    # openpyxl image.ref can be a PIL Image, a path,
+                    # or a BytesIO depending on how the workbook was
+                    # parsed. Try the documented attribute paths in order.
+                    raw = None
+                    inner = getattr(img, "_data", None)
+                    if callable(inner):
+                        try:
+                            raw = inner()
+                        except Exception:
+                            raw = None
+                    if raw is None:
+                        ref = getattr(img, "ref", None) or getattr(img, "image", None)
+                        if hasattr(ref, "read"):
+                            try:
+                                ref.seek(0)
+                            except Exception:
+                                pass
+                            raw = ref.read()
+                        elif isinstance(ref, (str, Path)):
+                            try:
+                                raw = Path(ref).read_bytes()
+                            except Exception:
+                                raw = None
+                    if not raw:
+                        continue
+                    ext = _sniff_extension(raw)
+                    stem = f"{src_stem}--sheet{sheet_idx}--img{idx}"
+                    out_path = _unique_path(out_dir, stem, ext)
+                    out_path.write_bytes(raw)
+                    results.append(out_path)
+                    idx += 1
+                except Exception as exc:
+                    logger.warning("extract_xlsx: error on sheet %d image %d: %s",
+                                   sheet_idx, idx, exc)
+    finally:
+        try:
+            wb.close()
+        except Exception:
+            pass
 
     return results

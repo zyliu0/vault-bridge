@@ -1,5 +1,108 @@
 # Changelog
 
+## v16.4.0 — pipeline format coverage: HEIC / XLSX / RTF / SKP + handler probe (AUDIT-1 through AUDIT-7)
+
+Closes the eight action items from the 2026-05-04 pipeline format
+audit. Of 27 registered file-type extensions, the audit found only 15
+producing content end-to-end. The other 12 fell into four root
+causes — pipeline-handler integration gaps, missing external tools,
+unregistered handlers, and one design limit. v16.4.0 closes the
+fixable subset and surfaces the design limit explicitly.
+
+### Fixed (pipeline-handler integration gap — AUDIT-1)
+
+- **HEIC** end-to-end now works (AUDIT-1a). ``compress_images`` and
+  ``scan_pipeline`` register ``pillow_heif.register_heif_opener()``
+  at module import time so ``Image.open`` recognises ``.HEIC`` /
+  ``.HEIF`` candidates. Pre-v16.4 the registration only happened
+  inside the per-extension handler's ``_heif_convert``; the
+  pipeline's compression stage saw the raw HEIC and reported
+  ``cannot identify image file`` → ``no_content``.
+- **XLSX text + images** end-to-end (AUDIT-1b). ``file_type_handlers``
+  wires ``_xlsx_read_text`` (openpyxl over the cell grid, one
+  ``# {sheet}`` heading per worksheet) and ``extract_embedded_images``
+  adds ``_extract_xlsx`` (parses ``ws._images`` for inline pictures).
+  Pre-v16.4 both branches returned empty. Field-report sample
+  (220928 exhibition size.xlsx, 1.2 KB text + 40 inline images) now
+  produces a real note.
+- **Size-gate skips reclassified** (AUDIT-1c + AUDIT-7). When the
+  only reason a note has zero images is the size gate (legitimate
+  small textures), the no-content stage emits
+  ``skip_reason='below_size_gate'`` rather than the misleading
+  ``no_content``. ``_process_images`` returns a per-event
+  ``size_gate_drops`` count.
+
+### Fixed (legacy Office fallback — AUDIT-3)
+
+- **`.xls` template gains a LibreOffice headless fallback**. xlrd
+  remains the preferred reader; when xlrd fails (corrupt workbook,
+  password-protected, mislabeled .xlsb), the handler shells out to
+  ``soffice --headless --convert-to csv`` and reads the CSV back.
+  The ``.doc`` / ``.ppt`` template already had the soffice
+  fallback in v16.0.4; this brings ``.xls`` to parity.
+
+### Added (RTF — AUDIT-4)
+
+- **``.rtf`` registered in the dispatcher**. ``HANDLERS["rtf"]``
+  routes to ``text-plain``; ``_plain_read_text`` dispatches to a
+  new ``_rtf_read_text`` that runs striprtf → soffice headless →
+  literal-bytes fallback in order. striprtf added to
+  ``package_registry`` as a real PackageSpec rather than the
+  stdlib placeholder.
+
+### Added (SketchUp — AUDIT-5)
+
+- **`cad-skp` handler category** with a metadata-only template at
+  ``scripts/handlers/patterns/cad_skp.py.tmpl``. Probes for
+  ``skp2obj`` / ``skp2unity`` on PATH; when present runs the
+  converter. When absent, returns a metadata summary (size,
+  modification time, format note) rather than the pre-v16.4 silent
+  ``unknown file type`` skip.
+
+### Added (3DM design-limit signal — AUDIT-6)
+
+- **`_stage_3dm_text_only_notice`** appends a one-line warning to
+  every ``cad-3dm`` event: ``rhino3dm exposes geometry metadata
+  (object counts, layer roster, ApplicationName) but no native
+  renderer. Visual screenshots require Rhino's CLI (commercial)
+  or a sidecar DXF export.`` The user (and the writing LLM) can
+  see the limit before composing a body.
+
+### Added (end-to-end handler probe — AUDIT-2)
+
+- **`scripts/handler_probe.py`** + **setup Step 6.5h**. Pre-v16.4
+  ``handler_selftest`` exercised per-handler ``read_text`` /
+  ``extract_images`` calls in isolation; if the **pipeline glue**
+  dropped the output (HEIC, XLSX, BMP) the user only learned at
+  first scan. ``handler_probe.probe_all`` runs every extension
+  with a built-in fixture (txt, md, png, jpg, jpeg, gif, webp,
+  bmp, tiff, tif, rtf) through ``scan_pipeline.process_file``
+  and reports ``[OK] / [FAIL]`` rows with hint columns. Format-
+  specific binary fixtures (PDF, DOCX, PPTX, XLSX, DWG, AI, PSD,
+  3DM, SKP) remain in ``handler_selftest`` — the new probe
+  complements rather than replaces it.
+
+### Coverage report after v16.4.0
+
+| ext | category | end-to-end |
+|-----|----------|:--:|
+| pdf | document-pdf | ✓ |
+| docx, pptx | document-office | ✓ |
+| xlsx | document-office | ✓ (was ✗) |
+| doc, ppt | document-office-legacy | ✓ via soffice fallback |
+| xls | spreadsheet-legacy | ✓ via soffice fallback (v16.4.0) |
+| txt, md | text-plain | ✓ |
+| rtf | text-plain | ✓ via striprtf or soffice (v16.4.0) |
+| jpg, jpeg, png, webp, gif, tif, tiff | image-raster | ✓ |
+| bmp | image-raster | ✓; size-gate failures now `below_size_gate` |
+| heic, heif | image-raster | ✓ (v16.4.0) |
+| psd, ai | raster-psd / vector-ai | ✓ |
+| dxf | cad-dxf | ✓ (slow) |
+| dwg | cad-dwg | ✓ when ODA File Converter or LibreDWG installed |
+| 3dm | cad-3dm | ⚠ metadata-only by design (warning surfaced v16.4.0) |
+| skp | cad-skp | ⚠ metadata-only by design (new handler v16.4.0) |
+| mp4, mov, mp3, wav, zip, rar | video / audio / archive | ✗ intentional |
+
 ## v16.3.0 — SSS-A through SSS-H: data quality + folder events + status taxonomy
 
 Closes the eight bugs surfaced by the 2026-05-04 SSS field report.

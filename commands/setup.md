@@ -712,6 +712,39 @@ if fails:
 This is advisory, not a hard gate: setup proceeds either way so users
 can fix in-line (e.g. installing antiword for `.doc`). Failures here
 mean a handler was generated from the fallback stub template and did
+
+### 6.5h — end-to-end pipeline probe (v16.4.0, AUDIT-2)
+
+The selftest above only exercises ``read_text`` / ``extract_images``
+in isolation. The 2026-05-04 pipeline format audit flagged a different
+gap: the per-handler tests pass but ``scan_pipeline.process_file``
+silently drops the handler's output (HEIC, XLSX, BMP). Run the
+end-to-end probe here so a regression in the dispatch glue surfaces
+loudly:
+
+```python
+import sys
+from pathlib import Path
+sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
+import handler_probe
+results = handler_probe.probe_all(str(Path.cwd()))
+print(handler_probe.format_report(results))
+```
+
+The probe runs every extension that has a built-in fixture (txt, md,
+png, jpg, jpeg, gif, webp, bmp, tiff, tif, rtf) through
+`scan_pipeline.process_file` against tiny synthetic files. Failures
+here mean the **routing** is broken — the handler works but the
+pipeline drops its output (or shells out to a missing external tool).
+The hint column tells the user which tool to install.
+
+Pipeline failures are also advisory at setup time — the scan can
+still proceed for other file types — but the user should rerun
+`F — Edit file types` to triage. Format-specific binary fixtures
+(.pdf, .docx, .pptx, .xlsx, .dwg, etc.) are not probed at this
+step; those are validated by Step 6.5g's selftest.
+
+
 not implement its claimed capabilities.
 
 ### 6.5h — print summary

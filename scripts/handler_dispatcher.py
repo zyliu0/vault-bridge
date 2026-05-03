@@ -232,6 +232,7 @@ _CATEGORY_TO_STEM = {
     "cad-dxf": "cad_dxf",
     "cad-dwg": "cad_dwg",
     "cad-3dm": "cad_3dm",
+    "cad-skp": "cad_skp",  # v16.4.0 (AUDIT-5) SketchUp metadata stub
     "vector-ai": "vector_ai",
     "raster-psd": "raster_psd",
     "document-office-legacy": "document_office_legacy",

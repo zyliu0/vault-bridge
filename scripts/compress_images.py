@@ -20,6 +20,22 @@ from pathlib import Path
 
 from PIL import Image, ImageOps
 
+# v16.4.0 (AUDIT-1a) — register the HEIF/HEIC opener with Pillow at
+# module import time so any caller that does ``Image.open(path)`` on a
+# ``.HEIC`` / ``.HEIF`` file gets the correct decode rather than a
+# ``cannot identify image file`` error. Pre-v16.4 the registration
+# only happened inside the per-extension handler's ``_heif_convert``,
+# but ``scan_pipeline`` calls ``compress_image`` on the candidate
+# paths directly — which for image-raster passes the original .HEIC
+# through. The pillow_heif package is a declared dependency of the
+# image-raster category. Best-effort: if the package is absent, the
+# fallback path (no HEIC support) preserves the pre-v16.4 behaviour.
+try:
+    import pillow_heif  # type: ignore
+    pillow_heif.register_heif_opener()
+except Exception:
+    pass
+
 # Pinned compression parameters
 MAX_DIMENSION = 1200
 JPEG_QUALITY = 82

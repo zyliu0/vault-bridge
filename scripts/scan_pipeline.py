@@ -43,6 +43,17 @@ import handler_dispatcher
 import validate_body
 import vault_binary
 
+# v16.4.0 (AUDIT-1a) — defensive HEIF opener registration. The
+# canonical registration lives in ``compress_images`` (which is the
+# module that actually opens the files), but registering here too
+# makes scan_pipeline robust against future refactors that import
+# Pillow before compress_images.
+try:
+    import pillow_heif  # type: ignore
+    pillow_heif.register_heif_opener()
+except Exception:
+    pass
+
 logger = logging.getLogger(__name__)
 
 # Categories that have no useful content to extract (video, audio, archive)
@@ -363,9 +374,17 @@ def _process_images(
         None the caller is running in isolation (legacy callers, unit tests);
         a local ephemeral index is used so per-event dedup still applies.
 
+    v16.4.0 (AUDIT-1c+7) additions:
+      - The function now returns a ``size_gate_drops`` counter so
+        callers can distinguish "no images extracted at all" from
+        "every image was dropped by the size gate" — the latter
+        becomes ``skip_reason='below_size_gate'`` rather than the
+        misleading ``no_content``.
+
     Returns:
         (attachments, images_embedded, image_grid,
-         warnings, errors, candidate_paths, caption_prompts)
+         warnings, errors, candidate_paths, caption_prompts,
+         size_gate_drops)
     """
     attachments: List[str] = []
     warnings: List[str] = []
@@ -373,6 +392,7 @@ def _process_images(
     images_embedded = 0
     candidate_paths: List[str] = []
     caption_prompts: List[str] = []
+    size_gate_drops = 0
 
     # If the caller didn't pass a shared index, make a local one so
     # in-event duplicates (same logo extracted from multiple PDF pages)
@@ -385,7 +405,7 @@ def _process_images(
         raw_images = file_type_handlers.extract_images(source_path, workdir=workdir)
     except Exception as exc:
         errors.append(f"extract_images failed: {exc}")
-        return attachments, images_embedded, False, warnings, errors, candidate_paths, caption_prompts
+        return attachments, images_embedded, False, warnings, errors, candidate_paths, caption_prompts, size_gate_drops
 
     if not raw_images:
         # v14.3 (F1-d) + v14.5 (field-review Issue 1): readable-handler-
@@ -423,7 +443,7 @@ def _process_images(
                     f"for DWG, libheif for HEIC) or inspect the file manually."
                 )
             warnings.append(msg)
-        return attachments, images_embedded, False, warnings, errors, candidate_paths, caption_prompts
+        return attachments, images_embedded, False, warnings, errors, candidate_paths, caption_prompts, size_gate_drops
 
     capped_raw = list(raw_images)[:IMAGE_CANDIDATE_CAP]
     if len(raw_images) > IMAGE_CANDIDATE_CAP:
@@ -446,7 +466,7 @@ def _process_images(
             warnings.append(f"compress error for {img_path}: {exc}")
 
     if not compressed_paths:
-        return attachments, images_embedded, False, warnings, errors, candidate_paths, caption_prompts
+        return attachments, images_embedded, False, warnings, errors, candidate_paths, caption_prompts, size_gate_drops
 
     # v16.0.0: record candidate image paths so the writing LLM can Read
     # them directly. No caption prompts — the captions side-channel was
@@ -479,6 +499,7 @@ def _process_images(
                 f"image under size gate ({size} < {IMAGE_MIN_BYTES} bytes): "
                 f"{compressed.name} — likely logo or UI chrome, skipped"
             )
+            size_gate_drops += 1
             continue
 
         # Content-hash lookup — is this byte-identical to a prior attachment?
@@ -527,7 +548,7 @@ def _process_images(
             errors.append(f"vault write failed for {compressed.name}: {err}")
 
     image_grid = images_embedded >= IMAGE_GRID_MIN
-    return attachments, images_embedded, image_grid, warnings, errors, candidate_paths, caption_prompts
+    return attachments, images_embedded, image_grid, warnings, errors, candidate_paths, caption_prompts, size_gate_drops
 
 
 # ---------------------------------------------------------------------------
@@ -872,6 +893,11 @@ class _ScanContext:
     caption_prompts: List[str] = field(default_factory=list)
     warnings: List[str] = field(default_factory=list)
     errors: List[str] = field(default_factory=list)
+    # v16.4.0 (AUDIT-1c+7) — count of size-gate drops. When the only
+    # reason a note has zero images is the size gate (e.g. small BMP
+    # textures), the no-content gate uses ``below_size_gate`` instead
+    # of the misleading ``no_content`` skip reason.
+    size_gate_drops: int = 0
 
     # Pipeline control
     done: bool = False        # stage sets True to short-circuit the loop
@@ -1028,6 +1054,7 @@ def _stage_extract_images(ctx: _ScanContext) -> None:
     (
         img_attachments, img_embedded, img_grid,
         img_warnings, img_errors, img_candidates, img_prompts,
+        img_size_gate_drops,
     ) = _process_images(
         source_path=read_path,
         workdir=ctx.workdir,
@@ -1046,17 +1073,52 @@ def _stage_extract_images(ctx: _ScanContext) -> None:
     ctx.warnings.extend(img_warnings)
     ctx.errors.extend(img_errors)
     ctx.candidate_paths = img_candidates
+    ctx.size_gate_drops += img_size_gate_drops
     ctx.caption_prompts = img_prompts
 
 
+def _stage_3dm_text_only_notice(ctx: _ScanContext) -> None:
+    """Surface a one-line warning when a 3DM event is processed.
+
+    v16.4.0 (AUDIT-6): pre-v16.4 a 3DM event got an
+    ApplicationName + object-counts + layer-roster summary with no
+    indication that visual rendering was unavailable. The audit
+    flagged this as the "every Rhino note is a layer-roster" problem
+    for SSS / ILE / CCJ / ZG. Surfacing the limitation in the warning
+    list lets the user (or the writing LLM) know the note will be
+    text-only and link to a sibling 3DM viewer if one exists.
+    """
+    if ctx.handler is None:
+        return
+    if ctx.handler.category != "cad-3dm":
+        return
+    ctx.warnings.append(
+        ".3dm metadata-only: rhino3dm exposes geometry metadata "
+        "(object counts, layer roster, ApplicationName) but no "
+        "native renderer. Visual screenshots require Rhino's CLI "
+        "(commercial) or a sidecar DXF export."
+    )
+
+
 def _stage_skip_on_no_content(ctx: _ScanContext) -> None:
-    """Enforce the no-meta-only rule after both extract stages have run."""
+    """Enforce the no-meta-only rule after both extract stages have run.
+
+    v16.4.0 (AUDIT-1c+7): when the extract stage produced image
+    candidates but every one was filtered by the size gate, emit
+    ``skip_reason='below_size_gate'`` so the user can tell the
+    handler is healthy and only the size threshold dropped the
+    files. Pre-v16.4 these skips reported the misleading
+    ``no_content`` — indistinguishable from a broken handler.
+    """
     if not ctx.skip_on_no_content:
         return
     if ctx.text != "" or ctx.images_embedded > 0:
         return
     ctx.done = True
-    ctx.skip_reason = "no_content"
+    if ctx.size_gate_drops > 0:
+        ctx.skip_reason = "below_size_gate"
+    else:
+        ctx.skip_reason = "no_content"
     if ctx.handler is not None:
         ctx.skip_category = ctx.handler.category
 
@@ -1072,6 +1134,7 @@ _PIPELINE: List = [
     _stage_fetch_to_local,
     _stage_extract_text,
     _stage_extract_images,
+    _stage_3dm_text_only_notice,
     _stage_skip_on_no_content,
 ]
 
@@ -1285,6 +1348,7 @@ def _process_images_only(
         (
             attachments, images_embedded, image_grid,
             warnings, errors, candidate_paths, caption_prompts,
+            _size_gate_drops_unused,
         ) = _process_images(
             source_path=source_path,
             workdir=workdir,

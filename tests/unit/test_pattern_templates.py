@@ -113,6 +113,11 @@ TEMPLATE_CAPABILITIES = {
         "extract_images": False,
         "render_pages": False,
     },
+    "cad_skp.py.tmpl": {
+        "read_text": True,
+        "extract_images": False,
+        "render_pages": False,
+    },
 }
 
 ALL_TEMPLATES = list(TEMPLATE_CAPABILITIES.keys())

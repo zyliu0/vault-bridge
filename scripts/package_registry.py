@@ -143,12 +143,27 @@ _STDLIB_TEXT = PackageSpec(
     pip_name="",
     import_name="",
     category="text-plain",
-    extensions=["txt", "md", "rtf"],
+    extensions=["txt", "md"],
     extract_text=True,
     extract_images=False,
     github_url="",
     preferred=True,
     notes="stdlib — no package needed; read with open().",
+)
+
+# v16.4.0 (AUDIT-4) — striprtf is the lightweight pure-Python RTF
+# reader. Falls back to LibreOffice headless if striprtf is absent
+# (handled in file_type_handlers._rtf_read_text).
+_STRIPRTF = PackageSpec(
+    pip_name="striprtf",
+    import_name="striprtf",
+    category="text-plain",
+    extensions=["rtf"],
+    extract_text=True,
+    extract_images=False,
+    github_url="https://github.com/joshy/striprtf",
+    preferred=True,
+    notes="RTF text extraction; pure-Python; falls back to LibreOffice when absent.",
 )
 
 # ---------------------------------------------------------------------------
@@ -241,6 +256,23 @@ _RHINO3DM = PackageSpec(
           "Rhino 3D files yield geometry metadata and notes.",
 )
 
+# v16.4.0 (AUDIT-5) — SketchUp metadata-only stub. No pip package
+# (the format is closed) but the dispatcher still needs an entry so
+# the handler-installer can write the cad_skp_skp.py template into
+# `<workdir>/.vault-bridge/handlers/`. The stub probes for an
+# optional `skp2obj` / `skp2unity` CLI converter at scan time.
+_SKETCHUP_STUB = PackageSpec(
+    pip_name="",
+    import_name="",
+    category="cad-skp",
+    extensions=["skp"],
+    extract_text=True,
+    extract_images=False,
+    github_url="",
+    preferred=True,
+    notes="Metadata-only stub for SketchUp .skp; optional skp2obj/skp2unity CLI fallback.",
+)
+
 
 # Build the registry: ext -> list[PackageSpec]
 # Each extension maps to a list; preferred entry comes first.
@@ -268,6 +300,7 @@ _register(_OPENPYXL)
 _register(_PILLOW)
 _register(_PILLOW_HEIF)
 _register(_STDLIB_TEXT)
+_register(_STRIPRTF)
 _register(_OLEFILE)
 _register(_XLRD)
 _register(_EZDXF_DXF)
@@ -275,6 +308,7 @@ _register(_EZDXF_DWG)
 _register(_PYMUPDF_AI)
 _register(_PSD_TOOLS)
 _register(_RHINO3DM)
+_register(_SKETCHUP_STUB)
 
 
 # ---------------------------------------------------------------------------
