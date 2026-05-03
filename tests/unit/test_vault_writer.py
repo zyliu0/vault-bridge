@@ -377,3 +377,43 @@ def test_module_does_not_export_filesystem_fallback():
             f"vault_writer.{name} exists — Bug A forbids any FS fallback. "
             f"Remove the helper; force callers through obsidian eval."
         )
+
+
+# ---------------------------------------------------------------------------
+# v16.3.0 SSS-F — rewrite_in_place
+# ---------------------------------------------------------------------------
+
+class TestRewriteInPlace:
+    """`rewrite_in_place` is a thin wrapper around write_note. It exists
+    to make the intent explicit: caller has an existing vault path
+    (typically from `vault_paths.lookup_existing`) and wants to overwrite
+    the note WITHOUT renaming it."""
+
+    def test_rewrite_in_place_calls_obsidian_eval(self):
+        runner, captured = _make_capturing_runner(
+            payload={"ok": True, "vault_path": "Foo/curated.md", "bytes_written": 10},
+        )
+        out = vault_writer.rewrite_in_place(
+            "MyVault", "Foo/curated.md", "new body\n", runner=runner,
+        )
+        assert out["ok"] is True
+        assert out["vault_path"] == "Foo/curated.md"
+        assert len(captured) == 1
+        assert captured[0][1] == "eval"
+
+    def test_rewrite_in_place_preserves_path_verbatim(self):
+        """The existing path must round-trip exactly — no slug derivation,
+        no filename normalisation. That's the whole point."""
+        runner, captured = _make_capturing_runner()
+        curated = "Lighting/2020-06-09 Tsinghua Tongheng plaza lighting scheme.md"
+        vault_writer.rewrite_in_place("V", curated, "content", runner=runner)
+        cmd_str = " ".join(str(c) for c in captured[0])
+        assert json.dumps(curated) in cmd_str
+
+    def test_rewrite_in_place_rejects_absolute_path(self):
+        """Same firewall as write_note — Bug A semantics inherited."""
+        with pytest.raises(ValueError):
+            vault_writer.rewrite_in_place(
+                "V", "/Users/mac/Vault/curated.md", "x",
+                runner=_make_success_runner(),
+            )

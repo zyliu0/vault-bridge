@@ -124,6 +124,38 @@ repair missing or wrong wikilinks.
 A broken source_path means the file was moved, renamed, or deleted on the
 source after the vault note was written. Flag it.
 
+#### v16.3.0 (SSS-C) — additional sentinels
+
+Even when the above existence check passes (or is skipped), flag notes
+whose `source_path` is one of these obviously-bogus dev-test sentinels:
+
+- `/tmp/test`
+- `/tmp/test/...`
+- `/dev/null`
+- The literal string `<unknown>` or empty string
+- Any path beginning with `/tmp/_vb_` (developer scratch from a prior session)
+
+These survive the existence check trivially (`/tmp/test` is a syntactically
+valid path) but always indicate a hand-constructed leftover from a dev
+test that escaped into the vault. Offer the user the choice to delete the
+note or set it to `orphan-confirmed: true` in frontmatter.
+
+The detection is implemented inline in the command — a small Python helper
+is fine here:
+
+```python
+_SENTINELS = ("/tmp/test", "/tmp/_vb_", "/dev/null", "<unknown>", "")
+def is_bogus_source_path(p: str) -> bool:
+    p = (p or "").strip().strip('"\'')
+    if p in {"", "<unknown>", "/dev/null"}:
+        return True
+    if p == "/tmp/test" or p.startswith("/tmp/test/"):
+        return True
+    if p.startswith("/tmp/_vb_"):
+        return True
+    return False
+```
+
 ### Check 3 — Incomplete frontmatter (schema drift)
 
 For each note, run:
@@ -192,6 +224,41 @@ original source text, which the vault does not preserve. It is strictly
 a surface audit: stop-words and length bounds. A careless scan that
 bypassed the write-time validator will still show up here as a
 multi-note pattern of failures.
+
+### Check 8 — Stale legacy abstract-stubs (v16.3.0, SSS-A)
+
+For every event-note body, run the stale-stub detector:
+
+```python
+import sys; sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
+import validate_body
+flagged = validate_body.is_stale_legacy_stub(body)
+```
+
+The detector matches the pre-v16 stub pattern (`> [!abstract] 摘要 — 源
+文档摘录` + `来自源文档：` lead OR CMap garbage runs). The SSS field
+report flagged 24 such notes that survived the v16.0 stub-kind removal.
+A flagged note can be re-processed by deleting it and re-running
+`/vault-bridge:retro-scan` on its `source_path` (or by passing the
+note's `source_path` to a future `/vault-bridge:rescan-bodies`
+command).
+
+Add `stale_stubs: N` to the report counts.
+
+### Check 9 — Epoch event_date (v16.3.0, SSS-E)
+
+Flag notes with `event_date: 1970-01-01` OR `event_date: unknown`. The
+1970 epoch was the silent fallback pre-v16.3 when the transport didn't
+supply mtime; the `unknown` sentinel is the v16.3 explicit signal that
+no date could be inferred. Both indicate the user should re-run the
+note with mtime support OR provide an explicit date.
+
+```python
+flagged = (note_fm.get("event_date") in {"1970-01-01", "unknown"}
+           or note_fm.get("event_date_source") in {"unknown"})
+```
+
+Add `epoch_dates: N` to the report counts.
 
 ## Step 5 — write the health report to the WORKING FOLDER (not the vault)
 

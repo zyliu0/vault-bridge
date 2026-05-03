@@ -175,3 +175,130 @@ def test_parent_folder_prefix_wins_when_close_to_mtime():
         mtime_unix=_mtime(2024, 9, 12),
     )
     assert result == ("2024-09-09", "parent-folder-prefix")
+
+
+# ---------------------------------------------------------------------------
+# v16.3.0 SSS-E — ancestor-folder fallback + unknown sentinel
+# ---------------------------------------------------------------------------
+
+class TestAncestorFolderPrefix:
+    """Walk ancestor folders for a date prefix when filename + parent miss.
+
+    Real archives often look like:
+        /_f-a-n/1908_SSS/2024-12-01/dwg/foo.dwg
+                          ^^^^^^^^^^ — the date is the GRANDPARENT,
+                                       not the immediate parent.
+    """
+
+    def test_grandparent_date_resolves(self):
+        result = eed.extract_event_date(
+            filename="foo.dwg",
+            parent_folder_name="dwg",
+            mtime_unix=0,
+            ancestor_path="/_f-a-n/1908_SSS/2024-12-01/dwg/foo.dwg",
+        )
+        assert result == ("2024-12-01", "ancestor-folder-prefix")
+
+    def test_yymmdd_grandparent_resolves(self):
+        result = eed.extract_event_date(
+            filename="memo.pdf",
+            parent_folder_name="docs",
+            mtime_unix=0,
+            ancestor_path="/archive/241201/docs/memo.pdf",
+        )
+        assert result == ("2024-12-01", "ancestor-folder-prefix")
+
+    def test_closest_ancestor_wins(self):
+        """When two ancestors carry dates, the one closer to the file wins."""
+        result = eed.extract_event_date(
+            filename="memo.pdf",
+            parent_folder_name="dwg",
+            mtime_unix=0,
+            ancestor_path="/2018-01-01/2024-12-01/dwg/memo.pdf",
+        )
+        assert result == ("2024-12-01", "ancestor-folder-prefix")
+
+    def test_filename_prefix_still_wins_over_ancestor(self):
+        """Priority 1 beats Priority 3 — filename wins over grandparent."""
+        result = eed.extract_event_date(
+            filename="250101 kickoff.pdf",
+            parent_folder_name="docs",
+            mtime_unix=0,
+            ancestor_path="/2024-12-01/docs/250101 kickoff.pdf",
+        )
+        assert result == ("2025-01-01", "filename-prefix")
+
+    def test_parent_prefix_still_wins_over_ancestor(self):
+        """Priority 2 beats Priority 3."""
+        result = eed.extract_event_date(
+            filename="memo.pdf",
+            parent_folder_name="2025-01-01 mtg",
+            mtime_unix=0,
+            ancestor_path="/2024-12-01/2025-01-01 mtg/memo.pdf",
+        )
+        assert result == ("2025-01-01", "parent-folder-prefix")
+
+    def test_no_ancestor_path_falls_through_to_mtime(self):
+        """When ancestor_path is None, behaviour matches the legacy
+        signature exactly — no surprise routing."""
+        result = eed.extract_event_date(
+            filename="memo.pdf",
+            parent_folder_name="docs",
+            mtime_unix=_mtime(2024, 6, 1),
+        )
+        assert result == ("2024-06-01", "mtime")
+
+
+class TestUnknownSentinel:
+    """When nothing resolves, return ('unknown', 'unknown') — not 1970-01-01.
+
+    The 1970-01-01 silent fallback corrupted MOC timelines because the
+    Gantt section grouped every dateless event at the Unix epoch,
+    pulling the project's timeline_start back to 1970.
+    """
+
+    def test_no_prefix_no_mtime_returns_unknown(self):
+        result = eed.extract_event_date(
+            filename="memo.pdf",
+            parent_folder_name="docs",
+            mtime_unix=0,
+        )
+        assert result == ("unknown", "unknown")
+
+    def test_no_prefix_negative_mtime_returns_unknown(self):
+        """Some transports use -1 to signal 'unsupported' — treat as unknown."""
+        result = eed.extract_event_date(
+            filename="memo.pdf",
+            parent_folder_name="docs",
+            mtime_unix=-1,
+        )
+        assert result == ("unknown", "unknown")
+
+    def test_no_prefix_no_mtime_no_ancestor_returns_unknown(self):
+        result = eed.extract_event_date(
+            filename="x.pdf",
+            parent_folder_name="y",
+            mtime_unix=0,
+            ancestor_path="/no/dates/here/x.pdf",
+        )
+        assert result == ("unknown", "unknown")
+
+    def test_unknown_does_not_emit_1970_epoch(self):
+        """Regression guard for the SSS-E bug — verify we never emit 1970."""
+        date_str, source = eed.extract_event_date(
+            filename="x.pdf",
+            parent_folder_name="y",
+            mtime_unix=0,
+        )
+        assert date_str != "1970-01-01"
+        assert "1970" not in date_str
+        assert source == "unknown"
+
+    def test_real_mtime_still_works_after_unknown_branch_added(self):
+        """Don't regress the existing mtime branch."""
+        result = eed.extract_event_date(
+            filename="memo.pdf",
+            parent_folder_name="docs",
+            mtime_unix=_mtime(2024, 6, 1),
+        )
+        assert result == ("2024-06-01", "mtime")

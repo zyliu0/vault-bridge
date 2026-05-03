@@ -77,26 +77,39 @@ def test_infer_status_active_within_90_days():
     assert status.status == "active"
 
 
-def test_infer_status_on_hold_between_180_and_730():
-    """v16.1.1: widened windows — active ≤180d, on-hold ≤730d."""
+def test_infer_status_closeout_between_180_and_548():
+    """v16.3.0 (SSS-G): inserted "closeout" state for projects whose
+    latest activity is 180-548 days old — typical for the
+    final-package + stabilisation phase after an architectural build
+    has shipped."""
     today = date(2024, 12, 1)
     events = _make_events(
-        ("2024-04-15", "note", "SD"),  # ~230 days ago → on-hold
+        ("2024-04-15", "note", "SD"),  # ~230 days ago → closeout
+    )
+    status = pi.infer_status(events, today)
+    assert status.status == "closeout"
+
+
+def test_infer_status_on_hold_between_548_and_1095():
+    """v16.3.0: on-hold is now 548-1095 days (~18 months to 3 years)."""
+    today = date(2026, 5, 4)
+    events = _make_events(
+        ("2024-05-13", "note", "SD"),  # ~720 days ago → on-hold (was: completed)
     )
     status = pi.infer_status(events, today)
     assert status.status == "on-hold"
 
 
-def test_infer_status_completed_over_730_days():
-    """v16.1.1: completed threshold is 730 days (2 years)."""
+def test_infer_status_completed_over_1095_days():
+    """v16.3.0: completed threshold is 1095 days (~3 years), not 730."""
     today = date(2025, 12, 1)
     events = _make_events(
-        ("2024-07-01", "note", "SD"),  # ~518 days ago → still on-hold
+        ("2024-07-01", "note", "SD"),  # ~518 days ago → closeout
     )
     status = pi.infer_status(events, today)
-    assert status.status == "on-hold"
+    assert status.status == "closeout"
     events2 = _make_events(
-        ("2023-01-01", "note", "SD"),  # >730 days ago → completed
+        ("2022-01-01", "note", "SD"),  # >1095 days → completed
     )
     status2 = pi.infer_status(events2, today)
     assert status2.status == "completed"
@@ -188,8 +201,8 @@ def test_infer_status_timeline_end_empty_when_active():
 
 
 def test_infer_status_timeline_end_set_when_completed():
-    """v16.1.1: 730-day threshold — use a 3-year-old event."""
-    today = date(2026, 12, 1)
+    """v16.3.0: 1095-day completed threshold — use a 4-year-old event."""
+    today = date(2027, 12, 1)
     events = _make_events(
         ("2023-01-01", "note1", "SD"),
         ("2023-03-15", "note2", "CD"),
@@ -198,6 +211,31 @@ def test_infer_status_timeline_end_set_when_completed():
     assert status.status == "completed"
     # timeline_end is set when completed (to the latest event date)
     assert status.timeline_end != ""
+
+
+def test_infer_status_sss_field_report_recovers_closeout():
+    """v16.3.0 (SSS-G) regression test from the 2026-05-04 SSS field
+    report. The project's latest archive activity was 2024-05-13;
+    the scan ran 2026-05-04 (~723 days later). Pre-v16.3 this read
+    as "on-hold" in the MOC frontmatter even though the user
+    explicitly described the project as "active CA / closeout"
+    with 2024 balustrade + louver packages still landing.
+    Under v16.3 the project lands in "on-hold" cleanly because 723
+    days exceeds the 548-day closeout ceiling — but a project whose
+    latest activity is 540 days old now correctly reads as
+    "closeout"."""
+    # SSS exact case: 723 days → now on-hold (not "completed" any more).
+    today = date(2026, 5, 4)
+    events = _make_events(("2024-05-13", "note", "SD"))
+    status = pi.infer_status(events, today)
+    assert status.status == "on-hold"
+
+    # The closeout state catches the more typical case where the
+    # latest activity is ~17 months prior.
+    today2 = date(2026, 5, 4)
+    events2 = _make_events(("2024-12-01", "note", "SD"))  # ~519 days → closeout
+    status2 = pi.infer_status(events2, today2)
+    assert status2.status == "closeout"
 
 
 def test_infer_status_empty_events_returns_active():
@@ -1517,3 +1555,73 @@ class TestFallbackHint:
 
     def test_derive_fallback_hint_empty_when_no_signal(self):
         assert pi.derive_fallback_hint("") == ""
+
+
+# ---------------------------------------------------------------------------
+# v16.3.0 SSS-H — cleaner auto-MOC Gantt titles
+# ---------------------------------------------------------------------------
+
+class TestStemLooksLikeId:
+    def test_uuid_flagged(self):
+        assert pi._stem_looks_like_id("0E177CBC-1234-5678-9012-345678901234") is True
+
+    def test_hex_hash_flagged(self):
+        assert pi._stem_looks_like_id("2e934b38bb211538ec9276e7ed") is True
+
+    def test_short_hex_hash_flagged(self):
+        assert pi._stem_looks_like_id("0E177CBC-1") is True
+
+    def test_bare_numeric_flagged(self):
+        assert pi._stem_looks_like_id("221107") is True
+        assert pi._stem_looks_like_id("221107-1") is True
+
+    def test_normal_descriptive_stem_not_flagged(self):
+        assert pi._stem_looks_like_id("施工图变更") is False
+        assert pi._stem_looks_like_id("Tsinghua Tongheng plaza lighting") is False
+        assert pi._stem_looks_like_id("client memo") is False
+
+    def test_empty_flagged(self):
+        assert pi._stem_looks_like_id("") is True
+        assert pi._stem_looks_like_id("   ") is True
+
+
+class TestTruncateLabel:
+    def test_short_unchanged(self):
+        assert pi._truncate_label("short label", 30) == "short label"
+
+    def test_truncates_at_token_boundary(self):
+        out = pi._truncate_label("one two three four five six seven eight", 20)
+        assert len(out) <= 22  # token boundary may shorten further
+        assert out.endswith("…")
+
+    def test_hard_cut_when_no_space(self):
+        out = pi._truncate_label("supercalifragilisticexpialidocious", 10)
+        assert out.endswith("…")
+        assert len(out) <= 12
+
+    def test_empty_input(self):
+        assert pi._truncate_label("", 30) == ""
+
+
+class TestAutoBaselineCallout:
+    """Reminder callout makes the auto baseline visually distinct so MOC
+    readers (and operators) know the body should be replaced by the
+    synthesised narrative."""
+
+    def test_callout_appears_in_deterministic_body(self):
+        from moc_writer import ComposeInput, compose_auto_zone
+        from project_index import ProjectIndexStatus
+
+        data = ComposeInput(
+            project_name="Test",
+            domain="d",
+            events=[],
+            subfolders=[],
+            status=ProjectIndexStatus(
+                status="active", timeline_start="2024-01-01", timeline_end="",
+            ),
+        )
+        body = compose_auto_zone(data)
+        assert "[!note]" in body
+        assert "Auto-baseline" in body
+        assert "vb:auto-start" in body  # mentions markers in the callout

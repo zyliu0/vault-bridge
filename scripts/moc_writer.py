@@ -92,6 +92,20 @@ def compose_auto_zone(data: ComposeInput, *, backend: str = "deterministic", **_
 def _render_deterministic(data: ComposeInput) -> str:
     status_obj = data.status
     parts: List[str] = [
+        # v16.3.0 (SSS-H) — reminder callout. The auto-zone body is the
+        # durable baseline catalogue; the project narrative belongs to
+        # an LLM-composed body authored by retro-scan / reconcile.
+        # Without this nudge, MOC readers can't tell whether they're
+        # looking at the deterministic baseline or a synthesised
+        # narrative — and operators forget to run the compose step.
+        "> [!note] Auto-baseline",
+        "> This block is the deterministic catalogue regenerated on"
+        " every scan. The narrative — what this project is, the arc,"
+        " key decisions — should be composed by the interactive scan"
+        " command (`/vault-bridge:retro-scan` or `/vault-bridge:reconcile`)"
+        " and overwrites this content between the `vb:auto-start` /"
+        " `vb:auto-end` markers.",
+        "",
         "## Status",
         f"Current status: {status_obj.status}  ",
         f"Timeline: {status_obj.timeline_start} → "

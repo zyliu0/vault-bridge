@@ -1883,3 +1883,131 @@ class TestContentConfidenceLow:
             "read_bytes": 0,
         })
         assert any("expected 'metadata-only'" in e for e in errors)
+
+
+# ---------------------------------------------------------------------------
+# v16.3.0 SSS-D — folder-event handling
+# ---------------------------------------------------------------------------
+
+class TestProcessFolder:
+    """`process_file` auto-dispatches to `process_folder` when given a
+    folder; explicit `process_folder` API is also exposed."""
+
+    @staticmethod
+    def _sp():
+        import scan_pipeline
+        return scan_pipeline
+
+    def _setup_folder(self, tmp_path):
+        d = tmp_path / "240101 kickoff"
+        d.mkdir()
+        # One readable plain-text file (text handler)
+        (d / "notes.txt").write_text("Project kickoff with the client team.\n")
+        # One file the size-gate would drop
+        (d / ".DS_Store").write_text("noise")
+        return d
+
+    def test_process_file_dispatches_to_folder(self, tmp_path):
+        sp = self._sp()
+        d = self._setup_folder(tmp_path)
+        result = sp.process_file(
+            str(d), str(tmp_path), "dom/proj/SD", "2024-01-01",
+            dry_run=True,
+        )
+        assert result.handler_category == "folder"
+        assert "Project kickoff" in result.text
+        assert result.skipped is False
+
+    def test_process_folder_picks_representatives_deterministically(self, tmp_path):
+        sp = self._sp()
+        d = tmp_path / "20240909 review"
+        d.mkdir()
+        (d / "z.txt").write_text("zebra notes\n")
+        (d / "a.txt").write_text("alpha notes\n")
+        (d / "m.txt").write_text("middle notes\n")
+        result = sp.process_folder(
+            str(d), str(tmp_path), "dom/proj/SD", "2024-09-09",
+            dry_run=True,
+        )
+        # Sorted by filename: a, m, z. With cap=3 all three appear.
+        assert "alpha" in result.text
+        assert "middle" in result.text
+        assert "zebra" in result.text
+        # Order: alpha first, zebra last.
+        assert result.text.index("alpha") < result.text.index("zebra")
+
+    def test_process_folder_skips_noise_files(self, tmp_path):
+        sp = self._sp()
+        d = tmp_path / "f"
+        d.mkdir()
+        (d / ".DS_Store").write_text("noise")
+        (d / "Thumbs.db").write_text("noise")
+        (d / ".gitkeep").write_text("noise")
+        (d / "real.txt").write_text("real content here that should appear\n")
+        result = sp.process_folder(
+            str(d), str(tmp_path), "dom/proj/SD", "2024-01-01",
+            dry_run=True,
+        )
+        assert "real content" in result.text
+        # Noise content should NOT be quoted.
+        assert "noise" not in result.text
+
+    def test_empty_folder_skips_when_skip_on_no_content_true(self, tmp_path):
+        sp = self._sp()
+        d = tmp_path / "empty"
+        d.mkdir()
+        result = sp.process_folder(
+            str(d), str(tmp_path), "dom/proj/SD", "2024-01-01",
+            dry_run=True, skip_on_no_content=True,
+        )
+        assert result.skipped is True
+        assert result.skip_reason == "no_content"
+
+    def test_empty_folder_returns_metadata_when_skip_on_no_content_false(self, tmp_path):
+        sp = self._sp()
+        d = tmp_path / "empty"
+        d.mkdir()
+        result = sp.process_folder(
+            str(d), str(tmp_path), "dom/proj/SD", "2024-01-01",
+            dry_run=True, skip_on_no_content=False,
+        )
+        assert result.skipped is False
+        assert result.handler_category == "folder"
+        assert any("empty" in w for w in result.warnings)
+
+    def test_process_folder_caps_representatives(self, tmp_path):
+        sp = self._sp()
+        d = tmp_path / "many"
+        d.mkdir()
+        for i in range(10):
+            (d / f"{i:02d}.txt").write_text(f"file {i:02d} content\n")
+        result = sp.process_folder(
+            str(d), str(tmp_path), "dom/proj/SD", "2024-01-01",
+            dry_run=True,
+        )
+        # Cap is 3 — only the first three sorted reps contribute.
+        assert "file 00" in result.text
+        assert "file 02" in result.text
+        # Beyond cap shouldn't appear.
+        assert "file 09" not in result.text
+
+    def test_nonexistent_folder_returns_skipped(self, tmp_path):
+        sp = self._sp()
+        result = sp.process_folder(
+            str(tmp_path / "ghost"), str(tmp_path), "dom/proj/SD", "2024-01-01",
+            dry_run=True,
+        )
+        assert result.skipped is True
+        assert "does not exist" in result.skip_reason
+
+    def test_process_file_on_real_file_still_works(self, tmp_path):
+        """Regression guard: dispatch logic shouldn't break file path."""
+        sp = self._sp()
+        f = tmp_path / "memo.txt"
+        f.write_text("plain text content here.\n")
+        result = sp.process_file(
+            str(f), str(tmp_path), "dom/proj/SD", "2024-01-01",
+            dry_run=True,
+        )
+        assert result.handler_category != "folder"
+        assert "plain text content" in result.text

@@ -1,5 +1,102 @@
 # Changelog
 
+## v16.3.0 — SSS-A through SSS-H: data quality + folder events + status taxonomy
+
+Closes the eight bugs surfaced by the 2026-05-04 SSS field report.
+v16.2.0's `vault_writer` audit confirmed the write path is healthy in
+the field — this release tackles the data-quality issues that
+remained: bogus extractor output, dateless events, missing folder
+support, stale legacy stubs, and the noisy auto-MOC.
+
+### Added
+
+- **`scripts/validate_body.py`** — two heuristic body-quality
+  detectors used by `vault-health` and `reconcile`:
+  - `is_stale_legacy_stub(body)` (SSS-A) — flags pre-v16
+    `> [!abstract] 摘要 — 源文档摘录` stubs that survived the v16.0
+    stub-kind removal. SSS report flagged 24 such notes.
+  - `is_garbled_extract(text)` (SSS-B) — flags PyPDF2 / python-pptx
+    CID-font dumps (multiple unbroken digit runs, CMap-debug
+    strings) before they land in note bodies.
+- **`scan_pipeline.process_folder(folder_path, …)`** (SSS-D) — first-class
+  folder-event handling. `process_file` auto-dispatches when given a
+  folder path, picking up to 3 representative files (sorted by name,
+  preferring handlered file types, skipping `.DS_Store` / `Thumbs.db`
+  noise) and merging their results into a synthesised folder-event
+  ScanResult. Every retro-scan operator pre-v16.3 reinvented this in
+  `/tmp/_vb_helper.py`; consolidating it removes the workaround.
+- **`vault_writer.rewrite_in_place(vault_name, existing_path, content)`**
+  (SSS-F) — thin wrapper around `write_note` that documents the
+  intent: caller has an existing vault path (typically from
+  `vault_paths.lookup_existing`) and wants to overwrite without
+  renaming. Pre-v16.3 operators routinely orphaned curated/translated
+  filenames by deriving fresh slugs from the source basename.
+- **`vault_paths.lookup_existing(workdir, source_path)`** (SSS-F) —
+  consults the scan index for the canonical existing vault path of a
+  source. Returns `None` when the source is not indexed or the index
+  is missing.
+- **`transport_loader.stat_mtime(workdir, transport_name, archive_path)`**
+  (SSS-E) — optional transport contract method. Returns `None` when
+  the transport doesn't define `stat_mtime`. The legacy two-method
+  contract (`fetch_to_local` + `list_archive`) is unchanged.
+- **`closeout` project status state** (SSS-G) — inserts between
+  `active` and `on-hold`. New windows: active ≤180 days, closeout
+  180-548 days, on-hold 548-1095 days, completed >1095 days. The SSS
+  field report's exact case (latest activity 720 days prior) now
+  reads as on-hold cleanly; the closeout state catches typical
+  18-month closeout-stage projects.
+
+### Changed
+
+- **`extract_event_date.extract_event_date`** (SSS-E) — added
+  `ancestor_path` keyword that walks ancestor folder names for a
+  date prefix; stops emitting `1970-01-01` when mtime is missing.
+  New source value: `"ancestor-folder-prefix"`. New sentinel:
+  `("unknown", "unknown")` when no prefix anywhere on the path
+  resolves AND mtime is missing/zero. Pre-v16.3 the silent
+  fallback to the Unix epoch corrupted MOC timelines.
+- **`scan_pipeline._stage_extract_text`** (SSS-B) — runs every
+  extracted text through `validate_body.is_garbled_extract` before
+  saving it to ScanResult; garbage gets dropped with a warning, the
+  no-content gate then skips the file or images-only handling
+  produces a real note.
+- **`project_index.infer_status`** (SSS-G) — inserts the `closeout`
+  state and widens the on-hold/completed thresholds.
+- **`project_index._cluster_label`** (SSS-H) — falls through to a
+  count-only label when the first event's stem looks like a UUID,
+  hex hash, or bare numeric id; truncates legitimate long stems to
+  30 chars with `…` rather than blowing out the Gantt section
+  render. SSS field-report sample: `0E177CBC-1 ×393` → `393 events`.
+- **`moc_writer._render_deterministic`** (SSS-H) — the auto-zone now
+  opens with a `> [!note] Auto-baseline` reminder callout pointing
+  at the `vb:auto-start` / `vb:auto-end` markers and the compose
+  step. Operators (and MOC readers) can tell at a glance whether
+  they're looking at the deterministic baseline or a synthesised
+  narrative.
+
+### Updated commands
+
+- **`/vault-bridge:vault-health`** — Check 2 extends with bogus-source
+  sentinels (`/tmp/test`, `/tmp/_vb_*`, `/dev/null`, empty,
+  `<unknown>`) (SSS-C). New Check 8 runs `validate_body.is_stale_legacy_stub`
+  on every event-note body (SSS-A). New Check 9 flags
+  `event_date: 1970-01-01` and `event_date: unknown` (SSS-E).
+- **`/vault-bridge:reconcile`** — new audit step 1e runs the
+  stale-stub detector. When `--re-read` is set AND the source
+  resolves, the legacy body is cleared and `process_file` re-runs
+  to produce a real body (SSS-A).
+
+### Why this shape
+
+SSS field report's TL;DR confirmed v16.2.0's `vault_writer` is the
+sanctioned write path in practice. The remaining eight bugs are all
+data-quality + ergonomics issues that compound: a folder event that
+fell through to "unknown file type" (SSS-D) with `event_date:
+1970-01-01` (SSS-E), no stale-stub detector to clean up old broken
+notes (SSS-A), and an MOC that read as on-hold when the operator
+considered it active (SSS-G) — each fix small, but together they
+close the data-quality gap the LAGI/SSS scans both surfaced.
+
 ## v16.2.0 — sanctioned vault-write path: vault_writer + probe (Bug A)
 
 Addresses **Bug A** of the 2026-04-27 LAGI 2025 field report: a

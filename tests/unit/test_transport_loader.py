@@ -458,3 +458,83 @@ def test_legacy_shim_single_arg_load_transport(tmp_path):
     # Single-arg form should still work (back-compat)
     mod = transport_loader.load_transport(tmp_path)
     assert callable(mod.fetch_to_local)
+
+
+# ---------------------------------------------------------------------------
+# v16.3.0 SSS-E — optional stat_mtime contract method
+# ---------------------------------------------------------------------------
+
+class TestStatMtime:
+    """`stat_mtime` is OPTIONAL on the transport contract. Transports
+    without it return None (the date pipeline then routes to
+    ancestor-folder lookup or the `unknown` sentinel — never silent
+    fallback to 1970-01-01)."""
+
+    def test_returns_none_when_transport_missing(self, tmp_path):
+        # No transport at all → graceful None.
+        result = transport_loader.stat_mtime(tmp_path, "ghost", "/anything")
+        assert result is None
+
+    def test_returns_none_when_transport_lacks_stat_mtime(self, tmp_path):
+        d = _make_transports_dir(tmp_path)
+        tp = d / "local.py"
+        tp.write_text(
+            "from pathlib import Path\n"
+            "from typing import Iterator\n"
+            "def fetch_to_local(archive_path: str) -> Path:\n"
+            "    return Path('/dev/null')\n"
+            "def list_archive(archive_root, skip_patterns=None) -> Iterator[str]:\n"
+            "    return iter([])\n"
+        )
+        result = transport_loader.stat_mtime(tmp_path, "local", "/anything")
+        assert result is None
+
+    def test_returns_mtime_when_transport_supplies_it(self, tmp_path):
+        d = _make_transports_dir(tmp_path)
+        tp = d / "local.py"
+        tp.write_text(
+            "from pathlib import Path\n"
+            "from typing import Iterator\n"
+            "def fetch_to_local(archive_path: str) -> Path:\n"
+            "    return Path('/dev/null')\n"
+            "def list_archive(archive_root, skip_patterns=None) -> Iterator[str]:\n"
+            "    return iter([])\n"
+            "def stat_mtime(archive_path: str):\n"
+            "    return 1700000000.0\n"
+        )
+        result = transport_loader.stat_mtime(tmp_path, "local", "/whatever.pdf")
+        assert result == 1700000000.0
+
+    def test_returns_none_when_transport_raises(self, tmp_path):
+        d = _make_transports_dir(tmp_path)
+        tp = d / "boom.py"
+        tp.write_text(
+            "from pathlib import Path\n"
+            "from typing import Iterator\n"
+            "def fetch_to_local(archive_path: str) -> Path:\n"
+            "    return Path('/dev/null')\n"
+            "def list_archive(archive_root, skip_patterns=None) -> Iterator[str]:\n"
+            "    return iter([])\n"
+            "def stat_mtime(archive_path: str):\n"
+            "    raise RuntimeError('not supported')\n"
+        )
+        result = transport_loader.stat_mtime(tmp_path, "boom", "/x.pdf")
+        assert result is None
+
+    def test_returns_none_when_transport_returns_zero(self, tmp_path):
+        """Some transports return 0 to signal 'unsupported' — treat as None
+        so the date pipeline falls through to the unknown sentinel."""
+        d = _make_transports_dir(tmp_path)
+        tp = d / "zero.py"
+        tp.write_text(
+            "from pathlib import Path\n"
+            "from typing import Iterator\n"
+            "def fetch_to_local(archive_path: str) -> Path:\n"
+            "    return Path('/dev/null')\n"
+            "def list_archive(archive_root, skip_patterns=None) -> Iterator[str]:\n"
+            "    return iter([])\n"
+            "def stat_mtime(archive_path: str):\n"
+            "    return 0\n"
+        )
+        result = transport_loader.stat_mtime(tmp_path, "zero", "/x.pdf")
+        assert result is None

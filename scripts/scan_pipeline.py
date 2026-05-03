@@ -40,6 +40,7 @@ import attachment_index
 import compress_images
 import file_type_handlers
 import handler_dispatcher
+import validate_body
 import vault_binary
 
 logger = logging.getLogger(__name__)
@@ -550,8 +551,15 @@ def process_file(
 
     The function never raises — all errors are captured in ScanResult.errors.
 
+    v16.3.0 (SSS-D): when ``source_path`` is a folder, automatically
+    dispatches to :func:`process_folder` rather than returning the
+    pre-v16.3 ``"unknown file type"`` skip. Every operator was
+    reinventing this dispatch in `/tmp/_vb_helper.py`; consolidating
+    it here removes the workaround.
+
     Args:
-        source_path:          Absolute or relative path to the source file.
+        source_path:          Absolute or relative path to the source file
+                              (or folder, v16.3.0+).
         workdir:              Working directory.
         vault_project_path:   Vault path of the form <project>/<subfolder>.
         event_date:           ISO date string YYYY-MM-DD for attachment naming.
@@ -573,6 +581,26 @@ def process_file(
     # Guard: empty path
     if not source_path:
         return _make_skipped(source_path, "unknown file type: no path provided")
+
+    # v16.3.0 (SSS-D): auto-dispatch folder events. Local folders go
+    # straight through; remote (un-mounted) folders fall through to
+    # the file pipeline, which logs the unknown-type skip.
+    try:
+        if Path(source_path).is_dir():
+            return process_folder(
+                source_path,
+                workdir,
+                vault_project_path,
+                event_date,
+                vault_name=vault_name,
+                throughput_bps=throughput_bps,
+                skip_on_no_content=skip_on_no_content,
+                dry_run=dry_run,
+                att_index=att_index,
+                strict_handlers=strict_handlers,
+            )
+    except OSError:
+        pass
 
     try:
         return _process_file_inner(
@@ -601,6 +629,193 @@ def process_file(
             content_confidence="none",
             image_grid=False,
         )
+
+
+# ---------------------------------------------------------------------------
+# Folder events (v16.3.0, SSS-D)
+# ---------------------------------------------------------------------------
+
+# Hard cap on representative-pick fan-out. Folders bigger than this still
+# get a folder-event note, but only the first N readable representatives
+# contribute extracted text + image candidates.
+_FOLDER_REPRESENTATIVES_CAP = 3
+
+# Filename patterns that are noise — skip when picking representatives.
+_FOLDER_REP_SKIP_PATTERNS = (
+    ".DS_Store", "Thumbs.db", "desktop.ini",
+    ".gitignore", ".gitkeep", "@eaDir",
+)
+
+
+def _pick_folder_representatives(
+    folder: Path,
+    cap: int = _FOLDER_REPRESENTATIVES_CAP,
+) -> List[Path]:
+    """Return up to ``cap`` files from ``folder`` that should represent
+    the folder's content. Picks deterministically by sorted filename
+    so a re-scan converges on the same representatives.
+
+    Skips obvious noise (``.DS_Store``, lock files, hidden dotfiles)
+    and prefers files that have a registered handler (i.e. PDFs,
+    Office docs, images). When no handlered file exists, returns
+    the first ``cap`` non-noise files so the folder note still
+    captures something.
+    """
+    try:
+        entries = sorted(p for p in folder.iterdir() if p.is_file())
+    except OSError:
+        return []
+    cleaned: List[Path] = []
+    for p in entries:
+        name = p.name
+        if name.startswith("."):
+            continue
+        if name in _FOLDER_REP_SKIP_PATTERNS:
+            continue
+        cleaned.append(p)
+    if not cleaned:
+        return []
+    handlered: List[Path] = [
+        p for p in cleaned if file_type_handlers.get_handler(str(p)) is not None
+    ]
+    if handlered:
+        return handlered[:cap]
+    return cleaned[:cap]
+
+
+def process_folder(
+    folder_path: str,
+    workdir: str,
+    vault_project_path: str,
+    event_date: str,
+    *,
+    vault_name: str = "",
+    throughput_bps: Optional[float] = None,
+    skip_on_no_content: bool = True,
+    dry_run: bool = False,
+    att_index: Optional[attachment_index.AttachmentIndex] = None,
+    strict_handlers: bool = False,
+) -> ScanResult:
+    """Synthesise a folder-event ScanResult by picking representative
+    files and merging their per-file results.
+
+    v16.3.0 (SSS-D): every retro-scan operator pre-v16.3 reinvented
+    this dispatch in `/tmp/_vb_helper.py`. Consolidating it inside
+    the pipeline removes the operator-side workaround.
+
+    The merge keeps:
+      * The first non-empty extracted text (truncated to first 4000
+        chars; folder notes are summaries, not full transcripts).
+      * Every embedded image attachment (de-duplicated via the
+        attachment index).
+      * The union of warnings / errors.
+
+    The synthesised result keeps ``handler_category="folder"`` so
+    downstream callers can branch on it.
+    """
+    folder = Path(folder_path)
+    if not folder.exists():
+        return _make_skipped(folder_path, "folder does not exist")
+    if not folder.is_dir():
+        return _make_skipped(folder_path, "process_folder called on non-folder")
+
+    reps = _pick_folder_representatives(folder)
+    if not reps:
+        # Empty folder — write a metadata-only folder note. The caller
+        # decides whether to keep it via skip_on_no_content.
+        if skip_on_no_content:
+            return _make_skipped(folder_path, "no_content", category="folder")
+        return ScanResult(
+            source_path=folder_path,
+            handler_category="folder",
+            text="",
+            attachments=[],
+            images_embedded=0,
+            skipped=False,
+            skip_reason="",
+            warnings=["folder is empty — no representatives to read"],
+            errors=[],
+            read_bytes=0,
+            sources_read=0,
+            content_confidence="none",
+            image_grid=False,
+        )
+
+    merged_text_parts: List[str] = []
+    merged_attachments: List[str] = []
+    merged_warnings: List[str] = []
+    merged_errors: List[str] = []
+    merged_candidate_paths: List[str] = []
+    images_embedded = 0
+    sources_read = 0
+    read_bytes = 0
+    seen_attachments: set = set()
+
+    for rep in reps:
+        rep_result = _process_file_inner(
+            str(rep),
+            workdir,
+            vault_project_path,
+            event_date,
+            vault_name=vault_name,
+            throughput_bps=throughput_bps,
+            skip_on_no_content=False,  # always merge, even if empty
+            dry_run=dry_run,
+            att_index=att_index,
+            strict_handlers=strict_handlers,
+        )
+        if rep_result.text:
+            merged_text_parts.append(
+                f"--- representative: {rep.name} ---\n{rep_result.text}"
+            )
+            sources_read += rep_result.sources_read
+            read_bytes += rep_result.read_bytes
+        for emb in rep_result.attachments:
+            if emb in seen_attachments:
+                continue
+            merged_attachments.append(emb)
+            seen_attachments.add(emb)
+        images_embedded += rep_result.images_embedded
+        merged_candidate_paths.extend(rep_result.image_candidate_paths or [])
+        # Tag warnings/errors with the representative so callers can
+        # tell which file produced the signal.
+        for w in rep_result.warnings:
+            merged_warnings.append(f"[{rep.name}] {w}")
+        for e in rep_result.errors:
+            merged_errors.append(f"[{rep.name}] {e}")
+
+    merged_text = "\n\n".join(merged_text_parts)[:4000]
+    if len("\n\n".join(merged_text_parts)) > 4000:
+        merged_text += "\n… [folder summary truncated]"
+
+    has_content = bool(merged_text or merged_attachments)
+    if skip_on_no_content and not has_content:
+        return _make_skipped(
+            folder_path,
+            "no_content",
+            category="folder",
+            warnings=merged_warnings,
+            errors=merged_errors,
+        )
+
+    return ScanResult(
+        source_path=folder_path,
+        handler_category="folder",
+        text=merged_text,
+        attachments=merged_attachments,
+        images_embedded=images_embedded,
+        skipped=False,
+        skip_reason="",
+        warnings=merged_warnings,
+        errors=merged_errors,
+        read_bytes=read_bytes,
+        sources_read=sources_read,
+        content_confidence=_compute_confidence(merged_text),
+        image_grid=images_embedded >= IMAGE_GRID_MIN,
+        image_candidate_paths=merged_candidate_paths,
+        image_caption_prompts=[],
+        image_captions=[],
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -768,6 +983,24 @@ def _stage_extract_text(ctx: _ScanContext) -> None:
     except Exception as exc:
         ctx.errors.append(f"text extraction error: {exc}")
         return
+
+    # v16.3.0 (SSS-B) — garbled-extract gate. PyPDF2 / python-pptx
+    # routinely produce CID-font dumps (long unbroken digit/capital
+    # runs, Advanced-encoding debug strings) when they hit fonts they
+    # can't decode. Pre-v16.3 those dumps landed verbatim in the note
+    # body; the SSS field report flagged a meeting note containing
+    # 100+ chars of `567884008400520084006750371505678…` followed by
+    # `UVWXY T4700700`. Drop the text, log a warning. The note still
+    # gets created — image grounding may still produce real content
+    # — but the body never carries fake "extracted text".
+    if text and validate_body.is_garbled_extract(text):
+        for reason in validate_body.garbled_extract_reasons(text):
+            ctx.warnings.append(reason)
+        # Hide the bogus text from the rest of the pipeline. The
+        # no-content gate later will treat this like any other
+        # readable-but-empty result.
+        text = ""
+
     if text:
         ctx.text = text
         ctx.read_bytes = len(text.encode("utf-8"))

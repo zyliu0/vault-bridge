@@ -79,3 +79,62 @@ def attachments_root(domain: str, project: str, batch_folder: Optional[str] = No
     if batch:
         return f"{folder}/_Attachments/{batch}"
     return f"{folder}/_Attachments"
+
+
+# ---------------------------------------------------------------------------
+# v16.3.0 SSS-F — lookup_existing: consult the scan index for the
+# canonical existing vault path of a source, so rewrites preserve any
+# curated/translated filename instead of computing a fresh one.
+# ---------------------------------------------------------------------------
+
+def lookup_existing(workdir, source_path: str) -> Optional[str]:
+    """Return the existing vault path for ``source_path`` from the scan
+    index, or ``None`` if not indexed.
+
+    Preserves curated filenames across rewrites — pre-v16.3 operators
+    routinely orphaned their existing notes by deriving a new
+    filename from the source basename. Example from the SSS field
+    report:
+
+        existing vault path: ``Lighting/2020-06-09 Tsinghua Tongheng plaza lighting scheme.md``
+        source basename:     ``200609 清华同衡照明方案/``
+        wrong rewrite:       ``Lighting/2020-06-09 清华同衡照明方案.md``
+
+    With ``lookup_existing``, the operator gets the existing curated
+    path back from the scan index and rewrites in place via
+    ``vault_writer.rewrite_in_place``, keeping the translated name
+    intact.
+
+    Returns ``None`` when:
+      * ``source_path`` is empty or has never been indexed.
+      * The scan index file is missing or unreadable.
+      * The indexed entry is malformed.
+
+    Tolerates a missing scan index — useful in fresh workdirs.
+    """
+    if not source_path:
+        return None
+    try:
+        # Local import: vault_scan loads optional state; vault_paths is
+        # used by code paths (tests, vault_writer) that should not
+        # transitively pull vault_scan.
+        import sys as _sys
+        from pathlib import Path as _P
+        _here = _P(__file__).resolve().parent
+        if str(_here) not in _sys.path:
+            _sys.path.insert(0, str(_here))
+        import vault_scan
+    except Exception:
+        return None
+    try:
+        by_path, _ = vault_scan.load_index(workdir)
+    except Exception:
+        return None
+    entry = by_path.get(source_path)
+    if not entry:
+        return None
+    try:
+        _, note_path = entry
+    except (TypeError, ValueError):
+        return None
+    return note_path or None

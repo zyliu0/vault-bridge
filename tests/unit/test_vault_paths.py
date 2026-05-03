@@ -105,3 +105,58 @@ class TestProjectFolder:
 
     def test_project_folder(self):
         assert vault_paths.project_folder("arch-projects", "2408 Sample") == "arch-projects/2408 Sample"
+
+
+# ---------------------------------------------------------------------------
+# v16.3.0 SSS-F — lookup_existing: consult scan index for canonical path
+# ---------------------------------------------------------------------------
+
+class TestLookupExisting:
+    def _setup_index(self, tmp_path, entries):
+        """Write a minimal index.tsv at the workdir's `.vault-bridge/`
+        location. Returns the workdir."""
+        d = tmp_path / ".vault-bridge"
+        d.mkdir(parents=True, exist_ok=True)
+        index = d / "index.tsv"
+        with index.open("w") as f:
+            for source, fp, note in entries:
+                f.write(f"{source}\t{fp}\t{note}\n")
+        return tmp_path
+
+    def test_returns_existing_note_path(self, tmp_path):
+        wd = self._setup_index(tmp_path, [
+            ("/archive/200609 清华同衡照明方案/", "abc123",
+             "Lighting/2020-06-09 Tsinghua Tongheng plaza lighting scheme.md"),
+        ])
+        result = vault_paths.lookup_existing(
+            wd, "/archive/200609 清华同衡照明方案/",
+        )
+        assert result == "Lighting/2020-06-09 Tsinghua Tongheng plaza lighting scheme.md"
+
+    def test_returns_none_when_source_not_indexed(self, tmp_path):
+        wd = self._setup_index(tmp_path, [])
+        result = vault_paths.lookup_existing(wd, "/archive/never/indexed.pdf")
+        assert result is None
+
+    def test_returns_none_when_index_missing(self, tmp_path):
+        # No index file at all.
+        result = vault_paths.lookup_existing(tmp_path, "/some/source.pdf")
+        assert result is None
+
+    def test_returns_none_for_empty_source(self, tmp_path):
+        wd = self._setup_index(tmp_path, [
+            ("/archive/file.pdf", "fp", "Folder/note.md"),
+        ])
+        assert vault_paths.lookup_existing(wd, "") is None
+        assert vault_paths.lookup_existing(wd, None) is None
+
+    def test_preserves_curated_filename(self, tmp_path):
+        """The whole point: rewrite uses the existing curated path,
+        not a fresh slug derived from the source basename."""
+        wd = self._setup_index(tmp_path, [
+            ("/archive/221107_同济最新图纸/", "fp",
+             "CD/2022-11-07 同济最新图纸 降高度变更送审.md"),
+        ])
+        out = vault_paths.lookup_existing(wd, "/archive/221107_同济最新图纸/")
+        # The translated/expanded "降高度变更送审" suffix must round-trip.
+        assert "降高度变更送审" in out

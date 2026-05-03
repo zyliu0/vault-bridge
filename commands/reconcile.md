@@ -422,6 +422,30 @@ present but no source reads tracked. May contain fabricated specifics."
 This is NOT a judgment call — it's an honest label. The old workflow didn't
 track reads, so ALL old notes get this flag unless `--re-read` is used.
 
+### 1e. Stale legacy abstract-stub (v16.3.0, SSS-A)
+
+Run the stale-stub detector on the body:
+
+```python
+import sys; sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
+import validate_body
+flagged = validate_body.is_stale_legacy_stub(body)
+```
+
+The detector matches the pre-v16 stub pattern (`> [!abstract] 摘要 — 源
+文档摘录` + `来自源文档：` lead OR CMap garbage runs). The SSS field
+report flagged 24 such notes that survived the v16.0 stub-kind removal.
+
+When flagged AND `--re-read` is set AND `source_path` resolves on the
+file system, treat the note like Phase 2b but **clear the body
+entirely** before re-running `scan_pipeline.process_file` — the legacy
+stub body must not contaminate the rewrite. Add the note to the
+"stale stubs reprocessed" tally in the audit report.
+
+When flagged but `--re-read` is NOT set, surface in the audit report
+under "stale stubs (re-run with --re-read to fix)" so the user can
+choose whether to re-read.
+
 ### Audit report
 
 Print a summary table:

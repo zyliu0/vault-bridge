@@ -117,8 +117,11 @@ class ProjectIndexEvent:
 
 @dataclass
 class ProjectIndexStatus:
-    """Inferred project status and timeline."""
-    status: str              # "active"|"on-hold"|"completed"|"archived"
+    """Inferred project status and timeline.
+
+    v16.3.0 (SSS-G): added ``closeout`` to the enum.
+    """
+    status: str              # "active"|"closeout"|"on-hold"|"completed"|"archived"
     timeline_start: str      # YYYY-MM-DD
     timeline_end: str        # "" if ongoing
     parties: List[str] = field(default_factory=list)
@@ -129,24 +132,36 @@ class ProjectIndexStatus:
 # infer_status
 # ---------------------------------------------------------------------------
 
-# v16.1.1 — widened the "active" window from 90 to 180 days after the
-# v16.0.3 field report flagged a project (last event 361 days prior to
-# the scan) reading as "on-hold" when the user still considered the
-# arc alive. 90 days was aggressive — real architectural, photography,
-# and research arcs routinely go quiet for 3-6 months between
-# deliverables. 180 days covers that floor; projects truly idle for
-# 6+ months are correctly reported as "on-hold" for user review.
+# v16.3.0 (SSS-G) — added a "closeout" state between "active" and
+# "on-hold". The SSS field report flagged a real-world case: a 6-year
+# project arc whose latest archive activity was ~720 days prior. The
+# user considered the project "active CA / closeout" because the 2024
+# balustrade + louver packages had landed and a SANAA design output
+# zip from late 2024 was still in the archive. Pre-v16.3 the binary
+# active/on-hold split rendered such projects as "on-hold", which
+# misled MOC readers. v16.3.0 inserts:
+#   - active   ≤ 180 days
+#   - closeout 180-548 days (~18 months — covers final-package +
+#                            stabilisation activity after the build)
+#   - on-hold  548-1095 days (~3 years — still recoverable arc)
+#   - completed > 1095 days
+#
+# The user can always override by editing `status:` in the index
+# frontmatter directly; the generator preserves it.
 _STATUS_ACTIVE_DAYS = 180
-_STATUS_ON_HOLD_DAYS = 730   # 2 years
+_STATUS_CLOSEOUT_DAYS = 548     # ~18 months
+_STATUS_ON_HOLD_DAYS = 1095     # ~3 years
 
 
 def infer_status(events: List[ProjectIndexEvent], today: date) -> ProjectIndexStatus:
     """Infer project status from the list of events.
 
-    Pure date-based inference (v14.4+, thresholds widened v16.1.1):
-      - Latest event ≤180 days ago → "active"
-      - 180 < days ≤730 → "on-hold"
-      - >730 days → "completed"
+    Pure date-based inference (v14.4+, thresholds widened v16.1.1,
+    "closeout" state added v16.3.0 SSS-G):
+      - Latest event ≤180 days ago         → "active"
+      - 180 < days ≤548 (~18 months)       → "closeout" (v16.3.0)
+      - 548 < days ≤1095 (~3 years)        → "on-hold"
+      - >1095 days                         → "completed"
 
     Previous versions sniffed `summary_hint` for keywords like
     "completed" / "cancelled" / "archived" to override the date rule.
@@ -184,6 +199,9 @@ def infer_status(events: List[ProjectIndexEvent], today: date) -> ProjectIndexSt
 
     if days_ago <= _STATUS_ACTIVE_DAYS:
         status = "active"
+        timeline_end = ""
+    elif days_ago <= _STATUS_CLOSEOUT_DAYS:
+        status = "closeout"
         timeline_end = ""
     elif days_ago <= _STATUS_ON_HOLD_DAYS:
         status = "on-hold"
@@ -661,12 +679,21 @@ def _cluster_label(cluster: dict, index_suffix: Optional[int]) -> str:
     if not pretty:
         # v16.1.1 fallback: rather than a useless count like "3 events",
         # use the first event's stem (minus date prefix). Reads as what
-        # the event is actually about.
+        # the event is actually about — UNLESS the stem looks like a
+        # UUID / hex hash / bare numeric id (v16.3.0 SSS-H), in which
+        # case the count-only label is more readable than `0E177CBC-1
+        # ×393`.
         if events:
             first_stem = events[0].note_filename or ""
             if first_stem.endswith(".md"):
                 first_stem = first_stem[:-3]
-            pretty = _strip_date_prefix(first_stem).strip()
+            candidate = _strip_date_prefix(first_stem).strip()
+            if _stem_looks_like_id(candidate):
+                pretty = ""  # force count-only fallback below
+            else:
+                # v16.3.0 (SSS-H): cap label length so a long stem can't
+                # blow out the Gantt section render.
+                pretty = _truncate_label(candidate, 30)
         if not pretty:
             pretty = f"{len(events)} event{'s' if len(events) != 1 else ''}"
         elif len(events) > 1:
@@ -676,6 +703,50 @@ def _cluster_label(cluster: dict, index_suffix: Optional[int]) -> str:
     if index_suffix is not None:
         pretty = f"{pretty} ({index_suffix})"
     return _mermaid_escape(pretty)
+
+
+# v16.3.0 (SSS-H): regexes used by `_cluster_label` to recognise
+# stems that read as junk in a Gantt section title.
+_HEX_HASH_RE = re.compile(r"^[0-9A-Fa-f]{8,}(?:[-_]\d+)?$")
+_UUID_RE = re.compile(
+    r"^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}"
+    r"-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}(?:[-_]\d+)?$",
+)
+_BARE_NUMERIC_RE = re.compile(r"^\d+(?:[-_]\d+)?$")
+
+
+def _stem_looks_like_id(stem: str) -> bool:
+    """Return True when the stripped stem reads as a non-descriptive
+    machine identifier — UUID, hex hash, or bare numeric run.
+
+    Used by ``_cluster_label`` to fall through to the count-only
+    label rather than emit `0E177CBC-1 ×393` style noise. Field
+    report SSS-H, 2026-05-04.
+    """
+    s = (stem or "").strip()
+    if not s:
+        return True
+    if _UUID_RE.match(s):
+        return True
+    if _HEX_HASH_RE.match(s):
+        return True
+    if _BARE_NUMERIC_RE.match(s):
+        return True
+    return False
+
+
+def _truncate_label(text: str, max_chars: int) -> str:
+    """Truncate ``text`` to ``max_chars``, breaking on a token boundary
+    when one exists, otherwise hard-cutting and appending ``…``."""
+    s = (text or "").strip()
+    if len(s) <= max_chars:
+        return s
+    cutoff = s[:max_chars]
+    # Prefer the last whitespace before the cutoff for a clean break.
+    last_space = cutoff.rfind(" ")
+    if last_space > max_chars // 2:
+        return cutoff[:last_space] + "…"
+    return cutoff + "…"
 
 
 def _mermaid_escape(text: str) -> str:

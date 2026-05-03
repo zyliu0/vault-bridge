@@ -213,6 +213,30 @@ def _build_delete_path_js(vault_path: str) -> str:
 # write_note — single-note entry point
 # ---------------------------------------------------------------------------
 
+def rewrite_in_place(
+    vault_name: str,
+    existing_vault_path: str,
+    content: str,
+    runner: Optional[Callable] = None,
+) -> Dict:
+    """Rewrite an existing note in place, preserving its curated filename.
+
+    v16.3.0 (SSS-F). Thin wrapper around :func:`write_note` that exists
+    to make the intent explicit: the caller has an existing vault path
+    (typically from :func:`vault_paths.lookup_existing`) and wants to
+    overwrite the note WITHOUT renaming it. Pre-v16.3 every operator
+    reinvented this: derive a fresh filename from the source basename,
+    write that, and accidentally orphan the existing translated/curated
+    note.
+
+    Use ``write_note`` for new notes; use ``rewrite_in_place`` when the
+    existing path is sourced from the scan index or an audit walk.
+    Behaviour is identical (create-or-modify via ``obsidian eval``);
+    the function name is the contract.
+    """
+    return write_note(vault_name, existing_vault_path, content, runner=runner)
+
+
 def write_note(
     vault_name: str,
     vault_path: str,

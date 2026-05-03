@@ -290,6 +290,49 @@ def _path_segment_skipped(rel_path: str, patterns: List[str]) -> bool:
     return False
 
 
+def stat_mtime(
+    workdir: Path,
+    transport_name: str,
+    archive_path: str,
+) -> Optional[float]:
+    """Return the mtime (Unix timestamp) of an archive path, or None.
+
+    v16.3.0 (SSS-E): the SSS field report flagged that
+    `extract_event_date` fell to ``1970-01-01`` whenever the transport
+    did not supply mtime — and pre-v16.3 the transport contract had
+    no way to ask. ``stat_mtime`` is **optional**: transports without
+    it return ``None`` here, and the date pipeline routes through the
+    new ancestor-folder + ``unknown`` sentinel paths instead.
+
+    The legacy two-method contract (``fetch_to_local`` + ``list_archive``)
+    is unchanged. Existing transports keep working.
+
+    Returns:
+        ``float`` mtime if the transport supports stat and the file
+        exists; ``None`` if the transport doesn't define ``stat_mtime``,
+        or it raised, or the path doesn't exist.
+    """
+    try:
+        mod = load_transport(workdir, transport_name)
+    except (TransportMissing, TransportInvalid):
+        return None
+    fn = getattr(mod, "stat_mtime", None)
+    if not callable(fn):
+        return None
+    try:
+        result = fn(archive_path)
+    except Exception:
+        # Defensive: never let an unsupported stat_mtime crash the scan.
+        return None
+    if result is None:
+        return None
+    try:
+        out = float(result)
+    except (TypeError, ValueError):
+        return None
+    return out if out > 0 else None
+
+
 def list_archive(
     workdir: Path,
     transport_name: str,
