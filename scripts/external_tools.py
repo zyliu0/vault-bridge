@@ -122,18 +122,25 @@ class ToolSpec:
     """Specification for one external CLI tool.
 
     Attributes:
-        name:            Short slug used as the consent-cache key.
-        label:           Human-readable display name.
-        categories:      Handler categories that shell out to this tool.
-        binaries:        Names to look up via shutil.which.
-        macos_app_paths: Absolute paths accepted as "installed" on macOS,
-                         since some casks don't link into /usr/local/bin.
-        install_cmds:    Per-platform shell command list or None if the
-                         tool has no auto-install path on that platform.
-                         Keys: 'darwin', 'linux.debian', 'linux.fedora',
-                         'linux.arch', 'win32'. Missing keys mean
-                         "no auto-install on this OS".
-        size_hint:       Rough install size / time string for prompts.
+        name:                Short slug used as the consent-cache key.
+        label:               Human-readable display name.
+        categories:          Handler categories that shell out to this tool.
+        binaries:            Names to look up via shutil.which.
+        macos_app_paths:     Absolute paths accepted as "installed" on macOS,
+                             since some casks don't link into /usr/local/bin.
+        install_cmds:        Per-platform shell command list or None if the
+                             tool has no auto-install path on that platform.
+                             Keys: 'darwin', 'linux.debian', 'linux.fedora',
+                             'linux.arch', 'win32'. Missing keys mean
+                             "no auto-install on this OS".
+        size_hint:           Rough install size / time string for prompts.
+        manual_install_hint: Free-form instructions surfaced when no
+                             install_cmds entry exists for the current OS
+                             (v16.6.x). Used for tools whose package
+                             manager moved or never existed on a given
+                             platform — e.g. LibreDWG on macOS post-2025
+                             (Homebrew formula removed; users install
+                             from source or MacPorts). Empty when not set.
     """
     name: str
     label: str
@@ -142,6 +149,7 @@ class ToolSpec:
     macos_app_paths: Tuple[str, ...] = ()
     install_cmds: dict = field(default_factory=dict)
     size_hint: str = ""
+    manual_install_hint: str = ""
 
 
 # LibreOffice — powers .doc / .ppt legacy extraction. Cask on macOS,
@@ -170,10 +178,20 @@ LIBREOFFICE = ToolSpec(
 
 # LibreDWG — GNU alternative to ODA File Converter for .dwg. Provides
 # `dwg2dxf`, which the cad-dwg handler can pipe into ezdxf (already
-# installed). Smaller than ODA and no click-through EULA, so it's a
-# strict-win auto-install path that eliminates the manual ODA step for
-# the common case. Linux-only packaging on most distros; on macOS it's
-# a keg-only brew formula.
+# installed). Smaller than ODA and no click-through EULA.
+#
+# v16.6.x — Homebrew dropped the `libredwg` formula sometime in 2025;
+# `brew search libredwg` now returns the unrelated `libre` (network
+# I/O) and `librecad` (KiCAD-style CAD viewer) suggestions. The
+# pre-v16.6 install command (``brew install libredwg``) reliably
+# fails with ``No available formula with the name "libredwg"``,
+# which `external_tools.install_tool` then reports as a generic
+# install error. Fix: drop the broken darwin auto-install entry.
+# On macOS the user installs LibreDWG either from source
+# (https://www.gnu.org/software/libredwg/) or via MacPorts
+# (`port install libredwg`); neither is suitable for unattended
+# auto-install in setup. Detection (`shutil.which`) continues to
+# pick up any `dwg2dxf` on PATH regardless of how it landed there.
 LIBREDWG = ToolSpec(
     name="libredwg",
     label="LibreDWG (dwg2dxf)",
@@ -181,12 +199,18 @@ LIBREDWG = ToolSpec(
     binaries=("dwg2dxf", "dwgread"),
     macos_app_paths=(),
     install_cmds={
-        "darwin":        ["brew", "install", "libredwg"],
+        # darwin intentionally absent — see comment above.
         "linux.debian":  ["apt-get", "install", "-y", "libredwg-tools"],
         "linux.fedora":  ["dnf", "install", "-y", "libredwg"],
         "linux.arch":    ["pacman", "-S", "--noconfirm", "libredwg"],
     },
     size_hint="~15 MB, <1 min",
+    manual_install_hint=(
+        "macOS: install LibreDWG from source "
+        "(https://www.gnu.org/software/libredwg/) or via MacPorts "
+        "(`sudo port install libredwg`). Homebrew dropped the "
+        "formula in 2025."
+    ),
 )
 
 
@@ -414,6 +438,40 @@ def detect_missing_tools(installed_categories: Iterable[str]) -> List[MissingToo
                 install_cmd=install_cmd,
             )
     return list(seen_by_name.values())
+
+
+def detect_manual_install_hints(
+    installed_categories: Iterable[str],
+) -> List["tuple[ToolSpec, str]"]:
+    """Return tools that are NOT auto-installable on this OS but have a
+    ``manual_install_hint`` worth surfacing.
+
+    v16.6.x — companion to :func:`detect_missing_tools`. Some tools
+    (LibreDWG on macOS post-2025) have no working package-manager
+    install path, yet the user still benefits from a clear pointer
+    at the manual install. The setup wizard's Step 6.5e prints
+    those hints once after the auto-install loop, so the user knows
+    the gap exists and how to close it.
+
+    Skipped silently when the tool is already detected on PATH —
+    nothing actionable to surface in that case.
+    """
+    out: List["tuple[ToolSpec, str]"] = []
+    seen: set = set()
+    platform_key = _platform_key()
+    for category in installed_categories:
+        spec = _spec_by_category(category)
+        if spec is None or spec.name in seen:
+            continue
+        if is_tool_present(spec):
+            continue
+        if spec.install_cmds.get(platform_key) is not None:
+            continue
+        if not spec.manual_install_hint:
+            continue
+        seen.add(spec.name)
+        out.append((spec, spec.manual_install_hint))
+    return out
 
 
 # ---------------------------------------------------------------------------

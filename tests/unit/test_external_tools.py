@@ -329,6 +329,10 @@ class TestFormatPromptLabel:
         assert "~500 MB" in out
 
     def test_multiple_tools_joined_with_semicolons(self):
+        # v16.6.x: LibreDWG no longer has a darwin install_cmd
+        # (Homebrew dropped the formula). Use the linux.debian
+        # entry to drive the multi-tool prompt — the formatter
+        # itself is platform-independent.
         m1 = et.MissingTool(
             spec=et.LIBREOFFICE,
             categories=("document-office-legacy",),
@@ -337,7 +341,7 @@ class TestFormatPromptLabel:
         m2 = et.MissingTool(
             spec=et.LIBREDWG,
             categories=("cad-dwg",),
-            install_cmd=list(et.LIBREDWG.install_cmds["darwin"]),
+            install_cmd=list(et.LIBREDWG.install_cmds["linux.debian"]),
         )
         out = et.format_prompt_label([m1, m2])
         assert "Install 2 missing tool(s)" in out
@@ -419,3 +423,62 @@ class TestDiagnosticForCategory:
         msg = et.diagnostic_for_category("cad-dwg")
         assert msg == ""
 
+
+
+# ---------------------------------------------------------------------------
+# v16.6.x — Homebrew dropped libredwg formula; ensure no broken
+# auto-install prompt fires on darwin and the manual hint surfaces.
+# ---------------------------------------------------------------------------
+
+class TestLibredwgDarwinFormulaRemoval:
+    def test_libredwg_has_no_darwin_install_cmd(self):
+        """v16.6.x — `brew install libredwg` reliably fails since
+        Homebrew dropped the formula in 2025. The macOS install_cmd
+        entry must stay absent so detect_missing_tools never proposes
+        a known-broken auto-install."""
+        import external_tools
+        assert "darwin" not in external_tools.LIBREDWG.install_cmds
+
+    def test_libredwg_carries_manual_install_hint(self):
+        """The hint replaces the dropped auto-install path so the user
+        still gets actionable guidance."""
+        import external_tools
+        hint = external_tools.LIBREDWG.manual_install_hint
+        assert hint
+        # Surfaces both supported install routes the user has on macOS.
+        assert "MacPorts" in hint or "macports" in hint.lower()
+        assert "source" in hint.lower()
+
+    def test_detect_missing_tools_skips_libredwg_on_darwin(self, monkeypatch):
+        """When the tool is absent and there's no auto-install path,
+        detect_missing_tools must NOT propose a fake darwin install."""
+        import external_tools
+        monkeypatch.setattr(external_tools, "_platform_key", lambda: "darwin")
+        monkeypatch.setattr(external_tools, "is_tool_present", lambda spec: False)
+        out = external_tools.detect_missing_tools(["cad-dwg"])
+        # No entry → the setup wizard's auto-install loop won't fire.
+        assert out == []
+
+    def test_detect_manual_install_hints_surfaces_libredwg_on_darwin(self, monkeypatch):
+        import external_tools
+        monkeypatch.setattr(external_tools, "_platform_key", lambda: "darwin")
+        monkeypatch.setattr(external_tools, "is_tool_present", lambda spec: False)
+        hints = external_tools.detect_manual_install_hints(["cad-dwg"])
+        assert len(hints) == 1
+        spec, hint = hints[0]
+        assert spec.name == "libredwg"
+        assert "MacPorts" in hint or "source" in hint
+
+    def test_detect_manual_install_hints_skips_when_tool_present(self, monkeypatch):
+        """If dwg2dxf is on PATH we have nothing to surface."""
+        import external_tools
+        monkeypatch.setattr(external_tools, "_platform_key", lambda: "darwin")
+        monkeypatch.setattr(external_tools, "is_tool_present", lambda spec: True)
+        assert external_tools.detect_manual_install_hints(["cad-dwg"]) == []
+
+    def test_linux_install_paths_still_present(self):
+        """Linux distros still have working libredwg packages — keep them."""
+        import external_tools
+        assert "linux.debian" in external_tools.LIBREDWG.install_cmds
+        assert "linux.fedora" in external_tools.LIBREDWG.install_cmds
+        assert "linux.arch" in external_tools.LIBREDWG.install_cmds

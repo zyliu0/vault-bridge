@@ -1,5 +1,44 @@
 # Changelog
 
+## v16.6.1 — drop broken `brew install libredwg` (Homebrew formula removed)
+
+Homebrew dropped the `libredwg` formula sometime in 2025;
+`brew search libredwg` now suggests `libre` (an unrelated network
+I/O toolkit) and `librecad`. The pre-v16.6.1 darwin install entry
+(``brew install libredwg``) reliably failed with
+``No available formula with the name "libredwg"``, which
+``external_tools.install_tool`` reported as a generic install
+error.
+
+### Fixed
+- ``external_tools.LIBREDWG.install_cmds`` no longer carries a
+  darwin entry. ``detect_missing_tools`` therefore stops proposing
+  a known-broken auto-install on macOS.
+
+### Added
+- ``ToolSpec.manual_install_hint`` — free-form instructions
+  surfaced when no auto-install path exists for the current OS.
+  LibreDWG's hint points at the GNU upstream tarball + MacPorts
+  (``sudo port install libredwg``); detection (``shutil.which``)
+  continues to pick up any ``dwg2dxf`` on PATH regardless of how
+  it landed there.
+- ``external_tools.detect_manual_install_hints(categories)`` —
+  companion to ``detect_missing_tools``. Returns
+  ``(spec, hint_text)`` pairs so the setup wizard's Step 6.5e can
+  print the hint once after the auto-install loop.
+
+### Verified in the field
+- `dwg2dxf` 0.13.4 installed at `/Users/mac/.local/bin/dwg2dxf` (built
+  from source on the 2026-05-04 SSS rescan host) is correctly detected
+  by ``shutil.which`` and ``is_tool_present``; the cad-dwg handler
+  picks it up unchanged. Linux distros (Debian/Ubuntu/Fedora/Arch)
+  still have working ``libredwg`` packages — those install paths are
+  preserved.
+
+6 new tests in ``test_external_tools.py`` lock the no-darwin-install
+behavior, the manual-hint surfacing, and the linux paths staying
+intact. Full suite: 2051 passing.
+
 ## v16.6.0 — DWG/PDF unblock: page-render fallback, capability probes, NBSP-safe paths, folder-vs-file robustness
 
 Closes the four-batch action list from the 2026-05-04 v16.5.0
