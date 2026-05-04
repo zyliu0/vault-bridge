@@ -124,6 +124,65 @@ Present a multi-select AskUserQuestion listing all changed templates:
 Install only the selected templates using the same installer script above,
 filtering to only the user-selected paths.
 
+## Step 3.5 — refresh outdated workdir handlers (v16.7.0, TLS Bug 4)
+
+Pre-v16.7 self-update only refreshed slash-command + Obsidian-template
+files; per-extension handler files in
+`<workdir>/.vault-bridge/handlers/` were rendered once at setup and
+never refreshed. The 2026-05-04 TLS field report flagged a real
+consequence: a v16.6.0 plugin with a 2026-04-23 `cad_dwg_dwg.py` that
+predated the LibreDWG two-converter path. This step closes that gap.
+
+Detect drifted handlers (compares installed bodies against current
+pattern templates, ignoring `# generated_at`, `# Version`, and other
+volatile install metadata):
+
+```bash
+python3 -c "
+import json, sys
+from pathlib import Path
+sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
+import handler_refresh
+
+drift = handler_refresh.detect_outdated_handlers(str(Path.cwd()))
+print(json.dumps([
+    {'category': d.category, 'ext': d.ext, 'reason': d.reason}
+    for d in drift
+]))
+"
+```
+
+When drift is non-empty, prompt via AskUserQuestion:
+
+> "{N} workdir handler(s) have new template versions. What would you like to do?"
+>
+> Options:
+> - "Refresh all" — re-render every drifted handler
+> - "Review individually" — pick which to refresh
+> - "Skip handler refresh" — leave installed handlers as-is
+
+For "Refresh all" or the user-selected subset, call:
+
+```bash
+python3 -c "
+import sys
+from pathlib import Path
+sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
+import handler_refresh
+
+choices = handler_refresh.detect_outdated_handlers(str(Path.cwd()))
+# (filter `choices` here when running the 'individually' path)
+result = handler_refresh.refresh_handlers(str(Path.cwd()), choices)
+for cat, ext in result.refreshed:
+    print(f'refreshed: {cat} (.{ext})')
+for cat, ext, msg in result.failed:
+    print(f'FAILED: {cat} (.{ext}): {msg}', file=sys.stderr)
+"
+```
+
+Skip the prompt entirely when drift is empty — the user shouldn't see
+a "0 handlers to refresh" question.
+
 ## Step 4 — report result
 
 Print a summary:

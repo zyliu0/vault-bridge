@@ -376,7 +376,18 @@ def read_text_with_status(
     ext = Path(path).suffix.lstrip(".").lower()
     mod_path = _handler_module_path(workdir, category, ext)
     if mod_path is None:
-        return "", None
+        # v16.7.0 (TLS Bug 3): pre-v16.7 a missing handler module
+        # returned "" silently — the user had no signal that the file
+        # type was even attempted. Surface a clear error so the
+        # extraction-error registry / `read_text_with_status` callers
+        # see something actionable. The TLS field report flagged this
+        # for `.xls`: a known-registered category whose per-extension
+        # handler file was never realised at setup time.
+        return "", (
+            f"no handler installed for category {category!r} "
+            f"(.{ext} files). Run /vault-bridge:setup → F (Edit file "
+            f"types) to install the handler."
+        )
     module = _load_module(mod_path)
     if module is None:
         return "", f"handler module failed to load: {mod_path.name}"
@@ -429,7 +440,12 @@ def extract_images_with_status(
     ext = Path(path).suffix.lstrip(".").lower()
     mod_path = _handler_module_path(workdir, category, ext)
     if mod_path is None:
-        return [], None
+        # v16.7.0 (TLS Bug 3) — see read_text_with_status above.
+        return [], (
+            f"no handler installed for category {category!r} "
+            f"(.{ext} files). Run /vault-bridge:setup → F (Edit file "
+            f"types) to install the handler."
+        )
     module = _load_module(mod_path)
     if module is None:
         return [], f"handler module failed to load: {mod_path.name}"

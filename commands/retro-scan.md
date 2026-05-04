@@ -192,6 +192,37 @@ and retry. Do not attempt to write any notes via `Path.write_text`,
 sanctioned write path. There is no `vault_fs_root()` helper and there
 is no fallback. The lack of one is the forcing function.
 
+### Step 1b — handler-pipeline pre-flight (v16.7.0, TLS Bug 6)
+
+Run `handler_probe.probe_all` end-to-end before any source files are
+processed. The 2026-05-04 TLS field report flagged plugin-source
+regressions (PDF CMap garbage, DWG token-soup) that produced
+`content_confidence: high` notes pre-v16.7. The pre-flight catches a
+broken extractor at scan-start rather than after dozens of bad notes
+have landed in the vault.
+
+```bash
+python3 -c "
+import sys
+sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
+import handler_probe
+results = handler_probe.probe_all('$(pwd)')
+fails = [r for r in results if not r.ok and r.skip_reason != 'no_fixture']
+if fails:
+    print('⚠ handler-pipeline pre-flight failed for {} of {} probes:'.format(
+        len(fails), len(results),
+    ), file=sys.stderr)
+    for r in fails:
+        hint = r.external_tool_missing or r.skip_reason or 'no output'
+        print(f'  {r.ext}: {hint}', file=sys.stderr)
+    print('Aborting scan to protect against silent regressions. '
+          'Run /vault-bridge:setup → F (Edit file types) to repair.',
+          file=sys.stderr)
+    sys.exit(1)
+print('pre-flight: {} probe(s) ok'.format(len(results)))
+" || exit 1
+```
+
 ## Step 1 — load config and resolve domain
 
 Load the v4 config:

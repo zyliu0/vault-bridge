@@ -403,41 +403,141 @@ def consume_extraction_error(path: str) -> Optional[str]:
 
 
 def _pdf_read_text(path: str) -> str:
-    """Extract text from a PDF using PyPDF2.
+    """Extract text from a PDF.
 
-    v16.5.0 (Fix F): when PyPDF2 returns less than 50 characters of
-    text — typical for scanned/image-only PDFs — fall through to
-    pytesseract OCR over the page renders if pytesseract + Pillow
-    are both importable. The OCR path is gracefully optional: if
-    pytesseract is missing, returns whatever PyPDF2 found (even if
-    empty) and the no-content gate handles the rest.
+    v16.7.0 (TLS Bug 1+5): cascade through pdfplumber → PyMuPDF (fitz)
+    → pdfminer.six → PyPDF2 → OCR. Pre-v16.7 the built-in dispatch was
+    PyPDF2-only, which produces 4 KB of CMap garbage like
+    ``OOb?WÎNa^ú¾èOá`oQl_…`` on Chinese PDFs that use ``/UniGB-UTF16-H``,
+    ``/UniCNS-UTF16-H``, or other CID-keyed fonts. The 2026-05-04 TLS
+    field report confirmed pdfplumber/fitz/pdfminer all produce clean
+    text on the same files; this rewrite makes them the preferred path.
 
-    v16.6.0 (Batch C7): record library-level exceptions in the
-    extraction-error registry so ``read_text_with_status`` can
-    surface them as warnings instead of silently returning ``""``.
+    Design notes:
+      * pdfplumber goes first because it handles CJK glyph layout
+        better than fitz (per-glyph stripping is acceptable; the
+        garble gate later filters the result if extraction quality
+        is too low).
+      * fitz is second — fast, full Adobe-GB1 / Adobe-Japan1 support.
+      * pdfminer.high_level.extract_text is the third try; it is the
+        same engine pdfplumber wraps but with different defaults so
+        worth retrying when pdfplumber's layout pass mangled glyphs.
+      * PyPDF2 stays as a low-priority fallback for back-compat.
+        PyPDF2's ``warnings.warn`` calls (``Advanced encoding /UniGB-
+        UTF16-H not implemented yet``) are now captured and surfaced
+        through the extraction-error registry so they no longer
+        disappear into stderr.
+      * OCR via pytesseract over PyMuPDF page renders is the final
+        fallback for scanned PDFs (v16.5.0, Fix F).
+
+    Each extractor's exception goes through ``_record_extraction_error``
+    so ``read_text_with_status`` can surface it as a warning instead of
+    silently returning ``""``.
     """
+    # 1. pdfplumber — best layout-aware CJK support via pdfminer.six.
+    try:
+        import pdfplumber  # type: ignore
+        with pdfplumber.open(path) as pdf:
+            parts = [
+                (p.extract_text() or "")
+                for p in pdf.pages[:200]
+            ]
+        text = "\n\n".join(s for s in parts if s.strip())
+        if text.strip():
+            return text
+    except Exception as exc:
+        _record_extraction_error(path, "pdfplumber", exc)
+        logger.debug("pdfplumber failed for %s: %s", path, exc)
+
+    # 2. PyMuPDF (fitz) — fast, full Adobe-GB1 support.
+    try:
+        import fitz  # type: ignore
+        doc = fitz.open(path)
+        try:
+            n = min(len(doc), 200)
+            parts = [doc.load_page(i).get_text() for i in range(n)]
+        finally:
+            doc.close()
+        text = "\n\n".join(s for s in parts if s.strip())
+        if text.strip():
+            return text
+    except Exception as exc:
+        _record_extraction_error(path, "PyMuPDF", exc)
+        logger.debug("fitz failed for %s: %s", path, exc)
+
+    # 3. pdfminer.six high-level — same engine pdfplumber wraps but
+    # with different defaults; sometimes succeeds where pdfplumber's
+    # layout pass mangled glyphs.
+    try:
+        from pdfminer.high_level import extract_text as _pdfminer_text  # type: ignore
+        text = _pdfminer_text(path, maxpages=200) or ""
+        if text.strip():
+            return text
+    except Exception as exc:
+        _record_extraction_error(path, "pdfminer.six", exc)
+        logger.debug("pdfminer.six failed for %s: %s", path, exc)
+
+    # 4. PyPDF2 — last text extractor (kept for compatibility). Capture
+    # any ``warnings.warn`` output (e.g. CMap-not-supported diagnostics)
+    # so the extraction-error registry sees them; pre-v16.7 these
+    # warnings disappeared into stderr (TLS Bug 5).
     pypdf_text = ""
+    pypdf_warnings: List[str] = []
+    import warnings as _warnings
     try:
         import PyPDF2  # type: ignore
-        reader = PyPDF2.PdfReader(path)
-        parts: List[str] = []
-        for page in reader.pages:
-            try:
-                t = page.extract_text()
-                if t:
-                    parts.append(t)
-            except Exception:
-                pass
-        pypdf_text = "\n".join(parts).strip()
     except Exception as exc:
         _record_extraction_error(path, "PyPDF2", exc)
-        logger.debug("PDF text extraction failed for %s: %s", path, exc)
+        return _pdf_ocr_fallback(path) or ""
 
-    # If PyPDF2 produced meaningful text, return it.
+    with _warnings.catch_warnings(record=True) as captured:
+        _warnings.simplefilter("always")
+        try:
+            reader = PyPDF2.PdfReader(path)
+            parts2: List[str] = []
+            for page in reader.pages:
+                try:
+                    t = page.extract_text()
+                    if t:
+                        parts2.append(t)
+                except Exception:
+                    pass
+            pypdf_text = "\n".join(parts2).strip()
+        except Exception as exc:
+            _record_extraction_error(path, "PyPDF2", exc)
+            logger.debug("PyPDF2 failed for %s: %s", path, exc)
+        for w in captured or []:
+            msg = str(w.message)
+            pypdf_warnings.append(msg)
+            # CJK-CMap diagnostic — surface as a real error so the
+            # user knows to install pdfplumber/PyMuPDF for this PDF.
+            if (
+                "Advanced encoding /Uni" in msg
+                or "/UniGB" in msg
+                or "/UniCNS" in msg
+                or "/UniJIS" in msg
+                or "/UniKS" in msg
+                or "/Adobe-GB1" in msg
+                or "/Adobe-Japan1" in msg
+            ):
+                _record_extraction_error(
+                    path, "PyPDF2",
+                    RuntimeError(
+                        "CJK CMap not supported by PyPDF2: "
+                        + msg
+                        + ". Install pdfplumber or PyMuPDF for clean text."
+                    ),
+                )
+                # Drop PyPDF2's CMap-decoded garbage on the floor —
+                # pdfplumber already failed, but garbage is worse than
+                # nothing because the garble gate downstream may miss
+                # short outputs.
+                pypdf_text = ""
+
     if len(pypdf_text) >= 50:
         return pypdf_text
 
-    # Otherwise try OCR via pytesseract over PyMuPDF page renders.
+    # 5. OCR via pytesseract over PyMuPDF page renders (Fix F).
     ocr_text = _pdf_ocr_fallback(path)
     if ocr_text:
         return ocr_text

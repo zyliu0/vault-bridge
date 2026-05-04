@@ -1,5 +1,112 @@
 # Changelog
 
+## v16.7.0 — TLS rescan regressions: PDF cascade, token-soup gate, missing-handler surfacing, pre-flight probe (TLS Bugs 1-6)
+
+Closes the six bugs from the 2026-05-04 TLS pre-reconcile probe report
+(`2109 TLS 塘朗山看台`). The probe ran before any vault writes and
+flagged three classes of regression that v16.6.0 had not closed:
+PDF dispatch was PyPDF2-only despite pdfplumber/fitz/pdfminer.six all
+being installed; DWG token output was getting tagged
+``content_confidence: high`` and would have made reconcile skip those
+events forever; XLS handlers returned silent zero bytes. All
+dependencies were on the host — the bugs were in the dispatch glue.
+
+### Fixed (TLS Bug 1 — PDF extractor cascade)
+
+- ``_pdf_read_text`` now cascades pdfplumber → PyMuPDF (fitz) →
+  pdfminer.six → PyPDF2 → OCR. Pre-v16.7 the built-in PDF dispatch
+  was PyPDF2-only, which produces 4 KB of CMap garbage on Chinese
+  PDFs that use ``/UniGB-UTF16-H`` and other CID-keyed fonts. The
+  TLS field report confirmed that pdfplumber/fitz/pdfminer all
+  produce clean text on the same files; this rewrite makes them the
+  preferred path. The user-installed delegated handler at
+  ``<workdir>/.vault-bridge/handlers/document_pdf_pdf.py`` no longer
+  needs to exist for clean PDF extraction — the built-in path is
+  now correct on its own.
+
+### Fixed (TLS Bug 5 — PyPDF2 warnings captured)
+
+- PyPDF2's ``warnings.warn`` output (``Advanced encoding /UniGB-UTF16-H
+  not implemented yet``) now gets recorded in the extraction-error
+  registry and propagates up through ``ScanResult.errors`` /
+  ``warnings``. Pre-v16.7 these warnings printed to stderr and
+  disappeared. PyPDF2's CMap-decoded garbage is now dropped on the
+  floor instead of returned, so it can't pass downstream gates.
+
+### Fixed (TLS Bug 2 — token-soup gate)
+
+- ``validate_body.is_garbled_extract`` now also flags **token soup**
+  (text dominated by 1-3 char tokens with ≥60% pure-digit ratio).
+  This is the canonical DWG TEXT/MTEXT/ATTRIB extract shape — station
+  numbers, dimension tags, contour elevations. Pre-v16.7 a 170 KB
+  output of ``4 6 6 4 5 6 4 3 5 5 5 6 …`` got tagged
+  ``content_confidence: high`` and reconcile then skipped the event
+  in subsequent runs, making the garbage load-bearing.
+- New helpers ``is_token_soup(text)`` and ``token_soup_stats(text)``.
+  ``garbled_extract_reasons`` surfaces a token-soup-specific message
+  pointing the user at page-image render rather than a different
+  text extractor.
+
+### Fixed (TLS Bug 3 — missing-handler surfacing)
+
+- ``handler_dispatcher.read_text_with_status`` and
+  ``extract_images_with_status`` now return an actionable error
+  string when the per-extension handler module is missing. Pre-v16.7
+  ``read_text(workdir, "spreadsheet-legacy", "...xls")`` returned
+  ``""`` silently when the handler file didn't exist. The TLS field
+  report flagged this for ``.xls``: a registered category whose
+  handler was never realised at setup time, with no user-facing
+  signal that the extraction was even attempted.
+
+### Added (TLS Bug 6 — pre-flight handler probe in reconcile/retro-scan)
+
+- ``/vault-bridge:reconcile --re-read`` adds **Step 0d**: runs
+  ``handler_probe.probe_all`` end-to-end before any Phase 2 writes.
+  Failures abort the run with an actionable hint pointing at
+  ``/vault-bridge:setup → F``. Skipped when ``--re-read`` is NOT
+  set since frontmatter touch-ups don't run extractors.
+- ``/vault-bridge:retro-scan`` adds **Step 1b** with the same probe
+  gate.
+- The TLS field report flagged that a naive operator running
+  ``--re-read`` after a plugin upgrade would have clobbered 58 notes
+  with garbage; the operator caught it manually via a 3-file probe.
+  This step makes that probe a built-in pre-condition.
+
+### Added (TLS Bug 4 — self-update refreshes drifted handlers)
+
+- New ``scripts/handler_refresh.py``: ``detect_outdated_handlers``
+  walks ``<workdir>/.vault-bridge/handlers/<stem>_<ext>.py`` and
+  compares each against ``<plugin-root>/scripts/handlers/patterns/
+  <stem>.py.tmpl``. Volatile install metadata (``# generated_at``,
+  ``# Version``, ``# package_name``, ``# pip_name``, ``# source``,
+  ``# ext``) is stripped before comparison so cosmetic-only template
+  tweaks don't trigger refresh prompts. Returns drift entries with
+  short reason strings (``"template adds: _convert_via_libredwg,
+  DwgConverterMissing"``) so the user can tell what changed.
+- ``refresh_handlers(workdir, choices)`` re-renders the chosen
+  handlers via ``handler_installer.generate_handler_stub``, keeping
+  rendering logic in one place.
+- ``/vault-bridge:self-update`` adds **Step 3.5**: detects drifted
+  handlers, prompts via AskUserQuestion (``Refresh all`` / ``Review
+  individually`` / ``Skip``), then refreshes the user's choices.
+  Skipped silently when no drift is detected.
+- The TLS field report's headline reproducer (a 2026-04-23
+  ``cad_dwg_dwg.py`` predating the LibreDWG two-converter path) is
+  the test case in ``test_handler_refresh.py``.
+
+### Why this shape
+
+The TLS field report explicitly named v16.7.0's order: PDF cascade
+first (every PDF event ever written or rewritten was at risk), then
+the token-soup gate (DWG events were silently mis-tagged as verified),
+then the pre-flight probe (so the next regression doesn't have to be
+caught by an operator's manual probe). The handler-refresh path lands
+last because the operator already had a manual workaround
+(``/vault-bridge:setup → F``); it makes the upgrade flow self-healing.
+
+7 new tests in ``test_handler_refresh.py`` covering drift detection +
+refresh; 2058 passing total.
+
 ## v16.6.1 — drop broken `brew install libredwg` (Homebrew formula removed)
 
 Homebrew dropped the `libredwg` formula sometime in 2025;

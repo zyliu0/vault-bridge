@@ -135,6 +135,53 @@ print(f'probe: ok ({out[\"detail\"]})')
 never falls back to `Path.write_text` or a vault filesystem root —
 the lack of any such helper is the forcing function (Bug A).
 
+### Step 0d — handler-pipeline pre-flight (v16.7.0, TLS Bug 6)
+
+When `--re-read` is set, run `handler_probe.probe_all` BEFORE any
+Phase 2 writes. The 2026-05-04 TLS field report flagged a regression
+where a naive operator running `--re-read` after a plugin upgrade
+would have clobbered 58 notes with PDF CMap garbage and DWG token-
+soup, both passing the size gate and getting tagged
+``content_confidence: high``. The pre-flight probe runs each
+extension end-to-end through `scan_pipeline.process_file` against a
+built-in fixture; failures abort `--re-read` so the user can repair
+handlers via `/vault-bridge:setup → F` before any vault writes.
+
+Skip when `--re-read` is NOT set — Phase 2 frontmatter touch-ups
+don't run extractors and can't produce content regressions.
+
+```bash
+if [ "$RE_READ_FLAG" = "1" ]; then
+  python3 -c "
+import sys
+sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
+import handler_probe
+results = handler_probe.probe_all('$(pwd)')
+fails = [r for r in results if not r.ok and r.skip_reason != 'no_fixture']
+if fails:
+    print('⚠ handler-pipeline pre-flight failed for {} of {} probes:'.format(
+        len(fails), len(results),
+    ), file=sys.stderr)
+    for r in fails:
+        hint = r.external_tool_missing or r.skip_reason or 'no output'
+        print(f'  {r.ext}: {hint}', file=sys.stderr)
+    print('Aborting --re-read to protect existing notes. '
+          'Run /vault-bridge:setup → F (Edit file types) to repair, '
+          'or re-run reconcile without --re-read for frontmatter-only updates.',
+          file=sys.stderr)
+    sys.exit(1)
+print('pre-flight: {} probe(s) ok'.format(len(results)))
+" || exit 1
+fi
+```
+
+The probe runs in <2 seconds for the bundled fixture set (txt, md,
+png, jpg, jpeg, gif, webp, bmp, tiff, tif, rtf). Format-specific
+binary fixtures (PDF, DOCX, PPTX, XLSX, DWG) are tested at
+`/vault-bridge:setup` time via the install-time package_registry +
+external_tools probes; they don't run here because building one-time
+binary fixtures inside reconcile would dominate the cost.
+
 ## Step 1 — load config
 
 Load the v3 config and resolve the domain:

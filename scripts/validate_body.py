@@ -150,7 +150,78 @@ def is_garbled_extract(text: str) -> bool:
         has_extreme_run = bool(_LONG_NONSPACE_RUN_RE.search(text))
         if has_extreme_run and coverage > 0.25:
             return True
+    # v16.7.0 (TLS Bug 2) — token-soup detector. DWG TEXT/MTEXT/ATTRIB
+    # entities extract as 1-3 char tokens (station numbers, dimension
+    # tags, layer labels, contour elevations). The result is honest
+    # DXF text but useless for confidence-tagging — pre-v16.7 a 170 KB
+    # output of `4 6 6 4 5 6 4 3 5 5 5 6 2 3 ...` got tagged
+    # ``content_confidence: high``, which then made reconcile skip the
+    # event in subsequent runs. The garbage became load-bearing.
+    if is_token_soup(text):
+        return True
     return False
+
+
+_TOKEN_SOUP_MIN_CHARS = 5_000
+_TOKEN_SOUP_MIN_TOKENS = 500
+_TOKEN_SOUP_SHORT_RATIO = 0.85
+_TOKEN_SOUP_DIGIT_RATIO = 0.60
+
+
+def is_token_soup(text: str) -> bool:
+    """Return True when ``text`` is dominated by short, digit-heavy
+    tokens with no narrative — the canonical DWG TEXT/MTEXT extract
+    shape.
+
+    v16.7.0 (TLS Bug 2). Conservative — requires:
+      * total length ≥ 5 000 chars (smaller is too easy to mis-flag)
+      * ≥ 500 tokens after whitespace split
+      * ≥ 85% of tokens are 1-3 chars
+      * ≥ 60% of tokens are pure digits
+
+    Real prose (CJK or otherwise) never hits this combination because
+    word-tokens average longer than 3 chars and the digit ratio stays
+    below 30% in any human-readable language. CAD coordinate dumps,
+    survey-station labels, and dimension-tag exports trip every gate.
+    """
+    if not text or len(text) < _TOKEN_SOUP_MIN_CHARS:
+        return False
+    tokens = text.split()
+    if len(tokens) < _TOKEN_SOUP_MIN_TOKENS:
+        return False
+    short_count = 0
+    digit_count = 0
+    for tok in tokens:
+        if len(tok) <= 3:
+            short_count += 1
+        if tok.isdigit():
+            digit_count += 1
+    short_ratio = short_count / len(tokens)
+    digit_ratio = digit_count / len(tokens)
+    return (
+        short_ratio >= _TOKEN_SOUP_SHORT_RATIO
+        and digit_ratio >= _TOKEN_SOUP_DIGIT_RATIO
+    )
+
+
+def token_soup_stats(text: str) -> dict:
+    """Return diagnostic stats describing token-soup characteristics.
+
+    Used by ``garbled_extract_reasons`` to surface a meaningful
+    warning to the user instead of a generic "text dropped" message.
+    """
+    if not text:
+        return {"tokens": 0, "short_ratio": 0.0, "digit_ratio": 0.0}
+    tokens = text.split()
+    if not tokens:
+        return {"tokens": 0, "short_ratio": 0.0, "digit_ratio": 0.0}
+    short_count = sum(1 for t in tokens if len(t) <= 3)
+    digit_count = sum(1 for t in tokens if t.isdigit())
+    return {
+        "tokens": len(tokens),
+        "short_ratio": short_count / len(tokens),
+        "digit_ratio": digit_count / len(tokens),
+    }
 
 
 def garbled_extract_reasons(text: str) -> List[str]:
@@ -170,6 +241,22 @@ def garbled_extract_reasons(text: str) -> List[str]:
         )
         return reasons
     if not is_garbled_extract(text):
+        return reasons
+    # v16.7.0 — surface the token-soup case explicitly because it has
+    # a different remedy (use page-image render, not a different text
+    # extractor) than the CMap/digit-run cases.
+    if is_token_soup(text):
+        stats = token_soup_stats(text)
+        reasons.append(
+            f"token-soup: {stats['tokens']} tokens, "
+            f"{int(stats['short_ratio'] * 100)}% short (≤3 chars), "
+            f"{int(stats['digit_ratio'] * 100)}% digit-only"
+        )
+        reasons.append(
+            "text dropped — likely CAD coordinate labels / station "
+            "numbers / dimension tags. The handler ran but produced "
+            "no narrative content; consider page-image render instead."
+        )
         return reasons
     digit_runs = _LONG_DIGIT_RUN_RE.findall(text)
     if digit_runs:
