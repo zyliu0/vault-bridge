@@ -1624,6 +1624,26 @@ Collect the scan summary fields in memory for the Step 9 report:
 - orphaned_notes_avoided: notes that would have been orphaned but got wikilinks proactively
 - Any renames detected
 - Any self-check findings
+- **Unknown-extension tally** (v16.9.0, TLS Ask 8) — see below
+
+### Step 7c — unknown-extension summary (v16.9.0, TLS Ask 8)
+
+Before writing the memory report, surface any extensions that fell
+through as ``unknown file type``. The 2026-05-04 TLS field report
+flagged that 2 INDD files vanished from the vault with no end-of-scan
+signal; the operator only noticed by manual diff. The summary closes
+that gap:
+
+```python
+import sys
+sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
+import scan_pipeline
+tally = scan_pipeline.summarize_unknown_extensions(all_results)
+if tally:
+    msg = scan_pipeline.format_unknown_extensions_summary(tally)
+    print(f'⚠ {msg}', file=sys.stderr)
+    # Add `unknown_extensions: {".indd": 2, ".sketch": 1}` to STATS_JSON.
+```
 
 These go into the `notes` and `counts` fields of the `$STATS_JSON` passed
 to `memory_report.py retro` in Step 9.

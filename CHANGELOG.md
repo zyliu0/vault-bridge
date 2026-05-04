@@ -1,5 +1,87 @@
 # Changelog
 
+## v16.9.0 — TLS round 2: InDesign / Sketch / Figma handlers, unknown-ext warning, 3DM empty-vs-failed, probe fixtures expanded
+
+Closes the remaining asks from the 2026-05-04/05 TLS scan review
+(round 2). v16.8.0 fixed the per-format gates the operator caught
+manually; v16.9.0 closes the silent-skip class for design-tool
+formats the operator hadn't yet realised were dropping.
+
+### Added (TLS Ask 4 — InDesign INDD/IDML handler)
+
+- New ``design-indd`` category, registered for ``.indd`` and
+  ``.idml``. Template at ``scripts/handlers/patterns/design_indd.py.tmpl``:
+  - ``.idml`` reads via stdlib ``zipfile`` + ``xml.etree.ElementTree``
+    over ``Stories/Story_*.xml``, concatenating ``<Content>`` text.
+    No external dep; works out of the box.
+  - ``.indd`` scans the first 8 MiB for the embedded JFIF preview
+    every InDesign document carries, writes it as a JPEG candidate
+    image. ``read_text`` returns a metadata summary pointing at the
+    .idml export route for full prose.
+- Pre-v16.9 the 2026-05-04 TLS scan dropped 2 .indd files silently
+  as ``unknown file type``. They now produce a real note with a
+  hero JFIF preview when the document carries one.
+
+### Added (TLS Ask 13 — Sketch + Figma stubs)
+
+- ``design-sketch`` (``.sketch``) — metadata-only stub that probes
+  for ``sketchtool`` on PATH (macOS-only). When absent, emits
+  size + mtime + format note.
+- ``design-figma`` (``.fig``) — metadata-only stub. The Kiwi-schema
+  format has no community Python reader; the stub emits metadata
+  + a pointer to Figma's REST API for full extraction.
+
+### Added (TLS Ask 8 — unknown-extension scan-end summary)
+
+- New ``scan_pipeline.summarize_unknown_extensions(results) -> {ext: n}``
+  + ``format_unknown_extensions_summary(tally) -> str``. The
+  retro-scan command spec gains a Step 7c that prints
+  ``saw N unknown-extension event(s): .indd ×2, .sketch ×1, .fig ×1``
+  to stderr and adds the tally to ``STATS_JSON`` so the memory
+  report records what was silently dropped.
+
+### Changed (TLS Ask 11 — 3DM empty-vs-failed distinction)
+
+- ``cad_3dm.py.tmpl::read_text`` now distinguishes "file opened
+  cleanly but contains no geometry" (returns an annotated metadata
+  stub) from "rhino3dm read failed" (raises ``RuntimeError`` so
+  ``read_text_with_status`` surfaces the real cause). Pre-v16.9
+  both cases returned ``""``, indistinguishable. PT8 contract
+  ("nonexistent path returns ``\"\"``") preserved by an explicit
+  ``os.path.exists`` short-circuit at the top.
+
+### Changed (TLS Ask 7 — handler_probe fixture set expanded)
+
+- ``handler_probe._build_fixtures`` now ships fixtures for
+  ``cad-skp``, ``design-sketch``, ``design-figma`` (metadata-only
+  stubs that pass on any non-empty file), and ``design-indd`` /
+  ``.idml`` (a synthetic IDML zip with a single ``Stories/Story_uvb.xml``
+  carrying a ``<Content>`` element). Pre-v16.9 the probe table
+  showed 8 ``no_fixture`` rows; v16.9 covers the metadata-only
+  half so probe-skipped categories are exclusively the binary
+  formats that need a real test artifact (PDF, DOCX, PPTX, XLSX,
+  DWG, AI, PSD, 3DM).
+
+### Re-test plan for the TLS field-report files
+
+After ``self-update`` + handler-refresh:
+
+- INDD (附件1.indd, 附件2.indd) — note body should carry size +
+  mtime + format note; if the document has an embedded preview,
+  a hero JPEG should be embedded.
+- IDML (if present) — note body should carry the full prose of
+  every text frame.
+- SKETCH (any .sketch) — metadata stub, no silent skip.
+- 3DM (211003+ 大观亭.3dm, etc.) — empty 3DMs now show
+  "Objects: 0 (file opened cleanly but contains no geometry —
+  likely a fragmentary or empty working file)" rather than ``""``.
+- Memory report — should include
+  ``unknown_extensions: {".indd": 0}`` (or whatever the residual
+  unknown-ext tally is).
+
+42 new test rows across pattern templates + scan_pipeline; suite
+2100 passing total.
+
 ## v16.8.0 — TLS scan-review handoff: CAD render gate fix, DWG noise filter, cad-skp default, template-policy clarification
 
 Closes the actionable asks from the 2026-05-04/05 TLS scan-review

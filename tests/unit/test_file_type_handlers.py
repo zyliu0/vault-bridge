@@ -862,6 +862,9 @@ _EXTENDED_VALID_CATEGORIES = {
     "raster-psd",
     "cad-3dm",
     "cad-skp",  # v16.4.0 (AUDIT-5)
+    "design-indd",   # v16.9.0 (TLS Ask 4) — InDesign INDD/IDML
+    "design-sketch", # v16.9.0 (TLS Ask 13) — Sketch metadata stub
+    "design-figma",  # v16.9.0 (TLS Ask 13) — Figma metadata stub
 }
 
 

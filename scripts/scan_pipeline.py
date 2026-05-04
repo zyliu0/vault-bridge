@@ -31,7 +31,7 @@ import tempfile
 import time
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 _HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(_HERE))
@@ -1713,6 +1713,60 @@ def _process_images_only(
         image_candidate_paths=candidate_paths,
         image_caption_prompts=caption_prompts,
         image_captions=[],
+    )
+
+
+# ---------------------------------------------------------------------------
+# v16.9.0 (TLS Ask 8) — unknown-extension summary
+# ---------------------------------------------------------------------------
+
+def summarize_unknown_extensions(results: List[ScanResult]) -> Dict[str, int]:
+    """Tally extensions that fell through as ``unknown file type``.
+
+    The 2026-05-04 TLS field report flagged that operators had no
+    end-of-scan signal for files silently dropped because no handler
+    matched. INDD, IDML, Sketch, Figma all silently skipped without
+    any aggregate warning. ``summarize_unknown_extensions`` returns
+    ``{ext: count}`` so retro-scan / heartbeat-scan can print
+    ``saw N unknown extensions: indd, idml, sketch`` at the end of a
+    run and operators can prioritise handler additions.
+
+    Returns ``{}`` for an empty input or one with no unknown skips.
+    """
+    out: Dict[str, int] = {}
+    for r in results or []:
+        if not r.skipped:
+            continue
+        # Match both ``unknown file type`` and ``unknown file type: no path provided``.
+        if not (r.skip_reason or "").lower().startswith("unknown file type"):
+            continue
+        try:
+            ext = Path(r.source_path).suffix.lstrip(".").lower() or "(no ext)"
+        except Exception:
+            ext = "(unknown)"
+        out[ext] = out.get(ext, 0) + 1
+    return dict(sorted(out.items(), key=lambda kv: -kv[1]))
+
+
+def format_unknown_extensions_summary(tally: Dict[str, int]) -> str:
+    """Render the unknown-extension tally as a single-line warning.
+
+    Example::
+
+        saw 4 unknown-extension events: .indd ×2, .sketch ×1, .fig ×1.
+        These files were silently skipped — no handler matches their
+        extension. Add a handler via /vault-bridge:setup → F to
+        capture them on the next scan.
+    """
+    if not tally:
+        return ""
+    total = sum(tally.values())
+    parts = ", ".join(f".{ext} ×{n}" for ext, n in tally.items())
+    return (
+        f"saw {total} unknown-extension event(s): {parts}. "
+        "These files were silently skipped — no handler matches their "
+        "extension. Add a handler via /vault-bridge:setup → F to "
+        "capture them on the next scan."
     )
 
 

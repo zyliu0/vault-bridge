@@ -213,6 +213,44 @@ _CAD_SKP = HandlerConfig(
     render_pages=False,
 )
 
+# v16.9.0 (TLS Ask 4) — Adobe InDesign documents.
+# .indd is a closed binary format with an embedded JFIF preview;
+# .idml is a zip of XML stories that we can text-extract via
+# stdlib. The 2026-05-04 TLS field report flagged 2 INDD files
+# silently dropped as "unknown file type"; this category closes
+# that gap with a delegated handler that emits at minimum a
+# JFIF preview + metadata summary.
+_DESIGN_INDD = HandlerConfig(
+    category="design-indd",
+    extract_text=True,
+    extract_images=True,
+    compress=True,
+    run_vision=True,
+    render_pages=False,
+)
+
+# v16.9.0 (TLS Ask 13) — Sketch (.sketch) and Figma export (.fig)
+# metadata-only stubs. Both are closed/proprietary; the handler
+# emits a metadata summary so the file doesn't silently fall
+# through as "unknown file type".
+_DESIGN_SKETCH = HandlerConfig(
+    category="design-sketch",
+    extract_text=True,
+    extract_images=False,
+    compress=False,
+    run_vision=False,
+    render_pages=False,
+)
+
+_DESIGN_FIGMA = HandlerConfig(
+    category="design-figma",
+    extract_text=True,
+    extract_images=False,
+    compress=False,
+    run_vision=False,
+    render_pages=False,
+)
+
 HANDLERS: Dict[str, HandlerConfig] = {
     # document-pdf
     "pdf": _PDF,
@@ -251,6 +289,12 @@ HANDLERS: Dict[str, HandlerConfig] = {
     "3dm": _CAD_3DM,
     # cad-skp (SketchUp — metadata-only stub via optional skp2obj CLI)
     "skp": _CAD_SKP,
+    # design-indd (Adobe InDesign — JFIF preview + IDML XML text)
+    "indd": _DESIGN_INDD,
+    "idml": _DESIGN_INDD,
+    # design-sketch / design-figma (metadata-only stubs)
+    "sketch": _DESIGN_SKETCH,
+    "fig": _DESIGN_FIGMA,
     # video
     "mp4": _VIDEO,
     "mov": _VIDEO,

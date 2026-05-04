@@ -118,6 +118,21 @@ TEMPLATE_CAPABILITIES = {
         "extract_images": False,
         "render_pages": False,
     },
+    "design_indd.py.tmpl": {
+        "read_text": True,
+        "extract_images": True,
+        "render_pages": False,
+    },
+    "design_sketch.py.tmpl": {
+        "read_text": True,
+        "extract_images": False,
+        "render_pages": False,
+    },
+    "design_figma.py.tmpl": {
+        "read_text": True,
+        "extract_images": False,
+        "render_pages": False,
+    },
 }
 
 ALL_TEMPLATES = list(TEMPLATE_CAPABILITIES.keys())

@@ -153,6 +153,46 @@ def _build_fixtures(out_dir: Path) -> Dict[str, Path]:
     p.write_bytes(rtf)
     fixtures["rtf"] = p
 
+    # v16.9.0 (TLS Ask 7) — synthetic fixtures for design-format
+    # categories that would otherwise show up as `no_fixture` in the
+    # probe results table. The handlers for these categories are
+    # metadata-only stubs that rely solely on filesystem stat (size +
+    # mtime) so any non-empty file passes the probe.
+    skp_bytes = b"vault-bridge probe SKP fixture (not a real SketchUp file)\n"
+    sketch_bytes = b"vault-bridge probe Sketch fixture (not a real Sketch zip)\n"
+    fig_bytes = b"vault-bridge probe Figma fixture (not a real .fig)\n"
+    for ext, payload in (("skp", skp_bytes),
+                         ("sketch", sketch_bytes),
+                         ("fig", fig_bytes)):
+        p = out_dir / f"probe.{ext}"
+        p.write_bytes(payload)
+        fixtures[ext] = p
+
+    # IDML — synthesisable as a stdlib zipfile carrying one minimal
+    # Stories/Story_*.xml entry. The design-indd handler reads stories
+    # via stdlib zipfile + ElementTree, so this fixture exercises the
+    # full extraction path.
+    import io
+    import zipfile
+    idml_buf = io.BytesIO()
+    with zipfile.ZipFile(idml_buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr(
+            "Stories/Story_uvb.xml",
+            (
+                "<?xml version='1.0' encoding='UTF-8'?>\n"
+                "<idPkg:Story xmlns:idPkg='http://ns.adobe.com/AdobeInDesign/idml/1.0/packaging'>\n"
+                "  <ParagraphStyleRange>\n"
+                "    <CharacterStyleRange>\n"
+                "      <Content>vault-bridge probe IDML body.</Content>\n"
+                "    </CharacterStyleRange>\n"
+                "  </ParagraphStyleRange>\n"
+                "</idPkg:Story>\n"
+            ),
+        )
+    p = out_dir / "probe.idml"
+    p.write_bytes(idml_buf.getvalue())
+    fixtures["idml"] = p
+
     return fixtures
 
 

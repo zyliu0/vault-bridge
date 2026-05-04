@@ -287,6 +287,10 @@ _CATEGORY_TO_STEM = {
     "raster-psd": "raster_psd",
     "document-office-legacy": "document_office_legacy",
     "spreadsheet-legacy": "spreadsheet_legacy",
+    # v16.9.0 (TLS Ask 4 + 13) — design-format stubs.
+    "design-indd": "design_indd",
+    "design-sketch": "design_sketch",
+    "design-figma": "design_figma",
 }
 
 # Categories that delegate to a per-extension handler rather than using

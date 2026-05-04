@@ -38,68 +38,97 @@ def read_text(path: str) -> str:
     - Layer names
 
     Returns:
-        Formatted metadata string, or '' on any failure.
-        Never raises.
+        Formatted metadata string. Returns ``""`` when the path does
+        not exist (PT8 contract — never raises on missing files).
+        Returns a metadata stub annotated as "no geometry" when the
+        file opens cleanly but carries no objects — pre-v16.9
+        returned ``""`` indistinguishable from a read failure
+        (TLS Ask 11). On real read failure of an existing file
+        raises ``RuntimeError`` so the pipeline's status-aware path
+        can surface the cause.
     """
+    import os as _os
+    if not _os.path.exists(path):
+        return ""
     try:
         import rhino3dm
+    except ImportError as exc:
+        raise RuntimeError("rhino3dm not installed: " + str(exc))
+    try:
         model = rhino3dm.File3dm.Read(path)
-        if model is None:
-            return ""
-        lines = []
-        # Application name
-        try:
-            app_name = model.ApplicationName
-            if app_name:
-                lines.append(f"ApplicationName: {{app_name}}")
-        except Exception:
-            pass
-        # Object counts by type
-        try:
-            counts = {{
-                "Mesh": 0,
-                "Curve": 0,
-                "Brep": 0,
-                "Annotation": 0,
-                "Other": 0,
-            }}
-            for obj in model.Objects:
-                try:
-                    geo = obj.Geometry
-                    type_name = type(geo).__name__
-                    if "Mesh" in type_name:
-                        counts["Mesh"] += 1
-                    elif "Curve" in type_name or "Line" in type_name:
-                        counts["Curve"] += 1
-                    elif "Brep" in type_name or "Extrusion" in type_name:
-                        counts["Brep"] += 1
-                    elif "Annotation" in type_name or "Text" in type_name:
-                        counts["Annotation"] += 1
-                    else:
-                        counts["Other"] += 1
-                except Exception:
-                    counts["Other"] += 1
-            total = sum(counts.values())
-            if total > 0:
-                count_parts = [f"{{k}}: {{v}}" for k, v in counts.items() if v > 0]
-                lines.append(f"Objects ({{total}}): {{', '.join(count_parts)}}")
-        except Exception:
-            pass
-        # Layer names
-        try:
-            layer_names = []
-            for layer in model.Layers:
-                name = layer.Name
-                if name:
-                    layer_names.append(name)
-            if layer_names:
-                lines.append(f"Layers: {{', '.join(layer_names)}}")
-        except Exception:
-            pass
-        return "\n".join(lines)
     except Exception as exc:
-        logger.debug("read_text failed for %s: %s", path, exc)
-        return ""
+        # v16.9.0 (TLS Ask 11): real read failure surfaces as a
+        # RuntimeError so read_text_with_status can show the cause
+        # instead of silently returning "".
+        raise RuntimeError(f"rhino3dm.Read failed: {{type(exc).__name__}}: {{exc}}")
+    if model is None:
+        raise RuntimeError(
+            "rhino3dm.Read returned None — file may be truncated or "
+            "saved by an unsupported Rhino version."
+        )
+    lines = []
+    # Application name
+    try:
+        app_name = model.ApplicationName
+        if app_name:
+            lines.append(f"ApplicationName: {{app_name}}")
+    except Exception:
+        pass
+    # Object counts by type
+    try:
+        counts = {{
+            "Mesh": 0,
+            "Curve": 0,
+            "Brep": 0,
+            "Annotation": 0,
+            "Other": 0,
+        }}
+        for obj in model.Objects:
+            try:
+                geo = obj.Geometry
+                type_name = type(geo).__name__
+                if "Mesh" in type_name:
+                    counts["Mesh"] += 1
+                elif "Curve" in type_name or "Line" in type_name:
+                    counts["Curve"] += 1
+                elif "Brep" in type_name or "Extrusion" in type_name:
+                    counts["Brep"] += 1
+                elif "Annotation" in type_name or "Text" in type_name:
+                    counts["Annotation"] += 1
+                else:
+                    counts["Other"] += 1
+            except Exception:
+                counts["Other"] += 1
+        total = sum(counts.values())
+        if total > 0:
+            count_parts = [f"{{k}}: {{v}}" for k, v in counts.items() if v > 0]
+            lines.append(f"Objects ({{total}}): {{', '.join(count_parts)}}")
+    except Exception:
+        pass
+    # Layer names
+    try:
+        layer_names = []
+        for layer in model.Layers:
+            name = layer.Name
+            if name:
+                layer_names.append(name)
+        if layer_names:
+            lines.append(f"Layers: {{', '.join(layer_names)}}")
+    except Exception:
+        pass
+    if not lines:
+        # v16.9.0 (TLS Ask 11): file opened cleanly but carries no
+        # geometry — likely an empty/fragmentary working file. Return
+        # an explicit annotation so the writing LLM can compose a
+        # "model is empty" event description rather than mistaking it
+        # for a read failure.
+        return (
+            "ApplicationName: (none recorded)\n"
+            "Objects: 0 (file opened cleanly but contains no geometry — "
+            "likely a fragmentary or empty working file)\n"
+            "Layers: (none)"
+        )
+    return "\n".join(lines)
 
 
 def extract_images(path: str, out_dir: str) -> list:

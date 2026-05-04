@@ -273,6 +273,50 @@ _SKETCHUP_STUB = PackageSpec(
     notes="Metadata-only stub for SketchUp .skp; optional skp2obj/skp2unity CLI fallback.",
 )
 
+# v16.9.0 (TLS Ask 4) — Adobe InDesign. .indd is a closed binary
+# container with an embedded JFIF preview; .idml is a zip of XML
+# stories. The handler ships a delegated module that handles both
+# without any pip dep (zipfile + xml.etree are stdlib).
+_DESIGN_INDD_STUB = PackageSpec(
+    pip_name="",
+    import_name="",
+    category="design-indd",
+    extensions=["indd", "idml"],
+    extract_text=True,
+    extract_images=True,
+    github_url="",
+    preferred=True,
+    notes=(
+        "InDesign .indd (binary, JFIF preview extraction) + .idml "
+        "(zip of XML stories, full text via stdlib zipfile + ElementTree)."
+    ),
+)
+
+# v16.9.0 (TLS Ask 13) — Sketch + Figma metadata-only stubs.
+_DESIGN_SKETCH_STUB = PackageSpec(
+    pip_name="",
+    import_name="",
+    category="design-sketch",
+    extensions=["sketch"],
+    extract_text=True,
+    extract_images=False,
+    github_url="",
+    preferred=True,
+    notes="Metadata-only stub for Sketch .sketch; optional sketchtool fallback (macOS).",
+)
+
+_DESIGN_FIGMA_STUB = PackageSpec(
+    pip_name="",
+    import_name="",
+    category="design-figma",
+    extensions=["fig"],
+    extract_text=True,
+    extract_images=False,
+    github_url="",
+    preferred=True,
+    notes="Metadata-only stub for Figma .fig (no native reader available).",
+)
+
 
 # Build the registry: ext -> list[PackageSpec]
 # Each extension maps to a list; preferred entry comes first.
@@ -309,6 +353,9 @@ _register(_PYMUPDF_AI)
 _register(_PSD_TOOLS)
 _register(_RHINO3DM)
 _register(_SKETCHUP_STUB)
+_register(_DESIGN_INDD_STUB)
+_register(_DESIGN_SKETCH_STUB)
+_register(_DESIGN_FIGMA_STUB)
 
 
 # ---------------------------------------------------------------------------
