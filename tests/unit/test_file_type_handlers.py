@@ -332,6 +332,30 @@ class TestGetHandler:
         assert result is not None
         assert result.category == "document-office"
 
+    def test_get_handler_dotted_folder_basename_returns_none(self):
+        """v16.6.0 (Batch C8): dated folder names with version
+        markers (``210127 v2.3 工地照明 CD``) have a naive
+        ``rsplit('.', 1)`` ext like ``"3 工地照明 cd"`` — NOT a real
+        extension. ``_looks_like_extension`` rejects whitespace and
+        non-alnum, so get_handler returns None and the folder-vs-file
+        dispatch in scan_pipeline.process_file falls through correctly.
+        """
+        assert fth.get_handler("210127 v2.3 工地照明 CD") is None
+        assert fth.get_handler("/some/210127 v2.3 工地照明 CD") is None
+        # A real-looking ".tar" still works.
+        assert fth.get_handler("backup.tar") is not None
+
+    def test_looks_like_extension_helper(self):
+        """Direct test of the gate function."""
+        assert fth._looks_like_extension("pdf")
+        assert fth._looks_like_extension("xlsx")
+        assert fth._looks_like_extension("3dm")
+        assert not fth._looks_like_extension("3 工地照明 cd")
+        assert not fth._looks_like_extension("with space")
+        assert not fth._looks_like_extension("")
+        # Too long — no real ext exceeds 6 chars in our registry.
+        assert not fth._looks_like_extension("longext")
+
 
 # ---------------------------------------------------------------------------
 # HR — HandlerResult dataclass

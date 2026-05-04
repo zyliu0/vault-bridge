@@ -456,12 +456,29 @@ def _process_images(
                         warnings, errors, candidate_paths, caption_prompts,
                     )
             else:
-                msg = (
-                    f"no content from {Path(source_path).name} via "
-                    f"{mod_path.name}: the handler ran but produced nothing. "
-                    f"Check external tool availability (e.g. ODA File Converter "
-                    f"for DWG, libheif for HEIC) or inspect the file manually."
+                # v16.6.0 (Batch A3) — replace the misleading "check
+                # ODA File Converter for DWG, libheif for HEIC"
+                # generic with a category-specific, actionable hint.
+                # ``external_tools.diagnostic_for_category`` probes
+                # PATH for each binary the handler shells out to and
+                # only reports the ones that are actually missing.
+                hint = ""
+                try:
+                    import external_tools  # local import: optional
+                    hint = external_tools.diagnostic_for_category(cfg.category)
+                except Exception:
+                    hint = ""
+                base = (
+                    f"extraction_empty: {mod_path.name} ran cleanly on "
+                    f"{Path(source_path).name} but produced no content."
                 )
+                if hint:
+                    msg = f"{base} {hint}"
+                else:
+                    msg = (
+                        f"{base} The file may be empty, password-protected, "
+                        f"or in a format the handler can't decode."
+                    )
             warnings.append(msg)
         return attachments, images_embedded, False, warnings, errors, candidate_paths, caption_prompts, size_gate_drops
 
@@ -719,15 +736,23 @@ _FOLDER_REP_SKIP_PATTERNS = (
 # file in a pile. Listed in priority order; first hit wins. Uses casefold
 # matching for ASCII robustness; CJK substring match works in either
 # direction. Tested against real CN architectural archives.
+#
+# v16.6.0 (Batch B4) — added "base" / "main" / "primary" / "首页"; the
+# 2026-05-04 field report's TLS test folder had `210929 base.dwg`
+# alongside three detail PDFs and the picker missed the master DWG.
 _KEY_FILE_HINTS = (
     "目录",      # zh: index / table of contents
     "封面",      # zh: cover sheet
+    "首页",      # zh: title / first page
     "总图",      # zh: overall plan / master sheet
     "总平面",    # zh: master plan
     "index",
     "cover",
     "general",
     "master",
+    "main",
+    "base",
+    "primary",
     "summary",
     "overview",
     "readme",
@@ -1351,7 +1376,27 @@ def _stage_skip_on_no_content(ctx: _ScanContext) -> None:
     if ctx.text != "" or ctx.images_embedded > 0:
         return
     ctx.done = True
-    if ctx.size_gate_drops > 0:
+    # v16.6.0 (Batch D10): only emit ``below_size_gate`` for events
+    # where the size gate is the SOLE cause — i.e. handlers whose
+    # only output is images (image-raster, vector-ai, raster-psd,
+    # cad-* render_pages). For mixed text+image handlers like
+    # document-pdf, a text=0 + size-gated-images result is more
+    # honestly "no_content" because the user's mental model is "did
+    # this PDF have anything I'd care about". The 2026-05-04 field
+    # report flagged that 79.5-second multi-page PDF runs were
+    # being labelled ``below_size_gate`` even though the real
+    # diagnostic is "PyPDF2 extracted nothing AND every page-image
+    # was a thumbnail".
+    image_only_categories = {
+        "image-raster", "image-vector",
+        "vector-ai", "raster-psd",
+        "cad-dxf", "cad-dwg",
+    }
+    is_image_only = (
+        ctx.handler is not None
+        and ctx.handler.category in image_only_categories
+    )
+    if ctx.size_gate_drops > 0 and is_image_only:
         ctx.skip_reason = "below_size_gate"
     else:
         ctx.skip_reason = "no_content"

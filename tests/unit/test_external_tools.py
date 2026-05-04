@@ -373,3 +373,49 @@ class TestPlatformDetection:
         monkeypatch.setattr(et.sys, "platform", "linux")
         monkeypatch.setattr(et, "_linux_family", lambda: "unknown")
         assert et._platform_key() == "linux.unknown"
+
+
+# ---------------------------------------------------------------------------
+# v16.6.0 (Batch A2/A3): probe_summary + diagnostic_for_category
+# ---------------------------------------------------------------------------
+
+class TestProbeSummary:
+    def test_probe_summary_returns_dict(self):
+        out = et.probe_summary()
+        assert isinstance(out, dict)
+        # Every value is a bool.
+        assert all(isinstance(v, bool) for v in out.values())
+
+    def test_probe_summary_includes_libreoffice_keys(self):
+        out = et.probe_summary()
+        # The registry includes soffice/libreoffice and dwg2dxf as binary keys.
+        assert "soffice" in out
+        assert "dwg2dxf" in out
+
+    def test_probe_summary_includes_diagnostic_only_keys(self):
+        out = et.probe_summary()
+        assert "ODAFileConverter" in out
+        assert "antiword" in out
+
+
+class TestDiagnosticForCategory:
+    def test_unknown_category_returns_empty(self):
+        assert et.diagnostic_for_category("does-not-exist") == ""
+
+    def test_no_hints_registered_returns_empty(self):
+        # cad-3dm is a metadata-only category; hint tuple is empty.
+        assert et.diagnostic_for_category("cad-3dm") == ""
+
+    def test_dwg_returns_install_hint_when_no_binary(self, monkeypatch):
+        # Force is_binary_present to report False for everything.
+        monkeypatch.setattr(et, "is_binary_present", lambda _: False)
+        msg = et.diagnostic_for_category("cad-dwg")
+        assert "dwg2dxf" in msg or "ODAFileConverter" in msg
+        assert "brew install libredwg" in msg or "oda.org" in msg
+
+    def test_dwg_returns_empty_when_binary_present(self, monkeypatch):
+        # Pretend dwg2dxf is on PATH.
+        monkeypatch.setattr(et, "is_binary_present", lambda b: b == "dwg2dxf")
+        msg = et.diagnostic_for_category("cad-dwg")
+        assert msg == ""
+

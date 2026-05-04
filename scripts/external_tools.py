@@ -193,6 +193,120 @@ LIBREDWG = ToolSpec(
 _REGISTRY: Tuple[ToolSpec, ...] = (LIBREOFFICE, LIBREDWG)
 
 
+# v16.6.0 (Batch A2) — extra binary names probed for diagnostic
+# warnings only. These tools do not have an auto-install path in the
+# registry above (either licence-gated or platform-specific) but the
+# scan pipeline still wants to know whether they're on PATH so it can
+# tell the user *why* a handler returned empty content instead of
+# emitting the misleading "check ODA File Converter for DWG, libheif
+# for HEIC" generic.
+_DIAGNOSTIC_BINARIES: Dict[str, Tuple[str, ...]] = {
+    "ODAFileConverter": ("ODAFileConverter", "ODAFileConverter.exe"),
+    "antiword":         ("antiword",),
+    "catdoc":           ("catdoc",),
+    "pytesseract":      ("tesseract",),
+    "skp2obj":          ("skp2obj",),
+}
+
+
+def is_binary_present(binary: str) -> bool:
+    """Return True when *any* of the binary names registered for
+    ``binary`` resolves on PATH.
+
+    Prefers the diagnostic-binaries map for known tool aliases (so
+    callers can ask ``is_binary_present('ODAFileConverter')`` without
+    knowing about ``.exe`` on Windows). Unknown names fall through to
+    a single ``shutil.which`` lookup.
+    """
+    if not binary:
+        return False
+    candidates = _DIAGNOSTIC_BINARIES.get(binary, (binary,))
+    for candidate in candidates:
+        if shutil.which(candidate):
+            return True
+    return False
+
+
+def probe_summary() -> Dict[str, bool]:
+    """Return a snapshot of every external-tool binary the pipeline knows
+    about, mapping ``binary_name`` → ``installed?``.
+
+    v16.6.0 (Batch A2). Used by the setup wizard's Step 6.5 closer
+    and by ``/vault-bridge:vault-health`` to surface the
+    ``real-but-unconfigured`` handler class. Each registry tool's
+    binaries are flattened (so .doc / .ppt show up as a single
+    ``soffice`` row) and the diagnostic-only binaries (ODA, antiword,
+    catdoc, tesseract, skp2obj) are merged in.
+    """
+    summary: Dict[str, bool] = {}
+    for spec in _REGISTRY:
+        for bin_name in spec.binaries:
+            summary[bin_name] = is_tool_present(spec)
+    for label, candidates in _DIAGNOSTIC_BINARIES.items():
+        summary[label] = any(shutil.which(name) for name in candidates)
+    return summary
+
+
+# Map handler category → list of (binary, install hint) pairs to consult
+# when a handler returned no content. Used by the scan pipeline to
+# replace the generic "check ODA File Converter for DWG, libheif for
+# HEIC" warning with a category-specific, actionable message.
+_CATEGORY_TOOL_HINTS: Dict[str, Tuple[Tuple[str, str], ...]] = {
+    "cad-dwg": (
+        ("dwg2dxf", "brew install libredwg / apt-get install libredwg-tools"),
+        ("ODAFileConverter", "Install ODA File Converter (manual EULA from oda.org)"),
+    ),
+    "document-office-legacy": (
+        ("soffice", "brew install --cask libreoffice"),
+        ("antiword", "brew install antiword (.doc only)"),
+        ("catdoc", "brew install catdoc (.doc only)"),
+    ),
+    "spreadsheet-legacy": (
+        ("soffice", "brew install --cask libreoffice"),
+    ),
+    "raster-psd": (),
+    "vector-ai": (),
+    "cad-3dm": (),
+    "cad-skp": (
+        ("skp2obj", "Install skp2obj (no Homebrew formula yet)"),
+    ),
+    "cad-dxf": (),
+    "image-raster": (
+        ("libheif", "pip install pillow-heif (HEIC support; pre-bundled in setup)"),
+    ),
+}
+
+
+def diagnostic_for_category(category: str) -> str:
+    """Return a one-line, actionable hint string for a handler that
+    returned empty content. Empty string when no hint is registered
+    OR at least one of the registered binaries is on PATH (in which
+    case the handler theoretically works and the empty result is
+    likely a content issue, not a tooling issue).
+
+    v16.6.0 (Batch A3). Replaces the misleading
+    ``"check ODA File Converter for DWG, libheif for HEIC"`` generic
+    with a category-aware message that lists the binaries the handler
+    actually shells out to and tells the user how to install one.
+
+    Semantics: handler categories register **alternative** binaries
+    (DWG: dwg2dxf OR ODAFileConverter; document-office-legacy:
+    soffice OR antiword OR catdoc). The hint fires only when *none*
+    of the alternatives is on PATH.
+    """
+    hints = _CATEGORY_TOOL_HINTS.get(category, ())
+    if not hints:
+        return ""
+    # If any registered alternative is on PATH, the handler should
+    # work — empty content is not a tooling issue, don't nag.
+    if any(is_binary_present(binary) for binary, _ in hints):
+        return ""
+    missing = [f"{binary} (try: {install})" for binary, install in hints]
+    if len(missing) == 1:
+        return f"binary not on PATH: {missing[0]}"
+    return "binaries not on PATH; install ANY one: " + "; ".join(missing)
+
+
 def _spec_by_category(category: str) -> Optional[ToolSpec]:
     for spec in _REGISTRY:
         if category in spec.categories:

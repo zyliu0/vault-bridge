@@ -105,13 +105,26 @@ def _unique_path(out_dir: Path, stem: str, ext: str) -> Path:
         counter += 1
 
 
+_PDF_PAGE_RENDER_CAP = 6
+_PDF_PAGE_RENDER_DPI = 150
+
+
 def _extract_pdf(src_path: Path, out_dir: Path) -> List[Path]:
-    """Extract images from a PDF file using PyPDF2."""
+    """Extract images from a PDF file using PyPDF2.
+
+    v16.6.0 (Batch A1): when neither ``page.images`` nor manual
+    ``/XObject`` traversal yields any images, fall through to a
+    PyMuPDF page-render path. This catches scanned/drawing PDFs that
+    have no embedded image XObjects but DO have visible content (the
+    body of every CD-phase TLS site plan, every faxed contract, every
+    archived 1990s memo). Caps at ``_PDF_PAGE_RENDER_CAP`` pages so a
+    200-page scan doesn't run for minutes.
+    """
     try:
         import PyPDF2
     except ImportError:
         logger.warning("extract_pdf: PyPDF2 not available")
-        return []
+        return _extract_pdf_pages_fallback(src_path, out_dir)
 
     results: List[Path] = []
     src_stem = src_path.stem
@@ -120,7 +133,7 @@ def _extract_pdf(src_path: Path, out_dir: Path) -> List[Path]:
         reader = PyPDF2.PdfReader(str(src_path))
     except Exception as exc:
         logger.warning("extract_pdf: could not open %s: %s", src_path, exc)
-        return []
+        return _extract_pdf_pages_fallback(src_path, out_dir)
 
     for page_idx, page in enumerate(reader.pages):
         # Try the 3.x page.images API first
@@ -174,7 +187,66 @@ def _extract_pdf(src_path: Path, out_dir: Path) -> List[Path]:
         except Exception as exc:
             logger.warning("extract_pdf: page %d traversal error: %s", page_idx, exc)
 
-    return results
+    if results:
+        return results
+
+    # v16.6.0 (Batch A1): no embedded images at all — render the first
+    # N pages as JPEGs so the writing LLM has something to see.
+    return _extract_pdf_pages_fallback(src_path, out_dir)
+
+
+def _extract_pdf_pages_fallback(src_path: Path, out_dir: Path) -> List[Path]:
+    """Render PDF pages to JPEGs via PyMuPDF as a last-resort image path.
+
+    v16.6.0 (Batch A1). Used when neither PyPDF2's ``page.images`` API
+    nor manual ``/XObject`` traversal produced any image — common for
+    scanned PDFs, drawing PDFs, and faxed memos that lack image
+    XObjects but still carry visible content. Returns ``[]`` when
+    PyMuPDF isn't installed or the document fails to open.
+    """
+    try:
+        import fitz  # type: ignore  # PyMuPDF
+    except ImportError:
+        logger.debug("PDF page-render fallback: PyMuPDF not available")
+        return []
+
+    rendered: List[Path] = []
+    src_stem = src_path.stem
+    try:
+        doc = fitz.open(str(src_path))
+    except Exception as exc:
+        logger.debug("PDF page-render fallback: could not open %s: %s", src_path, exc)
+        return []
+
+    try:
+        n_pages = min(len(doc), _PDF_PAGE_RENDER_CAP)
+        for page_idx in range(n_pages):
+            try:
+                page = doc[page_idx]
+                pix = page.get_pixmap(dpi=_PDF_PAGE_RENDER_DPI)
+                stem = f"{src_stem}--page{page_idx}--render"
+                out_path = _unique_path(out_dir, stem, ".jpg")
+                # Pixmap.tobytes("jpeg") returns valid JPEG bytes when
+                # available; some PyMuPDF builds expose only PNG, in
+                # which case fall through to writing PNG and let the
+                # downstream compressor convert.
+                try:
+                    out_path.write_bytes(pix.tobytes("jpeg"))
+                except Exception:
+                    out_path = out_path.with_suffix(".png")
+                    out_path.write_bytes(pix.tobytes("png"))
+                rendered.append(out_path)
+            except Exception as exc:
+                logger.debug(
+                    "PDF page-render fallback: page %d failed for %s: %s",
+                    page_idx, src_path, exc,
+                )
+    finally:
+        try:
+            doc.close()
+        except Exception:
+            pass
+    return rendered
 
 
 def _extract_docx(src_path: Path, out_dir: Path) -> List[Path]:

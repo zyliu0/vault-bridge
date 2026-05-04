@@ -2160,13 +2160,22 @@ class TestPreCompressionSizeGate:
     def test_tiny_raw_image_dropped_before_compression(self, tmp_path, monkeypatch):
         """A raw candidate whose source bytes are already below the
         gate is dropped pre-compression — saves wasted work on the
-        field-report's 79.5-second multi-page-PDF case."""
+        field-report's 79.5-second multi-page-PDF case.
+
+        v16.6.0 (Batch D10): ``below_size_gate`` is now reserved for
+        image-only categories (image-raster, vector-ai, raster-psd,
+        cad-*). Mixed text+image categories like document-pdf still
+        report ``no_content`` even when the size gate fired, because
+        the user's mental model is "did this PDF have anything I'd
+        care about". This test uses a .jpg (image-raster) source to
+        exercise the size-gate path; the partner test below covers
+        the document-pdf case that no longer reports below_size_gate.
+        """
         sp = self._sp()
         monkeypatch.setattr(sp, "IMAGE_MIN_BYTES", 10_000, raising=True)
-        # Stub raw image source: 500 bytes.
         from unittest import mock
-        src = tmp_path / "deck.pdf"
-        src.write_bytes(b"%PDF-1.4")
+        src = tmp_path / "thumb.jpg"
+        src.write_bytes(b"\xff\xd8\xff\xe0" + b"\x00" * 100)
         tiny = tmp_path / "tiny_thumb.jpg"
         tiny.write_bytes(b"\xff\xd8\xff\xe0" + b"\x00" * 100)  # 104 bytes
         compress_called = mock.Mock(return_value=tiny)
@@ -2182,6 +2191,39 @@ class TestPreCompressionSizeGate:
         # Pre-compression gate fires; compress_image is never called.
         assert compress_called.call_count == 0
         assert result.skip_reason == "below_size_gate"
+
+    def test_pdf_size_gate_falls_through_to_no_content(self, tmp_path, monkeypatch):
+        """Batch D10: PDFs whose images all hit the size gate report
+        ``no_content``, not ``below_size_gate``. Pre-D10 a multi-page
+        PDF whose every page-image was a small thumbnail was labelled
+        ``below_size_gate`` even though the user couldn't tell from
+        that label whether PyPDF2 had also failed to produce text.
+        """
+        sp = self._sp()
+        monkeypatch.setattr(sp, "IMAGE_MIN_BYTES", 10_000, raising=True)
+        from unittest import mock
+        src = tmp_path / "deck.pdf"
+        src.write_bytes(b"%PDF-1.4")
+        tiny = tmp_path / "tiny_thumb.jpg"
+        tiny.write_bytes(b"\xff\xd8\xff\xe0" + b"\x00" * 100)
+        with mock.patch("scan_pipeline.file_type_handlers.extract_images", return_value=[tiny]):
+            with mock.patch(
+                "scan_pipeline.compress_images.compress_image",
+                return_value=tiny,
+            ):
+                with mock.patch(
+                    "scan_pipeline.file_type_handlers.read_text",
+                    return_value="",
+                ):
+                    result = sp.process_file(
+                        source_path=str(src),
+                        workdir=str(tmp_path),
+                        vault_project_path="dom/proj/SD",
+                        event_date="2024-01-01",
+                        dry_run=True,
+                    )
+        assert result.skipped is True
+        assert result.skip_reason == "no_content"
 
 
 # ---------------------------------------------------------------------------

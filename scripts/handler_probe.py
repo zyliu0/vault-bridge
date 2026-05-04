@@ -58,18 +58,59 @@ logger = logging.getLogger(__name__)
 # Fixtures — tiny but valid representatives of each format
 # ---------------------------------------------------------------------------
 
-# A 1×1 red PNG (~67 bytes) used as the universal "raster" fixture.
-_PROBE_PNG_B64 = (
-    b"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/5+hHgAHggJ/PchI7"
-    b"QAAAABJRU5ErkJggg=="
-)
-
 # Plain text fixture
 _PROBE_TXT = b"vault-bridge handler probe\nline 2\n"
 
 
+# v16.6.0 (Batch D9): the previous fixture was a 1×1 red PNG (~67
+# bytes). Pillow opens it fine, but the scan pipeline's
+# ``IMAGE_MIN_BYTES = 10_000`` size gate dropped the compressed
+# output every time, so the probe reported ``[FAIL]
+# below_size_gate`` for 8 of 11 raster handlers in the 2026-05-04
+# field report — making the probe useless for verifying real
+# handlers. We now generate a ~200×200 random-noise PNG at runtime
+# (Pillow is already a hard dep), guaranteeing the compressed JPEG
+# clears the 10 KB threshold. Random noise compresses badly; that
+# is the point.
+_PROBE_FIXTURE_DIM = 200
+
+
 def _png_bytes() -> bytes:
-    return base64.b64decode(_PROBE_PNG_B64)
+    """Return a >10 KB PNG so the pipeline's IMAGE_MIN_BYTES gate
+    doesn't drop the fixture during probe runs.
+
+    v16.6.0 (Batch D9). Earlier versions used a 67-byte 1×1 fixture
+    which the size gate caught — see the 2026-05-04 field report.
+    The generated PNG is ``_PROBE_FIXTURE_DIM`` square with random
+    bytes in each channel. Compressed JPEG output sits comfortably
+    above 10 KB.
+    """
+    try:
+        from PIL import Image  # type: ignore
+    except Exception:
+        # Fallback: pre-generated ~12 KB PNG (deterministic). Pillow
+        # is a hard dep so this branch should be unreachable in
+        # production; kept to keep the probe importable in toy envs.
+        return base64.b64decode(_PROBE_PNG_FALLBACK_B64)
+    import io
+    import os
+    img = Image.frombytes(
+        "RGB",
+        (_PROBE_FIXTURE_DIM, _PROBE_FIXTURE_DIM),
+        os.urandom(_PROBE_FIXTURE_DIM * _PROBE_FIXTURE_DIM * 3),
+    )
+    buf = io.BytesIO()
+    img.save(buf, format="PNG", optimize=False)
+    return buf.getvalue()
+
+
+# Tiny fallback used only when Pillow isn't importable. Stays the
+# legacy 1×1 — anyone running the probe without Pillow is in a toy
+# environment where size-gate accuracy doesn't matter.
+_PROBE_PNG_FALLBACK_B64 = (
+    b"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/5+hHgAHggJ/PchI7"
+    b"QAAAABJRU5ErkJggg=="
+)
 
 
 def _build_fixtures(out_dir: Path) -> Dict[str, Path]:
@@ -296,12 +337,18 @@ def format_report(results: List[ProbeResult]) -> str:
 # package or binary that's actually missing. The mapping is a heuristic
 # — it produces a hint, not a hard contract.
 _TOOL_HINTS = (
+    # v16.6.0 (Batch A3) — match new actionable diagnostic format.
+    ("ODAFileConverter", "ODAFileConverter"),
+    ("dwg2dxf", "LibreDWG (dwg2dxf)"),
     ("ODA File Converter", "ODAFileConverter"),
     ("antiword", "antiword"),
     ("catdoc", "catdoc"),
+    ("soffice", "soffice (LibreOffice)"),
     ("LibreOffice", "soffice (LibreOffice)"),
     ("libheif", "pillow-heif (already a Python dep)"),
     ("striprtf", "striprtf (pip install striprtf)"),
+    ("tesseract", "tesseract OCR (brew install tesseract)"),
+    ("skp2obj", "skp2obj (SketchUp converter)"),
 )
 
 

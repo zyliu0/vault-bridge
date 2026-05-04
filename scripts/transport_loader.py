@@ -333,6 +333,48 @@ def stat_mtime(
     return out if out > 0 else None
 
 
+def is_dir(
+    workdir: Path,
+    transport_name: str,
+    archive_path: str,
+) -> Optional[bool]:
+    """Return True/False/None — is the archive_path a directory?
+
+    v16.6.0 (Batch C8). The 2026-05-04 SSS field report flagged a
+    folder-vs-file misclassification when an archive folder name had
+    a period in it (e.g. ``210127 v2.3 工地照明 CD``). The pipeline's
+    naive ``rsplit('.', 1)`` treated everything after the last dot as
+    an extension, called ``get_handler`` on the (rejected) string,
+    and wrote a metadata-only stub instead of recursing into the
+    folder. The cleaner fix is for the scan command to ask the
+    transport whether the path is a directory before classification —
+    this is the optional API that supports it.
+
+    Returns:
+        * ``True``  — transport confirms ``archive_path`` is a directory.
+        * ``False`` — transport confirms ``archive_path`` is a file.
+        * ``None``  — transport doesn't implement ``is_dir`` OR the
+                      probe raised. Callers MUST tolerate the unknown
+                      case (legacy transports).
+    """
+    try:
+        mod = load_transport(workdir, transport_name)
+    except (TransportMissing, TransportInvalid):
+        return None
+    fn = getattr(mod, "is_dir", None)
+    if not callable(fn):
+        return None
+    try:
+        result = fn(archive_path)
+    except Exception:
+        # Never let an optional probe crash the scan; fall through
+        # to the legacy "file by default" path.
+        return None
+    if isinstance(result, bool):
+        return result
+    return None
+
+
 def list_archive(
     workdir: Path,
     transport_name: str,

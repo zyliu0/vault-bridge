@@ -160,3 +160,55 @@ class TestLookupExisting:
         out = vault_paths.lookup_existing(wd, "/archive/221107_同济最新图纸/")
         # The translated/expanded "降高度变更送审" suffix must round-trip.
         assert "降高度变更送审" in out
+
+    def test_lossy_match_recovers_nbsp_drift(self, tmp_path):
+        """v16.6.0 (Batch C6): the SSS field report had a stored
+        source_path with regular spaces while the archive name had
+        NBSP. A lossy fallback in lookup_existing rewires to the
+        existing curated note rather than orphaning it."""
+        # Indexed BYTE-EXACT (with NBSP).
+        nbsp_path = "/archive/210722 paint colors_kf.xlsx"
+        wd = self._setup_index(tmp_path, [
+            (nbsp_path, "fp", "CA/2021-07-22 paint colors KF.md"),
+        ])
+        # Caller passes the de-NBSP'd version (what the LLM emitted).
+        ascii_path = "/archive/210722 paint colors_kf.xlsx"
+        out = vault_paths.lookup_existing(wd, ascii_path)
+        assert out == "CA/2021-07-22 paint colors KF.md"
+
+
+class TestSourcePathRoundTrip:
+    """v16.6.0 (Batch C6): byte-exact source_path encoding helpers."""
+
+    def test_encode_yaml_preserves_nbsp(self):
+        nbsp = "/archive/210722 paint colors.xlsx"
+        encoded = vault_paths.encode_source_path_yaml(nbsp)
+        # JSON-style escape preserves the NBSP literally so the YAML
+        # parser rebuilds the same byte sequence on the way back.
+        import json
+        assert json.loads(encoded) == nbsp
+
+    def test_encode_yaml_quotes_ascii(self):
+        encoded = vault_paths.encode_source_path_yaml("/archive/file.pdf")
+        # Must be quoted (not a YAML plain scalar).
+        assert encoded.startswith('"') and encoded.endswith('"')
+
+    def test_paths_match_lossy_nbsp_vs_ascii(self):
+        a = "/archive/210722 paint colors.xlsx"
+        b = "/archive/210722 paint colors.xlsx"
+        assert vault_paths.paths_match_lossy(a, b)
+
+    def test_paths_match_lossy_collapses_double_space(self):
+        a = "/archive/foo bar.txt"
+        b = "/archive/foo  bar.txt"  # double ASCII space
+        assert vault_paths.paths_match_lossy(a, b)
+
+    def test_paths_match_lossy_ideographic_space(self):
+        a = "/archive/foo　bar.txt"  # IDEOGRAPHIC SPACE
+        b = "/archive/foo bar.txt"
+        assert vault_paths.paths_match_lossy(a, b)
+
+    def test_paths_match_lossy_rejects_real_difference(self):
+        a = "/archive/foo.txt"
+        b = "/archive/bar.txt"
+        assert not vault_paths.paths_match_lossy(a, b)

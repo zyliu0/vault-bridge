@@ -1,5 +1,119 @@
 # Changelog
 
+## v16.6.0 — DWG/PDF unblock: page-render fallback, capability probes, NBSP-safe paths, folder-vs-file robustness
+
+Closes the four-batch action list from the 2026-05-04 v16.5.0
+roll-out decision report. v16.5.0 wired the workdir handlers; v16.6.0
+makes the dominant meta-only classes (DWG piles, scanned PDFs, all-
+empty folders) produce useful notes instead of silent stubs.
+
+### Batch A — unblocks DWG everywhere
+
+**A1 — PDF page-render fallback.** ``extract_embedded_images._extract_pdf``
+now falls through to a PyMuPDF page-render path when neither
+``page.images`` nor manual ``/XObject`` traversal yields any image.
+Catches scanned PDFs, drawing PDFs, and faxed memos that lack
+embedded image XObjects but carry visible content. Caps at 6 pages
+at 150 dpi.
+
+**A2 — Capability probe + diagnostic registry.** ``external_tools``
+gains ``probe_summary()`` (returns ``{binary: installed?}``) and
+``is_binary_present(binary)`` for the diagnostic-only tools
+(ODAFileConverter, antiword, catdoc, tesseract, skp2obj) that have
+no auto-install path but the pipeline still wants to know about.
+
+**A3 — Actionable silent-empty diagnostics.** When a handler runs
+cleanly and returns ``("", [])`` we no longer emit the misleading
+"check ODA File Converter for DWG, libheif for HEIC" generic.
+Instead, ``external_tools.diagnostic_for_category`` checks PATH for
+each binary the handler shells out to and only reports when **none**
+of the alternatives is installed:
+
+```
+extraction_empty: cad_dwg_dwg.py ran cleanly on plan.dwg but produced
+no content. binaries not on PATH; install ANY one: dwg2dxf (try: brew
+install libredwg / apt-get install libredwg-tools); ODAFileConverter
+(try: Install ODA File Converter (manual EULA from oda.org))
+```
+
+### Batch B — fixes folder-of-DWGs UX
+
+**B4 — Key-file hints expanded.** Added ``base``, ``main``,
+``primary``, ``首页`` to ``_KEY_FILE_HINTS``. The 2026-05-04 field
+report's TLS test folder had ``210929 base.dwg`` alongside three
+detail PDFs; the picker now lifts the master DWG to representative
+position 0 instead of being type-diversity-mixed below the PDFs.
+
+**B5 — already shipped in v16.5.0.** ``_build_folder_context`` +
+``_render_folder_context_text`` already wire a fabrication-firewalled
+folder-evidence body when zero reps produce content. v16.6.0 widens
+the hint vocabulary; the body-promotion mechanism is unchanged.
+
+### Batch C — fixes silent failures
+
+**C6 — NBSP/U+00A0 round-trip.** The 2026-05-04 SSS field report's
+``210722 paint colors_kf.xlsx`` had NBSP between every word in the
+filename, but the stored frontmatter ``source_path`` had ASCII
+spaces — re-fetch via ``transport.fetch_to_local`` raised
+``FileNotFoundError``. New helpers in ``vault_paths``:
+
+- ``encode_source_path_yaml(p)`` — JSON-style YAML scalar that
+  forces every NBSP / FIGURE SPACE / NARROW NO-BREAK SPACE through
+  explicit `` `` escapes so the round-trip is byte-exact.
+- ``paths_match_lossy(a, b)`` — collapses look-alike whitespace for
+  reconcile-style comparison.
+- ``lookup_existing`` — falls through to ``paths_match_lossy`` when
+  the byte-exact lookup misses, so existing curated notes are
+  rewritten in place rather than orphaned.
+
+**C7 — Workdir handler exception surfacing for built-ins.** Pre-v16.6
+``_pdf_read_text``, ``_docx_read_text``, ``_xlsx_read_text``,
+``_pptx_read_text`` caught every library exception and returned
+``""`` — the SSS field report's truncated XLSX raised ``BadZipFile``
+which vanished into ``no_content``. New module-level
+``_EXTRACTION_ERRORS`` registry (path-keyed, consume-on-read)
+captures the exception detail; ``read_text_with_status`` consumes
+it so the scan pipeline can surface ``openpyxl: BadZipFile: ...``
+to the user.
+
+**C8 — Dotted-folder extension splitter.** ``get_handler`` now
+gates the suffix through ``_looks_like_extension`` (≤6 chars,
+alphanumeric only) before lookup. ``210127 v2.3 工地照明 CD`` no
+longer maps to ext ``"3 工地照明 cd"``. New optional
+``transport_loader.is_dir(workdir, transport, archive_path)``
+gives scan commands a way to disambiguate folders from files
+before classification — returns ``True``/``False``/``None`` so
+legacy transports without ``is_dir`` keep working.
+
+### Batch D — quality of life
+
+**D9 — Probe self-test fixture sizing.** ``handler_probe._png_bytes``
+now generates a 200×200 random-noise PNG at runtime (compressed
+JPEG output sits comfortably above ``IMAGE_MIN_BYTES = 10_000``).
+Pre-v16.6 the 67-byte 1×1 fixture failed the size gate every time,
+making the probe useless — 8 of 11 raster handlers reported
+``[FAIL] below_size_gate`` even when the handler itself was healthy.
+
+**D10 — ``below_size_gate`` only on image-only categories.** When
+a document-pdf event's PyPDF2 returns no text AND every page-image
+hits the size gate, the result now skips with ``no_content``
+instead of ``below_size_gate`` — the user's mental model is "did
+this PDF have anything I'd care about", not "what fraction of the
+page-images were thumbnails". The size-gate skip reason is
+preserved for genuinely image-only categories (image-raster,
+vector-ai, raster-psd, cad-*).
+
+### Tests
+
+19 new tests covering NBSP round-trip helpers, lossy match
+semantics, dotted-folder extension rejection, ``_looks_like_extension``,
+``probe_summary`` shape, ``diagnostic_for_category`` semantics
+(empty when any alternative is on PATH), and PDF-vs-image-only
+size-gate skip-reason routing. Updated the existing
+``test_tiny_raw_image_dropped_before_compression`` test to use a
+``.jpg`` source so the size-gate semantics still match for
+image-only events.
+
 ## v16.5.0 — pipeline intent vs actual: handler errors surface, folder events get context, key-file picker (Fixes A–H)
 
 Closes the eight ranked fixes from the 2026-05-04 process audit
