@@ -460,15 +460,17 @@ Print a table of built-in categories and their default packages:
 | Category | Extensions | Default package | Notes |
 |---|---|---|---|
 | document-office-legacy | doc, ppt | olefile | Legacy binary Office; text extraction via OLE2 stream parsing |
+| spreadsheet-legacy | xls | xlrd, soffice fallback | Legacy XLS via xlrd; LibreOffice CSV-export fallback |
 | cad-dxf | dxf | ezdxf[draw] | AutoCAD DXF; renders modelspace to PNG. ezdxf[draw] includes matplotlib; first install may take 60-120s |
 | cad-dwg | dwg | ezdxf[draw] | AutoCAD DWG native R2004-R2018 reader; same renderer as DXF |
 | vector-ai | ai | PyMuPDF | Adobe Illustrator (.ai is PDF-compatible); renders pages |
 | raster-psd | psd | psd-tools | Photoshop PSD; reads text layers, composites visible layers via Pillow. Files >500MB get text-only processing |
 | cad-3dm | 3dm | rhino3dm | Rhino 3D files yield geometry metadata and notes. Visual rendering requires Rhino and is not supported in this plugin |
+| cad-skp | skp | (stub) | SketchUp metadata-only stub. Probes for `skp2obj`/`skp2unity` on PATH; otherwise emits filename + size summary so SKP files don't silently skip as "unknown file type" |
 
-AskUserQuestion multi-select — which categories to enable (default: standard only):
+AskUserQuestion multi-select — which categories to enable (default: standard + cad-skp metadata stub):
 > "Which file categories should vault-bridge process?
-> (Standard categories are enabled by default. Add Visual/CAD types if you work with those formats.)"
+> (Standard categories + cad-skp metadata stub are enabled by default. Add Visual/CAD types if you work with those formats.)"
 >
 > **Standard:**
 > - [x] document-pdf — PDF files
@@ -476,14 +478,27 @@ AskUserQuestion multi-select — which categories to enable (default: standard o
 > - [x] image-raster — JPG, PNG, WebP, GIF, BMP, TIFF
 > - [x] image-raster (HEIC) — Apple HEIC/HEIF photos
 > - [x] text-plain — TXT, MD, RTF (no install needed)
+> - [x] cad-skp — SketchUp metadata stub (no install; emits metadata only)
 >
 > **Visual/CAD files:**
-> - [ ] document-office-legacy — DOC/PPT legacy binary (olefile)
+> - [ ] document-office-legacy — DOC/PPT legacy binary (olefile + soffice fallback)
+> - [ ] spreadsheet-legacy — XLS legacy binary (xlrd + soffice fallback)
 > - [ ] cad-dxf — AutoCAD DXF (ezdxf[draw], renders to PNG)
 > - [ ] cad-dwg — AutoCAD DWG (ezdxf[draw], native R2004-R2018 reader)
 > - [ ] vector-ai — Adobe Illustrator (PyMuPDF, renders pages)
 > - [ ] raster-psd — Photoshop PSD (psd-tools + Pillow, composites layers; files >500MB get text-only)
 > - [ ] cad-3dm — Rhino 3D (rhino3dm, metadata + notes text only, no rendering)
+
+> [!note] v16.8.0 (TLS Ask 4) — `cad-skp` is now in the default
+> selection. The handler is a metadata-only stub (no Python deps, no
+> external tool required) — its sole job is to surface the file's
+> existence with size + mtime in a note body rather than letting
+> SketchUp files silently fall through as ``unknown file type``. If
+> the user installs ``skp2obj`` or ``skp2unity`` on PATH, the same
+> handler will pick it up and emit converter output instead of the
+> bare metadata stub. Including by default costs ~0 KB of extra
+> install but eliminates the most common "why are my SketchUp files
+> not in the vault" report.
 
 ### 6.5b — PDF package choice
 

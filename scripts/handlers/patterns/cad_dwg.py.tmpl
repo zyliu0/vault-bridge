@@ -176,22 +176,56 @@ def read_text(path: str) -> str:
                     dxftype = entity.dxftype()
                     if dxftype == "TEXT":
                         val = entity.dxf.text
-                        if val and val.strip():
-                            parts.append(val)
                     elif dxftype == "MTEXT":
                         val = entity.plain_mtext()
-                        if val and val.strip():
-                            parts.append(val)
                     elif dxftype == "ATTRIB":
                         val = entity.dxf.text
-                        if val and val.strip():
-                            parts.append(val)
+                    else:
+                        continue
+                    if not val:
+                        continue
+                    val = val.strip()
+                    if not val:
+                        continue
+                    # v16.8.0 (TLS Ask 3): drop the dimension/contour
+                    # noise that real CAD files carry as one-token-per-
+                    # MTEXT entities. The 2026-05-04 TLS field report
+                    # flagged a 169 990-char DWG dump that was 99 %
+                    # single-digit elevation labels (`4 6 6 4 5 6 ...`)
+                    # with the real place names tucked at the tail.
+                    # Tokens that are pure-ASCII-digit AND ≤2 chars are
+                    # essentially never meaningful narrative — they are
+                    # contour elevations, sheet numbers, or station
+                    # ordinals. CJK, Latin labels, and longer numeric
+                    # codes (`N61`, `S371`) survive.
+                    if _is_dwg_token_noise(val):
+                        continue
+                    parts.append(val)
                 except Exception:
                     continue
             return "\n".join(parts)
         except Exception as exc:
             logger.debug("read_text failed for %s: %s", path, exc)
             return ""
+
+
+def _is_dwg_token_noise(token: str) -> bool:
+    """Return True when ``token`` is the kind of CAD-noise text entity
+    that real DWG files carry by the thousand — single-digit contour
+    labels, dimension ordinals, station numbers — that produce no
+    narrative signal but do trip the downstream content_confidence
+    scorer.
+
+    v16.8.0 (TLS Ask 3). Conservative: refuses to drop CJK characters,
+    latin letters, mixed alphanumerics like ``N61`` or ``S371``,
+    or anything ≥3 chars (real measurements like ``1500`` and
+    ``3.6m`` survive).
+    """
+    if not token:
+        return True
+    if len(token) > 2:
+        return False
+    return token.isdigit()
 
 
 def extract_images(path: str, out_dir: str) -> list:
@@ -227,7 +261,17 @@ def extract_images(path: str, out_dir: str) -> list:
             ctx = RenderContext(doc)
             out_backend = MatplotlibBackend(ax)
             Frontend(ctx, out_backend).draw_layout(msp, finalize=True)
-            fig.savefig(out_path, dpi=150)
+            # v16.8.0 (TLS Ask 7): bump from 150 → 200 DPI. The 2026-
+            # 05-04 TLS field report flagged that 150 DPI line-art
+            # renders compressed to 9947 bytes — 53 below the size
+            # gate (now exempt for render_pages handlers, see Ask 1)
+            # but still visually thin. 200 DPI ~ doubles file size and
+            # lifts schematic geometry out of the "is this even a real
+            # drawing" range. SVG was considered but Obsidian's inline
+            # rendering of SVG inside .md notes is inconsistent across
+            # platforms; the size-gate exemption (Ask 1) is the right
+            # primary fix.
+            fig.savefig(out_path, dpi=200)
             plt.close(fig)
             return [out_path]
         except Exception as exc:

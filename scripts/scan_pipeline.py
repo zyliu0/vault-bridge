@@ -395,6 +395,24 @@ def _process_images(
          warnings, errors, candidate_paths, caption_prompts,
          size_gate_drops)
     """
+    # v16.8.0 (TLS Ask 1) — the IMAGE_MIN_BYTES gate exists to drop
+    # client logos and UI chrome from raster passthroughs (PDF page
+    # images, embedded JPGs/PNGs from Office files). For handler
+    # categories that DO RENDER PAGES from a closed source format
+    # (DWG, DXF, AI, PSD), the same threshold dropped legitimate
+    # vector renders — the 2026-05-04 TLS field report flagged a
+    # 9947-byte DWG render that was 53 bytes below the gate. Render
+    # outputs are deliberate; sparse line-art compresses small. We
+    # check the handler's ``render_pages`` flag and skip the size
+    # gate for those events. The post-compression gate (Step 4
+    # below) still runs for non-render handlers.
+    is_render_pages = False
+    try:
+        _cfg = file_type_handlers.get_handler(source_path)
+        if _cfg is not None and getattr(_cfg, "render_pages", False):
+            is_render_pages = True
+    except Exception:
+        is_render_pages = False
     attachments: List[str] = []
     warnings: List[str] = []
     errors: List[str] = []
@@ -502,7 +520,13 @@ def _process_images(
             raw_size = img_path.stat().st_size
         except OSError:
             raw_size = 0
-        if raw_size and raw_size < IMAGE_MIN_BYTES:
+        # v16.8.0 (TLS Ask 1): skip the gate for render_pages handlers.
+        # See note at top of _process_images.
+        if (
+            not is_render_pages
+            and raw_size
+            and raw_size < IMAGE_MIN_BYTES
+        ):
             size_gate_drops += 1
             warnings.append(
                 f"image under size gate ({raw_size} < {IMAGE_MIN_BYTES} bytes): "
@@ -555,11 +579,19 @@ def _process_images(
 
     for compressed in embed_set:
         # Size gate — drop logos and UI chrome before they hit the vault.
+        # v16.8.0 (TLS Ask 1): render_pages handlers (CAD/vector) skip
+        # the post-compression gate too — their renders are deliberate
+        # output, sparse line-art compresses small, and the 9947-byte
+        # field-report case sat 53 bytes below the threshold.
         try:
             size = compressed.stat().st_size
         except OSError:
             size = 0
-        if size and size < IMAGE_MIN_BYTES:
+        if (
+            not is_render_pages
+            and size
+            and size < IMAGE_MIN_BYTES
+        ):
             warnings.append(
                 f"image under size gate ({size} < {IMAGE_MIN_BYTES} bytes): "
                 f"{compressed.name} — likely logo or UI chrome, skipped"

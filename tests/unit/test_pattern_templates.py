@@ -439,3 +439,60 @@ class TestCad3dmTemplate:
         source = _render_template("cad_3dm.py.tmpl")
         # Should mention layers or objects or notes
         assert "layer" in source.lower() or "object" in source.lower() or "note" in source.lower()
+
+
+# ---------------------------------------------------------------------------
+# v16.8.0 (TLS Ask 3) — DWG read_text drops single-digit MTEXT noise
+# ---------------------------------------------------------------------------
+
+class TestDwgTokenNoiseFilter:
+    """The 2026-05-04 TLS field report flagged a 169 990-char DWG
+    extract dominated by single-digit elevation labels with the real
+    place names tucked at the tail. v16.8 filters at extraction
+    time so the pipeline never sees the noise."""
+
+    @staticmethod
+    def _load_dwg_module():
+        import importlib.util
+        from pathlib import Path
+        # Render the cad_dwg pattern with empty placeholders + ext=dwg
+        src = (Path(__file__).resolve().parents[2]
+               / "scripts" / "handlers" / "patterns" / "cad_dwg.py.tmpl"
+               ).read_text()
+        rendered = src.format(
+            package_name="ezdxf",
+            pip_name="ezdxf[draw]",
+            version="",
+            source="builtin",
+            generated_at="",
+            ext="dwg",
+        )
+        # Materialise the rendered template into a temp module.
+        import tempfile
+        tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False)
+        tmp.write(rendered)
+        tmp.close()
+        spec = importlib.util.spec_from_file_location("cad_dwg_dwg_test", tmp.name)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)  # type: ignore[union-attr]
+        return mod
+
+    def test_single_digit_token_is_noise(self):
+        mod = self._load_dwg_module()
+        for token in ("1", "2", "9", "00", "12", "99"):
+            assert mod._is_dwg_token_noise(token), f"{token!r} should be noise"
+
+    def test_chinese_place_name_is_not_noise(self):
+        mod = self._load_dwg_module()
+        for token in ("水", "荔", "瑞兴工艺品厂", "塘朗种养场", "平南铁路"):
+            assert not mod._is_dwg_token_noise(token), f"{token!r} must survive"
+
+    def test_alphanumeric_station_id_is_not_noise(self):
+        mod = self._load_dwg_module()
+        # 3+ chars or contains a letter → keep.
+        for token in ("N61", "S371", "BM12", "1500", "3.6m"):
+            assert not mod._is_dwg_token_noise(token), f"{token!r} must survive"
+
+    def test_empty_string_is_noise(self):
+        mod = self._load_dwg_module()
+        assert mod._is_dwg_token_noise("")

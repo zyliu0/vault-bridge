@@ -2260,3 +2260,64 @@ class TestHandlerExceptionsSurfaceAsErrors:
         assert any(
             "no DWG converter" in (e or "") for e in result.errors
         ), f"expected error in {result.errors}"
+
+
+# ---------------------------------------------------------------------------
+# v16.8.0 — TLS Ask 1: render_pages handlers exempt from size gate
+# ---------------------------------------------------------------------------
+
+class TestRenderPagesExemptFromSizeGate:
+    """A 9947-byte DWG render (53 bytes below the 10 KB gate) was
+    being silently dropped pre-v16.8. v16.8 exempts every handler
+    whose category sets ``render_pages=True`` from the size gate
+    on both the pre-compression and post-compression paths."""
+
+    @staticmethod
+    def _sp():
+        import scan_pipeline
+        return scan_pipeline
+
+    def test_render_pages_handler_image_below_gate_is_kept(self, tmp_path, monkeypatch):
+        sp = self._sp()
+        monkeypatch.setattr(sp, "IMAGE_MIN_BYTES", 10_000, raising=True)
+        # Pretend the source is a DWG (render_pages=True). The actual
+        # file content doesn't matter — we mock extract_images to
+        # return our small render.
+        from unittest import mock
+        src = tmp_path / "drawing.dwg"
+        src.write_bytes(b"DWG fake")
+        # 9947-byte PNG-ish blob (mirrors the field-report case).
+        small = tmp_path / "render.png"
+        small.write_bytes(b"\x89PNG\r\n\x1a\n" + b"x" * 9939)
+        with mock.patch("scan_pipeline.file_type_handlers.extract_images", return_value=[small]):
+            with mock.patch("scan_pipeline.compress_images.compress_image", return_value=small):
+                result = sp.process_file(
+                    source_path=str(src),
+                    workdir=str(tmp_path),
+                    vault_project_path="dom/proj/CD",
+                    event_date="2026-01-01",
+                    dry_run=True,
+                )
+        # Size gate did NOT fire — the render survived.
+        assert result.images_embedded == 1
+        assert result.skip_reason != "below_size_gate"
+        # No pre-compression or post-compression "size gate" warning.
+        gate_warnings = [w for w in result.warnings if "size gate" in w]
+        assert gate_warnings == [], f"unexpected size-gate warning: {gate_warnings}"
+
+    def test_passthrough_raster_still_subject_to_size_gate(self, tmp_path, monkeypatch):
+        """Regression guard: only render_pages handlers get the
+        exemption. Raster passthrough (.jpg/.png/etc.) still applies
+        the size gate so logos and UI chrome continue to be filtered."""
+        sp = self._sp()
+        monkeypatch.setattr(sp, "IMAGE_MIN_BYTES", 10_000, raising=True)
+        src = tmp_path / "tiny.jpg"
+        src.write_bytes(b"\xff\xd8\xff\xe0" + b"\x00" * 200)  # ~204 bytes
+        result = sp.process_file(
+            source_path=str(src),
+            workdir=str(tmp_path),
+            vault_project_path="dom/proj/SD",
+            event_date="2026-01-01",
+            dry_run=True,
+        )
+        assert result.skip_reason == "below_size_gate"

@@ -81,6 +81,28 @@ candidate; `image_vision.select_top_k` picks the top `IMAGE_EMBED_CAP = 10`
 by relevance; only those are embedded. The captions feed back into the
 event-note prompt so the note body reflects what was actually seen.
 
+**v16.8.0 (TLS Ask 5) — templates under `templates/` are advisory, not
+loaded.** `templates/architecture/`, `templates/photography/`, etc.,
+contain reference shapes for note bodies. They are **not** loaded by
+the scan pipeline; the writing LLM composes freely with the
+fabrication firewall as the only hard constraint. The folder exists
+to give operators a starting shape when authoring custom domain
+flows; treat them as documentation. The single template that IS
+materialised at runtime is `templates/vault-bridge-note.md`, installed
+into the vault's `_Templates/` folder by `/vault-bridge:setup` for
+Obsidian's "new note from template" UX.
+
+**v16.8.0 (TLS Ask 6) — surface `read_text` for metadata-only handlers.**
+For handler categories where `extract_images=False` AND `read_text`
+returns useful structured content (the canonical case is `cad-3dm`
+returning ApplicationName + object counts + layer roster), the
+writing LLM MUST include that content in the note body. The 2026-05-04
+TLS field report flagged that operators routinely skipped 3DM
+metadata because they conflated "no image" with "nothing to write
+about", missing signals like `3D_Existing` vs `3D_Proposal` layer
+groups that reveal the project's design state. When the handler
+category is metadata-only, the prose body **is** the metadata.
+
 ## Core principle: the fabrication firewall
 
 vault-bridge writes vault notes from a user's file archive. The greatest

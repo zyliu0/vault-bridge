@@ -87,7 +87,9 @@ def extract_images(path: str, out_dir: str) -> list:
         ctx = RenderContext(doc)
         out = MatplotlibBackend(ax)
         Frontend(ctx, out).draw_layout(msp, finalize=True)
-        fig.savefig(out_path, dpi=150)
+        # v16.8.0: 200 DPI matches cad-dwg renderer; lifts line-art
+        # out of the "is this a real drawing" visual range.
+        fig.savefig(out_path, dpi=200)
         plt.close(fig)
         return [out_path]
     except Exception as exc:

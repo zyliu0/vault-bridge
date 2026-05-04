@@ -1,5 +1,82 @@
 # Changelog
 
+## v16.8.0 — TLS scan-review handoff: CAD render gate fix, DWG noise filter, cad-skp default, template-policy clarification
+
+Closes the actionable asks from the 2026-05-04/05 TLS scan-review
+handoff. v16.7.0's pre-flight probe + PDF cascade landed cleanly; the
+TLS retro-scan that followed surfaced three new gaps and two policy
+questions, all addressed here.
+
+### Fixed (TLS Ask 1 — render_pages exempt from size gate)
+
+- ``scan_pipeline._process_images`` now checks the source file's
+  handler and skips the ``IMAGE_MIN_BYTES`` size gate when the
+  category sets ``render_pages=True``. The 2026-05-04 TLS scan
+  flagged a 9 947-byte DWG render — 53 bytes below the 10 KB gate —
+  silently dropped by both the pre-compression and post-compression
+  gates. Sparse line-art genuinely compresses small; the gate was
+  intended for raster passthrough (logos, UI chrome embedded in PDFs)
+  not deliberate vector renders. Both gate steps respect the
+  exemption now.
+
+### Fixed (TLS Ask 3 — DWG numeric MTEXT noise dropped at extraction)
+
+- ``cad_dwg.py.tmpl::read_text`` now filters out single- and two-
+  character pure-digit MTEXT tokens at extraction time. The TLS
+  field report flagged a 169 990-char extract dominated by single-
+  digit contour-elevation labels (``4 6 6 4 5 6 4 3 ...``) with the
+  real place names tucked at the tail. New helper
+  ``_is_dwg_token_noise`` is conservative: it preserves CJK
+  characters, latin letters, mixed alphanumerics (``N61``, ``S371``,
+  ``BM12``), and anything ≥3 chars (so ``1500`` and ``3.6m``
+  survive). Real Chinese place names pass through cleanly.
+
+### Added (TLS Ask 4 — cad-skp in default install)
+
+- ``commands/setup.md`` Step 6.5a now lists ``cad-skp`` in the
+  Standard category set with a preselected check. The handler is a
+  metadata-only stub (no Python deps, no external tool required) —
+  costs ~0 KB extra at install time and eliminates the most common
+  "why are my SketchUp files not in the vault" report. If the user
+  installs ``skp2obj`` or ``skp2unity`` on PATH, the same handler
+  picks it up.
+- ``spreadsheet-legacy`` is also surfaced in the Visual/CAD section
+  with the soffice fallback noted (covers the .xls case the TLS
+  scan caught).
+
+### Added (TLS Ask 5 — templates documented as advisory)
+
+- ``CLAUDE.md`` documents that ``templates/architecture/``,
+  ``templates/photography/``, etc. are reference shapes for note
+  bodies — not loaded by the scan pipeline. Free-composition with
+  the fabrication firewall as the only hard constraint is the
+  intended flow. The exception is ``templates/vault-bridge-note.md``,
+  which is materialised into the vault's ``_Templates/`` folder by
+  setup for Obsidian's "new note from template" UX.
+
+### Added (TLS Ask 6 — surface read_text for metadata-only handlers)
+
+- ``CLAUDE.md`` adds explicit guidance: when a handler category has
+  ``extract_images=False`` AND ``read_text`` returns useful
+  structured content (cad-3dm: ApplicationName + object counts +
+  layer roster), the writing LLM MUST include that content in the
+  note body. The TLS scan flagged operators routinely skipping 3DM
+  metadata because they conflated "no image" with "nothing to write
+  about", missing signals like ``3D_Existing`` vs ``3D_Proposal``
+  layer groups that reveal design state.
+
+### Changed (TLS Ask 7 — bumped CAD render DPI 150 → 200)
+
+- ``cad_dwg.py.tmpl`` and ``cad_dxf.py.tmpl`` render at 200 DPI
+  instead of 150. ~Doubles file size and lifts schematic geometry
+  out of the "is this even a real drawing" visual range. SVG was
+  considered as an alternative format but Obsidian's inline SVG
+  rendering is inconsistent across platforms; the size-gate
+  exemption (Ask 1) is the right primary fix.
+
+6 new tests across ``test_scan_pipeline.py`` and
+``test_pattern_templates.py``; suite at 2064 passing.
+
 ## v16.7.0 — TLS rescan regressions: PDF cascade, token-soup gate, missing-handler surfacing, pre-flight probe (TLS Bugs 1-6)
 
 Closes the six bugs from the 2026-05-04 TLS pre-reconcile probe report
