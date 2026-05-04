@@ -154,7 +154,13 @@ class TestStubDetection:
         )
         assert not handler_dispatcher.is_stub_module(p)
 
-    def test_trivial_returns_are_stub(self, tmp_path):
+    def test_trivial_returns_no_longer_count_as_stub(self, tmp_path):
+        """v16.5.0 (Fix D): the regex-based "trivial body" fallback was
+        removed because it false-positived on real handlers whose
+        ``extract_images`` is intentionally a one-liner ``return []``
+        (the canonical shape for text-only handlers). Stubs must use
+        an explicit marker — see test_raises_notimplemented_is_stub.
+        """
         p = tmp_path / "cad_dxf_dxf.py"
         p.write_text(
             "def read_text(path: str) -> str:\n"
@@ -163,7 +169,7 @@ class TestStubDetection:
             "    return []\n",
             encoding="utf-8",
         )
-        assert handler_dispatcher.is_stub_module(p)
+        assert not handler_dispatcher.is_stub_module(p)
 
     def test_raises_notimplemented_is_stub(self, tmp_path):
         p = tmp_path / "cad_dxf_dxf.py"

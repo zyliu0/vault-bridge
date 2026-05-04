@@ -343,7 +343,16 @@ def get_handler(path: str) -> Optional[HandlerConfig]:
 # ---------------------------------------------------------------------------
 
 def _pdf_read_text(path: str) -> str:
-    """Extract text from a PDF using PyPDF2. Returns '' on any failure."""
+    """Extract text from a PDF using PyPDF2.
+
+    v16.5.0 (Fix F): when PyPDF2 returns less than 50 characters of
+    text — typical for scanned/image-only PDFs — fall through to
+    pytesseract OCR over the page renders if pytesseract + Pillow
+    are both importable. The OCR path is gracefully optional: if
+    pytesseract is missing, returns whatever PyPDF2 found (even if
+    empty) and the no-content gate handles the rest.
+    """
+    pypdf_text = ""
     try:
         import PyPDF2  # type: ignore
         reader = PyPDF2.PdfReader(path)
@@ -355,10 +364,68 @@ def _pdf_read_text(path: str) -> str:
                     parts.append(t)
             except Exception:
                 pass
-        return "\n".join(parts)
+        pypdf_text = "\n".join(parts).strip()
     except Exception as exc:
         logger.debug("PDF text extraction failed for %s: %s", path, exc)
+
+    # If PyPDF2 produced meaningful text, return it.
+    if len(pypdf_text) >= 50:
+        return pypdf_text
+
+    # Otherwise try OCR via pytesseract over PyMuPDF page renders.
+    ocr_text = _pdf_ocr_fallback(path)
+    if ocr_text:
+        return ocr_text
+    return pypdf_text  # may be empty
+
+
+def _pdf_ocr_fallback(path: str) -> str:
+    """Run pytesseract over PDF page renders.
+
+    Returns ``""`` if pytesseract or PyMuPDF are unavailable, or if the
+    OCR pass produces nothing usable. Never raises.
+
+    OCR is expensive (Tesseract is ~1-3 seconds per page); we cap at
+    the first 5 pages so a 200-page scan doesn't dominate the scan
+    runtime. Most scanned-PDF events the user cares about have their
+    headline content on the first 1-3 pages anyway.
+    """
+    try:
+        import pytesseract  # type: ignore
+        from PIL import Image  # type: ignore
+    except ImportError:
         return ""
+    try:
+        import fitz  # type: ignore  # PyMuPDF
+    except ImportError:
+        return ""
+
+    parts: List[str] = []
+    try:
+        doc = fitz.open(path)
+        try:
+            n_pages = min(len(doc), 5)
+            for page_idx in range(n_pages):
+                try:
+                    page = doc[page_idx]
+                    pix = page.get_pixmap(dpi=200)
+                    img = Image.frombytes(
+                        "RGB", (pix.width, pix.height), pix.samples,
+                    )
+                    text = pytesseract.image_to_string(img)
+                    if text and text.strip():
+                        parts.append(f"--- page {page_idx + 1} ---\n{text.strip()}")
+                except Exception as exc:
+                    logger.debug(
+                        "OCR page %d failed for %s: %s",
+                        page_idx, path, exc,
+                    )
+        finally:
+            doc.close()
+    except Exception as exc:
+        logger.debug("OCR fallback failed for %s: %s", path, exc)
+        return ""
+    return "\n\n".join(parts)
 
 
 def _docx_read_text(path: str) -> str:
@@ -626,6 +693,46 @@ def read_text(path: str, workdir: Optional[str] = None) -> str:
     return ""
 
 
+def read_text_with_status(
+    path: str, workdir: Optional[str] = None,
+) -> "tuple[str, Optional[str]]":
+    """Extract text from `path`; return ``(text, error_msg)``.
+
+    v16.5.0 (Fix A) — distinguishes "handler ran cleanly and produced
+    nothing" from "handler raised". Pre-v16.5 the silent-swallow at
+    handler-dispatch layer hid corrupt-file failures (BadZipFile,
+    odafc binary missing, etc.). Returning the error string lets
+    ``scan_pipeline`` surface the real cause to the user.
+
+    Implementation: wraps ``read_text(path, workdir)`` with a try/except
+    so test fixtures that mock ``read_text`` still fire. For the
+    delegated path we also consult ``handler_dispatcher.read_text_with_status``
+    to recover the underlying handler exception when ``read_text``
+    swallowed it.
+    """
+    cfg = get_handler(path)
+    if cfg is None or not cfg.extract_text:
+        return "", None
+    p = Path(path)
+    if not p.exists():
+        return "", None
+    try:
+        text = read_text(path, workdir=workdir)
+    except Exception as exc:
+        return "", f"{type(exc).__name__}: {exc}"
+    if text:
+        return text, None
+    # Empty result — for delegated categories, ask the dispatcher's
+    # status-aware variant whether the handler raised. For built-in
+    # categories an empty result is genuinely "nothing to extract".
+    if handler_dispatcher.is_delegated(cfg.category):
+        _, err = handler_dispatcher.read_text_with_status(
+            workdir, cfg.category, path,
+        )
+        return "", err
+    return "", None
+
+
 def extract_images(path: str, workdir: Optional[str] = None) -> List[Path]:
     """Return the images for `path` according to its file type.
 
@@ -650,6 +757,38 @@ def extract_images(path: str, workdir: Optional[str] = None) -> List[Path]:
     if handler_dispatcher.is_delegated(cfg.category):
         return handler_dispatcher.extract_images(workdir, cfg.category, path)
     return []
+
+
+def extract_images_with_status(
+    path: str, workdir: Optional[str] = None,
+) -> "tuple[List[Path], Optional[str]]":
+    """Same as :func:`extract_images`; also returns an error string when
+    the handler raised. v16.5.0 (Fix A).
+
+    Wraps ``extract_images(path, workdir)`` with a try/except so test
+    fixtures that mock ``extract_images`` still fire correctly. For
+    delegated categories we additionally consult the dispatcher's
+    status-aware variant on empty results to recover errors that the
+    inner handler swallowed.
+    """
+    cfg = get_handler(path)
+    if cfg is None or not cfg.extract_images:
+        return [], None
+    p = Path(path)
+    if not p.exists():
+        return [], None
+    try:
+        paths = extract_images(path, workdir=workdir)
+    except Exception as exc:
+        return [], f"{type(exc).__name__}: {exc}"
+    if paths:
+        return list(paths), None
+    if handler_dispatcher.is_delegated(cfg.category):
+        _, err = handler_dispatcher.extract_images_with_status(
+            workdir, cfg.category, path,
+        )
+        return [], err
+    return [], None
 
 
 def handle(path: str, workdir: Optional[str] = None) -> HandlerResult:

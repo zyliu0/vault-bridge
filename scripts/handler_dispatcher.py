@@ -33,7 +33,6 @@ from __future__ import annotations
 import importlib.util
 import logging
 import os
-import re
 import sys
 import tempfile
 from dataclasses import dataclass, field
@@ -74,39 +73,20 @@ _STUB_MARKERS = (
 def is_stub_module(path: Path) -> bool:
     """Return True when the handler file at `path` is a TODO stub.
 
-    Treats any of the following as stub:
-    - File contains one of `_STUB_MARKERS`.
-    - Both `read_text` and `extract_images` have trivial bodies:
-      a single `return ""` / `return []` / `return None` as the only
-      non-comment line in the function body.
+    v16.5.0 (Fix D): only ``_STUB_MARKERS`` count. Pre-v16.5 a regex
+    "trivial body" fallback also flagged real handlers as stubs when
+    their ``extract_images`` happened to be a one-liner ``return []``
+    (the canonical shape for text-only handlers). The 2026-05-04
+    field report flagged ``text-plain`` and other categories as
+    false-positive stubs in the coverage report. The fix: trust the
+    explicit marker. Templates that ARE stubs put one in; everyone
+    else is real.
     """
     try:
         text = path.read_text(encoding="utf-8")
     except OSError:
         return False
-
-    if any(marker in text for marker in _STUB_MARKERS):
-        return True
-
-    # Minimal body check — looks for `def read_text(...)` and
-    # `def extract_images(...)` and verifies each has only a trivial
-    # return statement in its body. Regex-based (no AST) because the
-    # handler files are small and the contract is narrow.
-    read_text_trivial = _has_trivial_body(text, "read_text")
-    extract_images_trivial = _has_trivial_body(text, "extract_images")
-    return read_text_trivial and extract_images_trivial
-
-
-_TRIVIAL_BODY_RE_TMPL = (
-    r"def\s+{fn}\s*\([^)]*\)\s*(?:->\s*[^:]+)?:\s*\n"
-    r"(?:\s+(?:\"{{3}}.*?\"{{3}}|'{{3}}.*?'{{3}}|\#.*?\n))*"  # docstring / comments
-    r"\s+return\s+(?:\"\"|''|\[\]|None)\s*\n"
-)
-
-
-def _has_trivial_body(text: str, fn_name: str) -> bool:
-    pattern = _TRIVIAL_BODY_RE_TMPL.format(fn=re.escape(fn_name))
-    return bool(re.search(pattern, text, re.DOTALL))
+    return any(marker in text for marker in _STUB_MARKERS)
 
 
 # Categories handled by the built-in registry in file_type_handlers.py
@@ -144,6 +124,14 @@ class HandlerCoverage:
     missing: List[str] = field(default_factory=list)
     # Categories handled by the built-in registry; always populated.
     built_in: List[str] = field(default_factory=list)
+    # v16.5.0 (Fix E) — categories whose handler files exist (so they
+    # show up as "real" in the file-existence check) but whose end-to-
+    # end probe via ``scan_pipeline.process_file`` produces no output.
+    # Typical cause: a missing external tool (LibreDWG/ODA for cad-dwg,
+    # antiword/soffice for document-office-legacy). The hint dict maps
+    # category → human-readable explanation pulled from the probe.
+    real_but_unconfigured: List[str] = field(default_factory=list)
+    unconfigured_hints: Dict[str, str] = field(default_factory=dict)
 
     def has_stubs(self) -> bool:
         return bool(self.stub)
@@ -155,6 +143,13 @@ class HandlerCoverage:
             lines.append(f"  built-in: {', '.join(sorted(self.built_in))}")
         if self.real:
             lines.append(f"  real:     {', '.join(sorted(self.real))}")
+        if self.real_but_unconfigured:
+            for cat in sorted(self.real_but_unconfigured):
+                hint = self.unconfigured_hints.get(cat, "external tool missing")
+                lines.append(
+                    f"  unconfigured: {cat}  ← handler file present but "
+                    f"end-to-end probe failed ({hint})"
+                )
         if self.stub:
             lines.append(
                 f"  stubs:    {', '.join(sorted(self.stub))}  "
@@ -168,19 +163,41 @@ class HandlerCoverage:
         return lines
 
 
-def coverage_report(workdir: Optional[str]) -> HandlerCoverage:
+def coverage_report(
+    workdir: Optional[str],
+    *,
+    probe: bool = False,
+) -> HandlerCoverage:
     """Walk `<workdir>/.vault-bridge/handlers/` and classify each handler.
 
-    Returns a `HandlerCoverage` with four parallel lists:
+    Returns a `HandlerCoverage` with five parallel lists:
     - `built_in`: categories handled by `file_type_handlers.py` directly
       (document-pdf, image-raster, text-plain, …). Always populated.
-    - `real`: delegated category whose handler file exists and is NOT a stub
-    - `stub`: delegated category whose handler file is a TODO placeholder
-    - `missing`: delegated category with no handler file
+    - `real`: delegated category whose handler file exists and is NOT a stub.
+    - `real_but_unconfigured` (v16.5.0, Fix E): handler file exists and
+      is not a stub, but the end-to-end pipeline probe produces no
+      output — typically because an external tool the handler shells
+      out to (LibreDWG, ODA, antiword) is not installed. Only
+      populated when ``probe=True``.
+    - `stub`: delegated category whose handler file is a TODO placeholder.
+    - `missing`: delegated category with no handler file.
 
     When `workdir` is None or the handlers dir does not exist, all
     delegated categories are reported as `missing`; `built_in` still
     lists the standard set.
+
+    Args:
+        workdir: Path to the workdir to inspect.
+        probe:   When True, run :func:`handler_probe.probe_extension`
+                 against one extension per "real" category to verify
+                 the handler produces output end-to-end. Categories
+                 whose probe returns ``ok=False`` get demoted from
+                 ``real`` to ``real_but_unconfigured`` with a hint
+                 string explaining why. False by default because the
+                 probe is comparatively expensive (each invocation
+                 runs scan_pipeline against a fixture); enable from
+                 setup or `/vault-bridge:vault-health`, not from
+                 every scan-start log.
     """
     cov = HandlerCoverage(built_in=list(_BUILTIN_CATEGORIES))
 
@@ -205,6 +222,7 @@ def coverage_report(workdir: Optional[str]) -> HandlerCoverage:
         files_by_stem.setdefault(stem_prefix, []).append(ext)
 
     # Classify each delegated category.
+    real_categories_with_exts: List["tuple[str, List[str]]"] = []
     for category, stem_prefix in _CATEGORY_TO_STEM.items():
         exts = files_by_stem.get(stem_prefix, [])
         if not exts:
@@ -223,6 +241,38 @@ def coverage_report(workdir: Optional[str]) -> HandlerCoverage:
             cov.stub.append(category)
         else:
             cov.real.append(category)
+            real_categories_with_exts.append((category, exts))
+
+    # v16.5.0 (Fix E): optional end-to-end probe to demote
+    # ``real-but-non-functional`` handlers (e.g. cad-dwg without ODA).
+    if probe and real_categories_with_exts:
+        try:
+            import handler_probe  # type: ignore
+        except Exception:
+            return cov
+        demoted: List[str] = []
+        for category, exts in real_categories_with_exts:
+            ext = sorted(exts)[0]  # one probe per category is enough
+            try:
+                result = handler_probe.probe_extension(ext, workdir)
+            except Exception:
+                continue
+            # Probes that report ``no_fixture`` are inconclusive (we
+            # don't ship a fixture for that extension); leave them as
+            # real and let the user catch the issue at scan time.
+            if result.skip_reason == "no_fixture":
+                continue
+            if not result.ok:
+                demoted.append(category)
+                hint = (
+                    result.external_tool_missing
+                    or result.skip_reason
+                    or "probe returned no content"
+                )
+                cov.unconfigured_hints[category] = hint
+        if demoted:
+            cov.real = sorted(set(cov.real) - set(demoted))
+            cov.real_but_unconfigured = sorted(set(cov.real_but_unconfigured) | set(demoted))
 
     return cov
 
@@ -290,22 +340,57 @@ def read_text(workdir: Optional[str], category: str, path: str) -> str:
 
     Returns '' when: workdir is None, category is not delegated, the
     handler file is missing, or the handler raises. Never raises.
+
+    Back-compat shim: callers that want the exception detail should use
+    :func:`read_text_with_status` (v16.5.0, Fix A).
+    """
+    text, _err = read_text_with_status(workdir, category, path)
+    return text
+
+
+def read_text_with_status(
+    workdir: Optional[str],
+    category: str,
+    path: str,
+) -> "tuple[str, Optional[str]]":
+    """Same as :func:`read_text` but also returns an error string when
+    the handler raised, the file couldn't be loaded, or the result was
+    not a string.
+
+    v16.5.0 (Fix A) — pre-v16.5 handler exceptions were swallowed at
+    ``logger.debug``. Field reports surfaced two failure modes that
+    the swallowed exception hid: a corrupt XLSX (``BadZipFile``)
+    looked identical to a healthy-but-empty workbook, and a DWG
+    handler with a missing ODA File Converter binary returned ``""``
+    silently. Returning the exception message lets the scan
+    pipeline surface ``BadZipFile`` / ``FileNotFoundError`` /
+    ``odafc binary not found`` to the user as a real warning.
+
+    Returns:
+        ``(text, error)`` — text is ``""`` whenever the handler
+        couldn't run; error is a one-line message describing why,
+        or ``None`` when the handler ran cleanly. Never raises.
     """
     if not workdir:
-        return ""
+        return "", None
     ext = Path(path).suffix.lstrip(".").lower()
     mod_path = _handler_module_path(workdir, category, ext)
     if mod_path is None:
-        return ""
+        return "", None
     module = _load_module(mod_path)
-    if module is None or not hasattr(module, "read_text"):
-        return ""
+    if module is None:
+        return "", f"handler module failed to load: {mod_path.name}"
+    if not hasattr(module, "read_text"):
+        return "", None
     try:
         result = module.read_text(path)
     except Exception as exc:
-        logger.debug("handler read_text error for %s: %s", path, exc)
-        return ""
-    return result if isinstance(result, str) else ""
+        msg = f"{type(exc).__name__}: {exc}"
+        logger.debug("handler read_text error for %s: %s", path, msg)
+        return "", msg
+    if not isinstance(result, str):
+        return "", f"handler returned non-string ({type(result).__name__})"
+    return result, None
 
 
 def extract_images(
@@ -320,26 +405,48 @@ def extract_images(
     caller (scan_pipeline) is responsible for further compression; this
     function only produces the raw rendered pages. Returns [] on any
     failure. Never raises.
+
+    Back-compat shim: callers that want the exception detail should use
+    :func:`extract_images_with_status` (v16.5.0, Fix A).
+    """
+    paths, _err = extract_images_with_status(workdir, category, path, out_dir)
+    return paths
+
+
+def extract_images_with_status(
+    workdir: Optional[str],
+    category: str,
+    path: str,
+    out_dir: Optional[str] = None,
+) -> "tuple[List[Path], Optional[str]]":
+    """Same as :func:`extract_images` but also returns an error string
+    when the handler raised. v16.5.0 (Fix A) — see read_text_with_status
+    for the rationale; same failure modes apply on the image side
+    (DWG handlers without ODA File Converter, corrupt PSDs, etc.).
     """
     if not workdir:
-        return []
+        return [], None
     ext = Path(path).suffix.lstrip(".").lower()
     mod_path = _handler_module_path(workdir, category, ext)
     if mod_path is None:
-        return []
+        return [], None
     module = _load_module(mod_path)
-    if module is None or not hasattr(module, "extract_images"):
-        return []
+    if module is None:
+        return [], f"handler module failed to load: {mod_path.name}"
+    if not hasattr(module, "extract_images"):
+        return [], None
 
     created_tmp = False
     if out_dir is None:
         out_dir = tempfile.mkdtemp(prefix="vb_handler_")
         created_tmp = True
 
+    err: Optional[str] = None
     try:
         raw = module.extract_images(path, out_dir)
     except Exception as exc:
-        logger.debug("handler extract_images error for %s: %s", path, exc)
+        err = f"{type(exc).__name__}: {exc}"
+        logger.debug("handler extract_images error for %s: %s", path, err)
         raw = []
 
     # Normalise: accept list[str] or list[Path]; drop any that do not exist.
@@ -358,4 +465,4 @@ def extract_images(
     # pages the caller needs.
     _ = created_tmp
     _ = os  # silence `os` unused when we drop cleanup
-    return result
+    return result, err

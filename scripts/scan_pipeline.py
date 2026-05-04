@@ -135,6 +135,15 @@ class ScanResult:
     # post-v16.0.0.
     image_captions: List[str] = field(default_factory=list)
     image_caption_prompts: List[str] = field(default_factory=list)
+    # v16.5.0 (Fix C) — folder-event metadata. ``folder_context`` holds
+    # a structured dict for folder events: ``{"folder_name": str,
+    # "child_count": int, "child_names": list[str], "child_types":
+    # dict[ext -> count], "key_file": str, "key_file_reason": str}``.
+    # The writing LLM uses this to compose an event description even
+    # when no representative file produced extractable content (e.g. a
+    # DWG-pile folder when ODA File Converter is missing). Empty for
+    # non-folder events.
+    folder_context: dict = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
@@ -401,11 +410,22 @@ def _process_images(
         att_index = attachment_index.AttachmentIndex()
 
     # Step 1: Extract images via handler registry, capped at IMAGE_CANDIDATE_CAP.
+    # v16.5.0 (Fix A): use the with_status variant so handler exceptions
+    # (BadZipFile on corrupt XLSX, missing-binary on DWG, etc.) surface
+    # in result.errors instead of being indistinguishable from
+    # "file is intentionally image-less".
     try:
-        raw_images = file_type_handlers.extract_images(source_path, workdir=workdir)
+        raw_images, handler_err = file_type_handlers.extract_images_with_status(
+            source_path, workdir=workdir,
+        )
     except Exception as exc:
         errors.append(f"extract_images failed: {exc}")
         return attachments, images_embedded, False, warnings, errors, candidate_paths, caption_prompts, size_gate_drops
+    if handler_err:
+        # The handler raised; propagate the message as an error so
+        # callers can tell the difference between "DWG file is empty"
+        # and "no DWG converter installed".
+        errors.append(f"extract_images failed: {handler_err}")
 
     if not raw_images:
         # v14.3 (F1-d) + v14.5 (field-review Issue 1): readable-handler-
@@ -451,12 +471,40 @@ def _process_images(
             f"image candidates capped at {IMAGE_CANDIDATE_CAP} (source had {len(raw_images)})"
         )
 
-    # Step 2: Compress every candidate.
+    # v16.5.0 (Fix G): pre-compression size gate. The post-compression
+    # gate at Step 4 still runs (it catches images that compressed
+    # *down* below the threshold), but pre-filtering raw candidates
+    # whose source bytes are already below IMAGE_MIN_BYTES saves the
+    # field report's 79.5-second waste case — a multi-page PDF whose
+    # every page-image was a small thumbnail. Compressing N small
+    # candidates one-by-one took longer than the size gate's later
+    # rejection of every result.
+    pre_gated: List[Path] = []
+    for img_path in capped_raw:
+        try:
+            raw_size = img_path.stat().st_size
+        except OSError:
+            raw_size = 0
+        if raw_size and raw_size < IMAGE_MIN_BYTES:
+            size_gate_drops += 1
+            warnings.append(
+                f"image under size gate ({raw_size} < {IMAGE_MIN_BYTES} bytes): "
+                f"{img_path.name} — likely logo or UI chrome, skipped"
+            )
+            continue
+        pre_gated.append(img_path)
+    if size_gate_drops and not pre_gated:
+        # All raw candidates fell below the gate — short-circuit before
+        # we even create the compress_dir. Caller's no-content stage
+        # will reclassify as ``below_size_gate``.
+        return attachments, images_embedded, False, warnings, errors, candidate_paths, caption_prompts, size_gate_drops
+
+    # Step 2: Compress every surviving candidate.
     compress_dir = tmp_dir / "compressed"
     compress_dir.mkdir(parents=True, exist_ok=True)
 
     compressed_paths: List[Path] = []
-    for img_path in capped_raw:
+    for img_path in pre_gated:
         try:
             compressed = compress_images.compress_image(img_path, compress_dir, event_date)
             compressed_paths.append(compressed)
@@ -667,25 +715,58 @@ _FOLDER_REP_SKIP_PATTERNS = (
     ".gitignore", ".gitkeep", "@eaDir",
 )
 
+# v16.5.0 (Fix B) — filename hints that mark a "key" / index / cover
+# file in a pile. Listed in priority order; first hit wins. Uses casefold
+# matching for ASCII robustness; CJK substring match works in either
+# direction. Tested against real CN architectural archives.
+_KEY_FILE_HINTS = (
+    "目录",      # zh: index / table of contents
+    "封面",      # zh: cover sheet
+    "总图",      # zh: overall plan / master sheet
+    "总平面",    # zh: master plan
+    "index",
+    "cover",
+    "general",
+    "master",
+    "summary",
+    "overview",
+    "readme",
+)
+
 
 def _pick_folder_representatives(
     folder: Path,
     cap: int = _FOLDER_REPRESENTATIVES_CAP,
 ) -> List[Path]:
     """Return up to ``cap`` files from ``folder`` that should represent
-    the folder's content. Picks deterministically by sorted filename
-    so a re-scan converges on the same representatives.
+    the folder's content.
 
-    Skips obvious noise (``.DS_Store``, lock files, hidden dotfiles)
-    and prefers files that have a registered handler (i.e. PDFs,
-    Office docs, images). When no handlered file exists, returns
-    the first ``cap`` non-noise files so the folder note still
-    captures something.
+    v16.5.0 (Fix B): semantic key-file picker. Pre-v16.5 the picker
+    was "first ``cap`` by sorted filename" — semantically blind to
+    file-type diversity and to filename hints. Real archives often
+    have one cover/index/master file plus N detail files; the dumb
+    pick missed the cover entirely when the alphabet ordered detail
+    files first.
+
+    The new pick:
+
+    1. **Filename-hint preference.** Files whose name contains any
+       of ``_KEY_FILE_HINTS`` (``目录``/``封面``/``index``/``cover``/...
+       — both CJK and English) jump to position 0 in the candidate
+       list, ranked by hint priority.
+    2. **Type diversity.** When the folder mixes file types (e.g.
+       1 PDF + 5 JPG + 2 DWG), we pick at most one of each type
+       before doubling up on any.
+    3. **Handlered preference.** Files with a registered handler
+       outrank files without one.
+    4. **Sorted-filename tiebreaker.** Deterministic so re-scans
+       converge on the same representatives.
     """
     try:
         entries = sorted(p for p in folder.iterdir() if p.is_file())
     except OSError:
         return []
+
     cleaned: List[Path] = []
     for p in entries:
         name = p.name
@@ -696,12 +777,96 @@ def _pick_folder_representatives(
         cleaned.append(p)
     if not cleaned:
         return []
-    handlered: List[Path] = [
-        p for p in cleaned if file_type_handlers.get_handler(str(p)) is not None
+
+    # Step 1: apply filename-hint priority. We score every candidate so
+    # the most-key file lands at index 0; ties fall back to sorted name.
+    scored: List["tuple[int, Path]"] = []
+    for p in cleaned:
+        name_low = p.name.lower()
+        score = 1_000  # default: unhinted
+        for i, hint in enumerate(_KEY_FILE_HINTS):
+            if hint in p.name or hint in name_low:
+                score = i
+                break
+        scored.append((score, p))
+    scored.sort(key=lambda t: (t[0], t[1].name))
+
+    # Step 2: split into handlered vs un-handlered; handlered wins.
+    handlered = [p for _, p in scored if file_type_handlers.get_handler(str(p)) is not None]
+    fallback = [p for _, p in scored if file_type_handlers.get_handler(str(p)) is None]
+    pool = handlered if handlered else fallback
+    if not pool:
+        return []
+
+    # Step 3: type diversity. Walk the pool taking at most one of each
+    # extension before doubling up. The pool is already sorted by hint
+    # priority, so the first extension we encounter is the most-key one.
+    seen_exts: set = set()
+    primary: List[Path] = []
+    secondary: List[Path] = []
+    for p in pool:
+        ext = p.suffix.lower()
+        if ext not in seen_exts:
+            primary.append(p)
+            seen_exts.add(ext)
+        else:
+            secondary.append(p)
+    diverse = primary + secondary
+    return diverse[:cap]
+
+
+def _build_folder_context(folder: Path, reps: List[Path]) -> dict:
+    """Return a dict describing the folder for the writing LLM.
+
+    v16.5.0 (Fix C). The dict carries enough metadata that the LLM can
+    compose an event description even when no representative file
+    produced extractable content (the DWG-pile-without-ODA case).
+
+    Schema::
+
+        {
+          "folder_name": str,
+          "child_count": int,
+          "child_names": list[str],     # sorted, capped at 50 names
+          "child_types": dict[ext, int], # ext -> count, e.g. {".dwg": 30}
+          "key_file": str,               # primary representative basename
+          "key_file_reason": str,        # "filename hint: 目录" / "first by name" / ""
+        }
+    """
+    try:
+        entries = sorted(p for p in folder.iterdir() if p.is_file())
+    except OSError:
+        entries = []
+    children = [
+        p for p in entries
+        if not p.name.startswith(".") and p.name not in _FOLDER_REP_SKIP_PATTERNS
     ]
-    if handlered:
-        return handlered[:cap]
-    return cleaned[:cap]
+    child_names = [p.name for p in children][:50]
+    child_types: dict = {}
+    for p in children:
+        ext = p.suffix.lower() or "(no ext)"
+        child_types[ext] = child_types.get(ext, 0) + 1
+    key_file = ""
+    key_reason = ""
+    if reps:
+        key_file = reps[0].name
+        # Detect why this file won the pick.
+        name = reps[0].name
+        name_low = name.lower()
+        for hint in _KEY_FILE_HINTS:
+            if hint in name or hint in name_low:
+                key_reason = f"filename hint: {hint}"
+                break
+        if not key_reason:
+            key_reason = "first handlered file by sorted name"
+    return {
+        "folder_name": folder.name,
+        "child_count": len(children),
+        "child_names": child_names,
+        "child_types": dict(sorted(child_types.items(), key=lambda x: -x[1])),
+        "key_file": key_file,
+        "key_file_reason": key_reason,
+    }
 
 
 def process_folder(
@@ -741,9 +906,12 @@ def process_folder(
         return _make_skipped(folder_path, "process_folder called on non-folder")
 
     reps = _pick_folder_representatives(folder)
+    folder_ctx = _build_folder_context(folder, reps)
     if not reps:
         # Empty folder — write a metadata-only folder note. The caller
-        # decides whether to keep it via skip_on_no_content.
+        # decides whether to keep it via skip_on_no_content. v16.5.0
+        # (Fix C): even when empty, ship folder_context so the LLM
+        # has the folder name + child_types to compose from.
         if skip_on_no_content:
             return _make_skipped(folder_path, "no_content", category="folder")
         return ScanResult(
@@ -760,6 +928,7 @@ def process_folder(
             sources_read=0,
             content_confidence="none",
             image_grid=False,
+            folder_context=folder_ctx,
         )
 
     merged_text_parts: List[str] = []
@@ -811,6 +980,37 @@ def process_folder(
 
     has_content = bool(merged_text or merged_attachments)
     if skip_on_no_content and not has_content:
+        # v16.5.0 (Fix C): when a DWG-pile folder produces zero bytes
+        # because ODA File Converter is missing, the LLM still needs
+        # *something* to compose against. Promote the folder to a
+        # text-only event whose body is the folder context (folder
+        # name + child filename list + type counts). The fabrication
+        # firewall stays intact — every claim must come from the
+        # filename evidence the LLM literally sees.
+        ctx_text = _render_folder_context_text(folder_ctx)
+        if ctx_text:
+            merged_warnings.append(
+                "folder context promoted to body — no representative "
+                "produced extractable content. Compose the event "
+                "description from filename evidence only; do not "
+                "invent details about file contents."
+            )
+            return ScanResult(
+                source_path=folder_path,
+                handler_category="folder",
+                text=ctx_text,
+                attachments=[],
+                images_embedded=0,
+                skipped=False,
+                skip_reason="",
+                warnings=merged_warnings,
+                errors=merged_errors,
+                read_bytes=len(ctx_text.encode("utf-8")),
+                sources_read=0,
+                content_confidence="low",
+                image_grid=False,
+                folder_context=folder_ctx,
+            )
         return _make_skipped(
             folder_path,
             "no_content",
@@ -836,7 +1036,35 @@ def process_folder(
         image_candidate_paths=merged_candidate_paths,
         image_caption_prompts=[],
         image_captions=[],
+        folder_context=folder_ctx,
     )
+
+
+def _render_folder_context_text(folder_ctx: dict) -> str:
+    """Render a folder_context dict as plain text the writing LLM can
+    use as an event-body input. v16.5.0 (Fix C)."""
+    if not folder_ctx:
+        return ""
+    parts: List[str] = []
+    parts.append(f"# Folder event: {folder_ctx.get('folder_name', '(unnamed)')}")
+    parts.append("")
+    parts.append(f"- Child files: {folder_ctx.get('child_count', 0)}")
+    types = folder_ctx.get("child_types") or {}
+    if types:
+        type_summary = ", ".join(f"{ext} ×{n}" for ext, n in types.items())
+        parts.append(f"- File types: {type_summary}")
+    key_file = folder_ctx.get("key_file") or ""
+    key_reason = folder_ctx.get("key_file_reason") or ""
+    if key_file:
+        suffix = f" ({key_reason})" if key_reason else ""
+        parts.append(f"- Key file (representative): `{key_file}`{suffix}")
+    names = folder_ctx.get("child_names") or []
+    if names:
+        parts.append("")
+        parts.append("## Child filenames")
+        for n in names:
+            parts.append(f"- {n}")
+    return "\n".join(parts)
 
 
 # ---------------------------------------------------------------------------
@@ -1004,11 +1232,19 @@ def _stage_extract_text(ctx: _ScanContext) -> None:
             f"large file ({file_size // 1_048_576} MB): estimated read "
             f"~{est:.0f}s at measured transport speed"
         )
+    # v16.5.0 (Fix A): use the with_status variant so corrupt files
+    # (BadZipFile on a truncated XLSX, missing converter for DWG, etc.)
+    # surface as ctx.errors rather than disappearing into a silent
+    # empty-text result.
     try:
-        text = file_type_handlers.read_text(read_path, workdir=ctx.workdir)
+        text, handler_err = file_type_handlers.read_text_with_status(
+            read_path, workdir=ctx.workdir,
+        )
     except Exception as exc:
         ctx.errors.append(f"text extraction error: {exc}")
         return
+    if handler_err:
+        ctx.errors.append(f"text extraction error: {handler_err}")
 
     # v16.3.0 (SSS-B) — garbled-extract gate. PyPDF2 / python-pptx
     # routinely produce CID-font dumps (long unbroken digit/capital

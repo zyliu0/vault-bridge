@@ -1,5 +1,121 @@
 # Changelog
 
+## v16.5.0 — pipeline intent vs actual: handler errors surface, folder events get context, key-file picker (Fixes A–H)
+
+Closes the eight ranked fixes from the 2026-05-04 process audit
+("pipeline intent vs. actual behaviour"). v16.4.0 made the format
+extractors work in isolation; v16.5.0 closes the **glue** gaps
+between handlers and the writing LLM so silent failures become loud,
+folder events compose grounded prose even with zero extracted
+content, and DWG piles get a proper key-file pick.
+
+### Fixed (Fix A — handler exception surface)
+
+- Handler exceptions (BadZipFile on a corrupt XLSX, missing
+  ODA/LibreDWG converter for cad-dwg, antiword absent for legacy
+  Office, etc.) used to be swallowed at the dispatch layer and
+  produce ``no_content`` skips indistinguishable from healthy-but-
+  empty files. v16.5.0 routes them into ``ScanResult.errors`` via:
+  - ``handler_dispatcher.read_text_with_status`` /
+    ``extract_images_with_status`` (new), returning
+    ``(text|paths, error_msg|None)``.
+  - ``file_type_handlers.read_text_with_status`` /
+    ``extract_images_with_status`` (new) — thin wrappers around
+    the existing legacy variants so test fixtures that mock at
+    the file_type_handlers layer still fire.
+  - ``scan_pipeline._stage_extract_text`` and ``_process_images``
+    consume the with_status variants and append the message into
+    ``ctx.errors`` / ``errors``.
+
+### Fixed (Fix G — size gate fires pre-compression)
+
+- The size gate used to fire AFTER per-image compression, so a
+  multi-page PDF whose every page rendered to a small thumbnail
+  burned ~80 seconds on compressing them all before dropping
+  every result. v16.5.0 stats raw candidates first and skips
+  compression for any candidate whose source bytes are already
+  below ``IMAGE_MIN_BYTES``. The post-compression gate still
+  exists (catches images that compressed *down* below the
+  threshold).
+
+### Added (Fix B — semantic key-file picker)
+
+- ``_pick_folder_representatives`` now ranks candidates by
+  filename hint (``目录``/``封面``/``总图``/``index``/``cover``/
+  ``master``/``general``/...) before falling back to sorted
+  filename. Adds type diversity: when a folder contains 1 PDF +
+  5 JPGs + 2 DWGs, the cap-3 pick lands on PDF + JPG + DWG
+  rather than 3 JPGs.
+
+### Added (Fix C — folder context survives zero-content folders)
+
+- ``ScanResult`` gains a ``folder_context`` dict carrying
+  ``{folder_name, child_count, child_names, child_types,
+  key_file, key_file_reason}``. ``process_folder`` builds it
+  from the folder listing (independent of extraction success).
+- When every representative produces zero content (the
+  DWG-pile-without-ODA case), ``process_folder`` now promotes
+  the folder context into ``ScanResult.text`` so the writing
+  LLM has filename evidence to compose against. The
+  fabrication firewall stays intact — every claim must come
+  from filename evidence the LLM literally sees, not from
+  invented file contents. A warning is appended pointing at
+  the rule.
+
+### Fixed (Fix D — stub detector trusts explicit markers only)
+
+- ``handler_dispatcher.is_stub_module`` no longer falls back to
+  a regex-based "trivial body" check. Real handlers whose
+  ``extract_images`` is intentionally a one-liner ``return []``
+  (the canonical shape for text-only categories) used to
+  false-positive as stubs in the coverage report. v16.5.0
+  trusts only the explicit ``_STUB_MARKERS`` (``# TODO:
+  implement``, ``raise NotImplementedError``,
+  ``VAULT_BRIDGE_HANDLER_STUB``).
+
+### Added (Fix E — coverage report integrates probe)
+
+- ``coverage_report(workdir, probe=True)`` now demotes
+  categories from ``real`` to ``real_but_unconfigured`` when
+  ``handler_probe.probe_extension`` returns ``ok=False``. The
+  hint column tells the user the underlying cause (missing
+  binary, etc.). Setup wires this in opt-in fashion (default
+  off because each probe runs scan_pipeline against a fixture
+  — comparatively expensive at scan-start).
+
+### Added (Fix F — OCR fallback for image-only PDFs)
+
+- ``_pdf_read_text`` falls through to ``pytesseract`` over
+  PyMuPDF page renders when PyPDF2 returns < 50 chars. Caps at
+  the first 5 pages. Gracefully degrades when pytesseract or
+  PyMuPDF aren't installed.
+
+### Added (Fix H — DWG converter loud when missing)
+
+- ``cad_dwg.py.tmpl`` raises ``DwgConverterMissing`` (a
+  ``RuntimeError`` subclass) when neither LibreDWG nor ODA File
+  Converter is detectable on PATH. Combined with Fix A, this
+  produces an actionable error: ``no DWG converter found on
+  PATH. Install LibreDWG (\`brew install libredwg\`) or ODA
+  File Converter, then re-run.``
+
+### Why this shape
+
+The 2026-05-04 process audit's "pile of DWGs" question was the
+forcing function for v16.5.0. The user described a workflow where
+the pipeline picks a key file from a pile, screenshots it, and
+the LLM composes an event description grounded in both filename
+evidence and visual content. v16.5.0's semantic picker (Fix B) +
+folder context promotion (Fix C) + handler error surface (Fix A) +
+loud DWG converter check (Fix H) together cover the
+"the converter is missing AND we still want a useful note" case.
+The other fixes (D, E, F, G) are smaller leverage but kill
+classes of silent failure flagged across multiple field reports.
+
+10 new tests in ``test_scan_pipeline.py`` covering the picker,
+folder context promotion, pre-compression gate, and Fix A error
+flow. Full suite: 2028 passing.
+
 ## v16.4.0 — pipeline format coverage: HEIC / XLSX / RTF / SKP + handler probe (AUDIT-1 through AUDIT-7)
 
 Closes the eight action items from the 2026-05-04 pipeline format

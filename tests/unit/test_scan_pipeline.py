@@ -2011,3 +2011,210 @@ class TestProcessFolder:
         )
         assert result.handler_category != "folder"
         assert "plain text content" in result.text
+
+
+# ---------------------------------------------------------------------------
+# v16.5.0 Fix B + C — semantic key-file picker + folder context
+# ---------------------------------------------------------------------------
+
+class TestSemanticKeyFilePicker:
+    """`_pick_folder_representatives` prefers filename hints
+    (`目录`/`封面`/`index`/`cover`) and ensures type diversity."""
+
+    @staticmethod
+    def _sp():
+        import scan_pipeline
+        return scan_pipeline
+
+    def test_filename_hint_floats_to_first_position(self, tmp_path):
+        sp = self._sp()
+        d = tmp_path / "210127 v2.3 lighting CD"
+        d.mkdir()
+        (d / "z_detail.dwg").write_bytes(b"DWG")
+        (d / "a_detail.dwg").write_bytes(b"DWG")
+        (d / "目录_index.dwg").write_bytes(b"DWG")
+        reps = sp._pick_folder_representatives(d)
+        assert reps[0].name == "目录_index.dwg"
+
+    def test_index_hint_in_english_floats(self, tmp_path):
+        sp = self._sp()
+        d = tmp_path / "f"
+        d.mkdir()
+        (d / "z.pdf").write_bytes(b"%PDF-1.4")
+        (d / "index.pdf").write_bytes(b"%PDF-1.4")
+        reps = sp._pick_folder_representatives(d)
+        assert reps[0].name == "index.pdf"
+
+    def test_type_diversity_picks_one_of_each(self, tmp_path):
+        sp = self._sp()
+        d = tmp_path / "mix"
+        d.mkdir()
+        for i in range(5):
+            (d / f"img{i}.jpg").write_bytes(b"\xff\xd8\xff\xe0")
+        (d / "memo.pdf").write_bytes(b"%PDF-1.4")
+        (d / "drawing.dwg").write_bytes(b"DWG")
+        reps = sp._pick_folder_representatives(d, cap=3)
+        ext_set = {r.suffix.lower() for r in reps}
+        # All three should be different extensions, not 3 jpgs.
+        assert len(ext_set) == 3
+        assert ".pdf" in ext_set
+        assert ".dwg" in ext_set
+        assert ".jpg" in ext_set
+
+    def test_skips_noise_files(self, tmp_path):
+        sp = self._sp()
+        d = tmp_path / "f"
+        d.mkdir()
+        (d / ".DS_Store").write_text("noise")
+        (d / "Thumbs.db").write_text("noise")
+        (d / "real.txt").write_text("real content")
+        reps = sp._pick_folder_representatives(d)
+        names = {r.name for r in reps}
+        assert "real.txt" in names
+        assert ".DS_Store" not in names
+        assert "Thumbs.db" not in names
+
+
+class TestBuildFolderContext:
+    @staticmethod
+    def _sp():
+        import scan_pipeline
+        return scan_pipeline
+
+    def test_emits_folder_name_and_counts(self, tmp_path):
+        sp = self._sp()
+        d = tmp_path / "210127 v2.3 lighting CD"
+        d.mkdir()
+        for i in range(6):
+            (d / f"sheet{i}.dwg").write_bytes(b"DWG")
+        reps = sp._pick_folder_representatives(d)
+        ctx = sp._build_folder_context(d, reps)
+        assert ctx["folder_name"] == "210127 v2.3 lighting CD"
+        assert ctx["child_count"] == 6
+        assert ".dwg" in ctx["child_types"]
+        assert ctx["child_types"][".dwg"] == 6
+
+    def test_emits_key_file_with_reason(self, tmp_path):
+        sp = self._sp()
+        d = tmp_path / "f"
+        d.mkdir()
+        (d / "z.pdf").write_bytes(b"%PDF-1.4")
+        (d / "index.pdf").write_bytes(b"%PDF-1.4")
+        reps = sp._pick_folder_representatives(d)
+        ctx = sp._build_folder_context(d, reps)
+        assert ctx["key_file"] == "index.pdf"
+        assert "index" in ctx["key_file_reason"]
+
+    def test_caps_child_names_at_50(self, tmp_path):
+        sp = self._sp()
+        d = tmp_path / "huge"
+        d.mkdir()
+        for i in range(75):
+            (d / f"file{i:03d}.txt").write_text("x")
+        reps = sp._pick_folder_representatives(d)
+        ctx = sp._build_folder_context(d, reps)
+        # child_count is the true count; child_names is capped.
+        assert ctx["child_count"] == 75
+        assert len(ctx["child_names"]) == 50
+
+
+class TestFolderContextPromotedToBody:
+    """Fix C: when no rep produced extractable content, the folder
+    context is promoted to ScanResult.text so the LLM has filename
+    evidence to compose against."""
+
+    @staticmethod
+    def _sp():
+        import scan_pipeline
+        return scan_pipeline
+
+    def test_zero_content_folder_promotes_context(self, tmp_path):
+        sp = self._sp()
+        d = tmp_path / "210127 v2.3 lighting CD"
+        d.mkdir()
+        # All-DWG folder; no DWG handler available in tests, so all reps
+        # return zero content. The folder context should get promoted.
+        for i in range(4):
+            (d / f"detail{i}.dwg").write_bytes(b"DWG")
+        result = sp.process_folder(
+            str(d), str(tmp_path), "dom/proj/CD", "2021-01-27",
+            dry_run=True,
+        )
+        assert result.skipped is False
+        assert "210127 v2.3 lighting CD" in result.text
+        assert "detail0.dwg" in result.text
+        assert ".dwg" in result.text  # type counts in body
+        assert result.folder_context  # dict populated
+
+
+# ---------------------------------------------------------------------------
+# v16.5.0 Fix G — pre-compression size gate
+# ---------------------------------------------------------------------------
+
+class TestPreCompressionSizeGate:
+    @staticmethod
+    def _sp():
+        import scan_pipeline
+        return scan_pipeline
+
+    def test_tiny_raw_image_dropped_before_compression(self, tmp_path, monkeypatch):
+        """A raw candidate whose source bytes are already below the
+        gate is dropped pre-compression — saves wasted work on the
+        field-report's 79.5-second multi-page-PDF case."""
+        sp = self._sp()
+        monkeypatch.setattr(sp, "IMAGE_MIN_BYTES", 10_000, raising=True)
+        # Stub raw image source: 500 bytes.
+        from unittest import mock
+        src = tmp_path / "deck.pdf"
+        src.write_bytes(b"%PDF-1.4")
+        tiny = tmp_path / "tiny_thumb.jpg"
+        tiny.write_bytes(b"\xff\xd8\xff\xe0" + b"\x00" * 100)  # 104 bytes
+        compress_called = mock.Mock(return_value=tiny)
+        with mock.patch("scan_pipeline.file_type_handlers.extract_images", return_value=[tiny]):
+            with mock.patch("scan_pipeline.compress_images.compress_image", compress_called):
+                result = sp.process_file(
+                    source_path=str(src),
+                    workdir=str(tmp_path),
+                    vault_project_path="dom/proj/SD",
+                    event_date="2024-01-01",
+                    dry_run=True,
+                )
+        # Pre-compression gate fires; compress_image is never called.
+        assert compress_called.call_count == 0
+        assert result.skip_reason == "below_size_gate"
+
+
+# ---------------------------------------------------------------------------
+# v16.5.0 Fix A — handler exceptions surface
+# ---------------------------------------------------------------------------
+
+class TestHandlerExceptionsSurfaceAsErrors:
+    @staticmethod
+    def _sp():
+        import scan_pipeline
+        return scan_pipeline
+
+    def test_extract_images_handler_exception_lands_in_errors(self, tmp_path):
+        """Pre-v16.5 a handler raising (e.g. DwgConverterMissing) was
+        swallowed as `[]` and indistinguishable from "no images".
+        v16.5 routes the exception message into result.errors so the
+        user can tell."""
+        sp = self._sp()
+        from unittest import mock
+        src = tmp_path / "drawing.jpg"  # use a known handlered ext
+        src.write_bytes(b"\xff\xd8\xff\xe0")
+        with mock.patch(
+            "scan_pipeline.file_type_handlers.extract_images",
+            side_effect=RuntimeError("no DWG converter installed"),
+        ):
+            result = sp.process_file(
+                source_path=str(src),
+                workdir=str(tmp_path),
+                vault_project_path="dom/proj/SD",
+                event_date="2024-01-01",
+                dry_run=True,
+                skip_on_no_content=False,
+            )
+        assert any(
+            "no DWG converter" in (e or "") for e in result.errors
+        ), f"expected error in {result.errors}"

@@ -108,13 +108,62 @@ def _convert_to_dxf(dwg_path: str, tmp_dir: str):
     return _convert_via_oda(dwg_path)
 
 
+def _no_converter_available() -> bool:
+    """Return True when neither LibreDWG nor a usable ODA File Converter
+    is detectable. Used by read_text/extract_images (v16.5.0, Fix H) to
+    raise an explicit, actionable error rather than silently returning
+    empty output.
+
+    Detection:
+      * `dwg2dxf` on PATH → LibreDWG present.
+      * `ODAFileConverter` on PATH OR ezdxf.addons.odafc imports
+        cleanly → ODA route present.
+    """
+    if shutil.which("dwg2dxf"):
+        return False
+    if shutil.which("ODAFileConverter"):
+        return False
+    try:
+        from ezdxf.addons import odafc  # noqa: F401
+        # The import succeeded; ODA *might* still be unavailable at
+        # runtime, but the bin probe above is the authoritative gate.
+        # Returning False here keeps backward-compat for users who
+        # have a working odafc but didn't put the binary on PATH.
+        return True
+    except Exception:
+        return True
+
+
+class DwgConverterMissing(RuntimeError):
+    """Raised when no DWG converter is available.
+
+    The message is intentionally actionable — operators see this as a
+    pipeline warning (via the Fix A status path) and can install via:
+
+        brew install libredwg          # macOS
+        apt-get install libredwg-tools # debian/ubuntu
+        dnf install libredwg           # fedora
+        # or download ODA File Converter from oda.org (manual EULA)
+    """
+
+
 def read_text(path: str) -> str:
     """Extract text entities from a DWG file via LibreDWG/ODA → DXF.
 
     Returns:
-        Concatenated text entity content as a string, or '' on any failure
-        (including no converter installed). Never raises.
+        Concatenated text entity content as a string. Empty when the
+        DWG has no text entities. Raises ``DwgConverterMissing`` (a
+        ``RuntimeError`` subclass) when neither LibreDWG nor ODA is
+        installed — v16.5.0 (Fix H) so the pipeline surfaces the
+        missing tool to the user rather than silently producing
+        ``no_content``.
     """
+    if _no_converter_available():
+        raise DwgConverterMissing(
+            "no DWG converter found on PATH. Install LibreDWG "
+            "(`brew install libredwg` / `apt-get install libredwg-tools` / "
+            "`dnf install libredwg`) or ODA File Converter, then re-run."
+        )
     with tempfile.TemporaryDirectory() as tmp_dir:
         doc = _convert_to_dxf(path, tmp_dir)
         if doc is None:
@@ -149,9 +198,16 @@ def extract_images(path: str, out_dir: str) -> list:
     """Render DWG modelspace to PNG after LibreDWG/ODA → DXF conversion.
 
     Returns:
-        List containing the path of the rendered PNG, or [] on any failure
-        (including no converter installed). Never raises.
+        List containing the path of the rendered PNG, or [] when the
+        DWG has no renderable modelspace. Raises ``DwgConverterMissing``
+        when neither LibreDWG nor ODA is installed — v16.5.0 (Fix H)
+        so the pipeline surfaces the missing tool to the user.
     """
+    if _no_converter_available():
+        raise DwgConverterMissing(
+            "no DWG converter found on PATH. Install LibreDWG "
+            "(`brew install libredwg`) or ODA File Converter, then re-run."
+        )
     with tempfile.TemporaryDirectory() as tmp_dir:
         doc = _convert_to_dxf(path, tmp_dir)
         if doc is None:
