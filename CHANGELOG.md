@@ -1,5 +1,71 @@
 # Changelog
 
+## v16.10.0 — TLS round 3: design-* size-gate exemption, Grasshopper .gh/.ghx handler
+
+Closes the actionable asks from the 2026-05-05 TLS round-3 file-handler
+review (the screenshot/Grasshopper question round). Operator confirmed
+v16.9.0's INDD/IDML/SKP/Figma handlers shipped clean; round 3 surfaced
+two new gaps and three carryover items.
+
+### Fixed (TLS round 3 Ask 1 — design-* size-gate exemption)
+
+- ``scan_pipeline._process_images`` extends the v16.8.0
+  ``render_pages``-exempt list to include **delegated handlers that
+  extract images from a closed binary source**. The 2026-05-05
+  round-3 report flagged a 5817-byte InDesign JFIF preview
+  (``design-indd``, ``render_pages=False``, ``extract_images=True``)
+  dropped by the post-compression gate — the document's *own*
+  thumbnail, not embedded UI chrome. Built-in raster/vector
+  passthroughs and document-pdf/office container extractors still
+  apply the gate (those genuinely include client logos).
+
+### Added (TLS round 3 Ask 2 — cad-grasshopper handler)
+
+- New ``cad-grasshopper`` category covering ``.gh`` and ``.ghx``.
+- ``.gh`` (McNeel proprietary binary) — Level 0 metadata + Level 1
+  heuristics. Pure-Python decode of the full graph isn't possible
+  without ``GH_IO.dll`` (Rhino runtime); the handler:
+  - Counts RFC-4122-v4 UUID-shaped 16-byte blocks as a component-
+    count proxy (deduplicated).
+  - Scans for length-prefixed UTF-8 strings ≥5 chars matching a
+    human-name pattern (`[A-Za-z][A-Za-z0-9_\\- ]{4,63}`) so
+    cluster names and component nicknames surface.
+  - Emits a metadata block + heuristic summary with explicit
+    caveats about what the numbers mean.
+- ``.ghx`` (older XML variant) — fully decoded via stdlib
+  ``xml.etree.ElementTree``. Walks for ``<item name="Name">`` /
+  ``<item name="NickName">`` / ``<item name="Description">``
+  values and emits the deduplicated set.
+- Pre-v16.10 the 5 .gh files in the TLS archive dropped silently
+  as ``unknown file type``; v16.10 produces a real note with
+  component-count + surfaced nicknames.
+
+### Verified (TLS round 3 Ask 5 — watermarked-CJK PDF cascade)
+
+- The PDF cascade (pdfplumber → PyMuPDF → pdfminer.six → PyPDF2 →
+  OCR) shipped in v16.7.0 and remains in place. The 2026-05-05
+  report listed CJK-CMap PDFs as still failing; that almost
+  certainly means the operator's plugin cache still served
+  pre-v16.7 source. The fix here is operator-side:
+  ``/vault-bridge:self-update`` then re-run probes. No code
+  change in v16.10.
+
+### Deferred (TLS round 3 Asks 3 + 4)
+
+- **Ask 3 (3DM Blender render path).** ``rhino3dm`` is geometry-
+  only by upstream design; rendering would need an OBJ exporter
+  + Blender headless invocation. This is a multi-hundred-line
+  feature with new external-tool dependencies; it needs its own
+  design pass rather than being squeezed into a TLS-followup
+  release. v16.4.0's metadata-only contract for ``cad-3dm`` stands.
+- **Ask 4 (skp2obj packaging for macOS).** Distribution problem,
+  not a code problem. The ``cad-skp`` handler already probes for
+  ``skp2obj`` / ``skp2unity`` on PATH (v16.4.0); when the operator
+  installs the binary the handler picks it up. Bundling the
+  binary itself is out of scope for the plugin.
+
+4 new test rows; suite 2112 passing.
+
 ## v16.9.0 — TLS round 2: InDesign / Sketch / Figma handlers, unknown-ext warning, 3DM empty-vs-failed, probe fixtures expanded
 
 Closes the remaining asks from the 2026-05-04/05 TLS scan review

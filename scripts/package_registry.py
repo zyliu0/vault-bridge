@@ -317,6 +317,24 @@ _DESIGN_FIGMA_STUB = PackageSpec(
     notes="Metadata-only stub for Figma .fig (no native reader available).",
 )
 
+# v16.10.0 (TLS round 3 Ask 2) — Grasshopper definitions.
+# .gh: McNeel proprietary binary; pure-Python decode requires the
+#      .NET runtime + GH_IO.dll. The handler does Level 0 metadata
+#      + Level 1 UUID/string heuristics so operators see component
+#      complexity even without Rhino.
+# .ghx: older XML variant; fully readable via stdlib ElementTree.
+_CAD_GRASSHOPPER_STUB = PackageSpec(
+    pip_name="",
+    import_name="",
+    category="cad-grasshopper",
+    extensions=["gh", "ghx"],
+    extract_text=True,
+    extract_images=False,
+    github_url="",
+    preferred=True,
+    notes="Grasshopper .gh (binary metadata + heuristics) / .ghx (XML).",
+)
+
 
 # Build the registry: ext -> list[PackageSpec]
 # Each extension maps to a list; preferred entry comes first.
@@ -356,6 +374,7 @@ _register(_SKETCHUP_STUB)
 _register(_DESIGN_INDD_STUB)
 _register(_DESIGN_SKETCH_STUB)
 _register(_DESIGN_FIGMA_STUB)
+_register(_CAD_GRASSHOPPER_STUB)
 
 
 # ---------------------------------------------------------------------------

@@ -402,15 +402,30 @@ def _process_images(
     # (DWG, DXF, AI, PSD), the same threshold dropped legitimate
     # vector renders — the 2026-05-04 TLS field report flagged a
     # 9947-byte DWG render that was 53 bytes below the gate. Render
-    # outputs are deliberate; sparse line-art compresses small. We
-    # check the handler's ``render_pages`` flag and skip the size
-    # gate for those events. The post-compression gate (Step 4
-    # below) still runs for non-render handlers.
+    # outputs are deliberate; sparse line-art compresses small.
+    #
+    # v16.10.0 (TLS round 3 Ask 1): the exemption now also covers
+    # **delegated handlers that extract images** from a closed
+    # binary format. The 2026-05-05 round-3 report flagged a
+    # 5817-byte InDesign JFIF preview that the design-indd handler
+    # had pulled out of an .indd file — the document's *own*
+    # thumbnail, not embedded UI chrome — being dropped by the
+    # post-compression gate. Built-in raster/vector passthroughs
+    # and document-pdf/office container extractors still get the
+    # gate (those genuinely include client logos and chrome).
     is_render_pages = False
     try:
         _cfg = file_type_handlers.get_handler(source_path)
-        if _cfg is not None and getattr(_cfg, "render_pages", False):
-            is_render_pages = True
+        if _cfg is not None:
+            if getattr(_cfg, "render_pages", False):
+                is_render_pages = True
+            elif (
+                _cfg.extract_images
+                and handler_dispatcher.is_delegated(_cfg.category)
+            ):
+                # Delegated handler producing images from a closed
+                # binary source (design-indd JFIF preview, etc.).
+                is_render_pages = True
     except Exception:
         is_render_pages = False
     attachments: List[str] = []

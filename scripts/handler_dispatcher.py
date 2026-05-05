@@ -291,6 +291,8 @@ _CATEGORY_TO_STEM = {
     "design-indd": "design_indd",
     "design-sketch": "design_sketch",
     "design-figma": "design_figma",
+    # v16.10.0 (TLS round 3 Ask 2) — Grasshopper definitions.
+    "cad-grasshopper": "cad_grasshopper",
 }
 
 # Categories that delegate to a per-extension handler rather than using

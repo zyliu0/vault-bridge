@@ -865,6 +865,7 @@ _EXTENDED_VALID_CATEGORIES = {
     "design-indd",   # v16.9.0 (TLS Ask 4) — InDesign INDD/IDML
     "design-sketch", # v16.9.0 (TLS Ask 13) — Sketch metadata stub
     "design-figma",  # v16.9.0 (TLS Ask 13) — Figma metadata stub
+    "cad-grasshopper",  # v16.10.0 (TLS round 3 Ask 2) — Grasshopper .gh/.ghx
 }
 
 

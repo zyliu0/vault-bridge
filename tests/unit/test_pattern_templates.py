@@ -133,6 +133,11 @@ TEMPLATE_CAPABILITIES = {
         "extract_images": False,
         "render_pages": False,
     },
+    "cad_grasshopper.py.tmpl": {
+        "read_text": True,
+        "extract_images": False,
+        "render_pages": False,
+    },
 }
 
 ALL_TEMPLATES = list(TEMPLATE_CAPABILITIES.keys())

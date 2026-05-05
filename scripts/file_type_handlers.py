@@ -251,6 +251,24 @@ _DESIGN_FIGMA = HandlerConfig(
     render_pages=False,
 )
 
+# v16.10.0 (TLS round 3 Ask 2) — Grasshopper definitions.
+# .gh is McNeel's proprietary binary format (GH_Document via
+# GH_IO.dll). Pure-Python decode of the full graph isn't possible
+# without the .NET runtime; the handler does Level 0 (metadata) +
+# Level 1 (UUID-shaped block scan + length-prefixed string
+# heuristic) so the operator at least sees component complexity
+# and any embedded cluster names.
+# .ghx is the older XML variant — fully readable via stdlib
+# ElementTree; the same handler routes by suffix.
+_CAD_GRASSHOPPER = HandlerConfig(
+    category="cad-grasshopper",
+    extract_text=True,
+    extract_images=False,
+    compress=False,
+    run_vision=False,
+    render_pages=False,
+)
+
 HANDLERS: Dict[str, HandlerConfig] = {
     # document-pdf
     "pdf": _PDF,
@@ -295,6 +313,9 @@ HANDLERS: Dict[str, HandlerConfig] = {
     # design-sketch / design-figma (metadata-only stubs)
     "sketch": _DESIGN_SKETCH,
     "fig": _DESIGN_FIGMA,
+    # cad-grasshopper (.gh binary, .ghx XML)
+    "gh": _CAD_GRASSHOPPER,
+    "ghx": _CAD_GRASSHOPPER,
     # video
     "mp4": _VIDEO,
     "mov": _VIDEO,
