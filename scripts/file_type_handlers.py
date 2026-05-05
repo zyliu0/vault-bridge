@@ -269,6 +269,22 @@ _CAD_GRASSHOPPER = HandlerConfig(
     render_pages=False,
 )
 
+# v16.11.0 (FGE Ask 1) — OFD (Open Fixed-layout Document, GB/T
+# 33190-2016). China's nationally standardised document format,
+# analogous to PDF. Used for invoices, contracts, tax documents,
+# government forms — every Chinese enterprise archive carries
+# them. The handler walks the OFD zip's Doc_0/.../Content.xml
+# and concatenates ``<ofd:TextCode>`` text. Optionally extracts
+# the embedded JFIF preview when present.
+_DOCUMENT_OFD = HandlerConfig(
+    category="document-ofd",
+    extract_text=True,
+    extract_images=True,
+    compress=True,
+    run_vision=True,
+    render_pages=False,
+)
+
 HANDLERS: Dict[str, HandlerConfig] = {
     # document-pdf
     "pdf": _PDF,
@@ -316,6 +332,8 @@ HANDLERS: Dict[str, HandlerConfig] = {
     # cad-grasshopper (.gh binary, .ghx XML)
     "gh": _CAD_GRASSHOPPER,
     "ghx": _CAD_GRASSHOPPER,
+    # document-ofd (China GB/T 33190-2016 — invoices, contracts)
+    "ofd": _DOCUMENT_OFD,
     # video
     "mp4": _VIDEO,
     "mov": _VIDEO,
@@ -339,6 +357,13 @@ HANDLERS: Dict[str, HandlerConfig] = {
     # RTF — v16.4.0 (AUDIT-4). striprtf is the reader; soffice is the
     # fallback when striprtf is absent.
     "rtf": _TEXT,
+    # v16.11.0 (FGE Asks 9 + 10) — additional plain-text formats that
+    # were silently dropping as ``unknown file type`` despite being
+    # readable as raw UTF-8/ASCII.
+    "url": _TEXT,      # Windows Internet Shortcut (.ini-style key=value)
+    "webloc": _TEXT,   # macOS web-shortcut plist (XML; readable as text)
+    "log": _TEXT,      # plain text log files
+    "tm": _TEXT,       # TextMate document (plain UTF-8)
     # archive
     "zip": _ARCHIVE,
     "rar": _ARCHIVE,

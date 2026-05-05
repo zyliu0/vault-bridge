@@ -335,6 +335,23 @@ _CAD_GRASSHOPPER_STUB = PackageSpec(
     notes="Grasshopper .gh (binary metadata + heuristics) / .ghx (XML).",
 )
 
+# v16.11.0 (FGE Ask 1) — OFD (China GB/T 33190-2016).
+# Stdlib-only (zipfile + ElementTree); no pip dependency. The
+# 2026-05-05 FGE field report flagged 7 OFD invoice files silently
+# dropped as ``unknown file type`` — every Chinese enterprise
+# archive has these, especially under 0_Admin/.
+_DOCUMENT_OFD_STUB = PackageSpec(
+    pip_name="",
+    import_name="",
+    category="document-ofd",
+    extensions=["ofd"],
+    extract_text=True,
+    extract_images=True,
+    github_url="",
+    preferred=True,
+    notes="OFD (Open Fixed-layout Document, GB/T 33190-2016) — Chinese national document format; stdlib zipfile + ElementTree.",
+)
+
 
 # Build the registry: ext -> list[PackageSpec]
 # Each extension maps to a list; preferred entry comes first.
@@ -375,6 +392,7 @@ _register(_DESIGN_INDD_STUB)
 _register(_DESIGN_SKETCH_STUB)
 _register(_DESIGN_FIGMA_STUB)
 _register(_CAD_GRASSHOPPER_STUB)
+_register(_DOCUMENT_OFD_STUB)
 
 
 # ---------------------------------------------------------------------------

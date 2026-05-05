@@ -1,5 +1,86 @@
 # Changelog
 
+## v16.11.0 — FGE scan handoff: OFD handler, OOXML media fallback, plain-text registry, IndirectObject log demoted
+
+Closes the actionable asks from the 2026-05-05 FGE scan-bugs handoff
+(2203_FGE 流动的平面 — OCT-LOFT 2022). v16.10.0's TLS round-3 fixes
+shipped clean; FGE surfaced six new gaps and three operator-side
+carryover items.
+
+### Added (FGE Ask 1 — OFD handler)
+
+- New ``document-ofd`` category covering ``.ofd`` (Open Fixed-layout
+  Document, GB/T 33190-2016 — China's national PDF analogue, used
+  for invoices, contracts, tax documents, government forms). The
+  handler walks the OFD zip's ``Doc_*/Pages/Page_*/Content.xml``
+  entries and concatenates ``<ofd:TextCode>`` text nodes; opportune
+  JFIF preview extraction mirrors the design-indd path. Stdlib only
+  — no pip dep.
+- The 2026-05-05 FGE scan dropped 7 OFD invoice files silently as
+  ``unknown file type``. v16.11 produces real notes with the
+  invoice text + an embedded preview when the document carries one.
+
+### Added (FGE Asks 2 + 6 — OOXML media-folder fallback)
+
+- ``_extract_pptx`` and ``_extract_docx`` in
+  ``extract_embedded_images.py`` now fall through to a stdlib zip
+  walk over ``ppt/media/`` / ``word/media/`` when the python-pptx /
+  python-docx graph yields zero images. New shared helper
+  ``_extract_ooxml_media_fallback`` does the walk.
+- The FGE scan flagged 6 image-only design-deck PPTX files
+  (full-bleed slide images, no PICTURE shapes in the python-pptx
+  graph) and 3+ Chinese digital-signature DOCX contracts (page
+  content embedded as images outside the related-parts graph).
+  Pre-v16.11 both shapes returned ``no_content``; v16.11 surfaces
+  the slide images / contract pages as candidate attachments.
+
+### Added (FGE Asks 9 + 10 — extra plain-text registrations)
+
+- ``.url`` (Windows Internet Shortcut, ini-style), ``.webloc``
+  (macOS web shortcut plist), ``.log`` (plain-text log files), and
+  ``.tm`` (TextMate document) all map to the existing
+  ``text-plain`` handler. Zero-cost registrations using stdlib
+  ``open().read()``; eliminates four common silent-skip extensions.
+
+### Fixed (FGE Ask 3 — IndirectObject log demoted to debug)
+
+- ``extract_embedded_images._extract_pdf`` demotes ``logger.warning``
+  → ``logger.debug`` for the PyPDF2 ``IndirectObject`` traversal
+  errors. The errors are caught and the PyMuPDF page-render
+  fallback handles the document cleanly; the warning was leaking
+  to stderr on every CJK-watermarked Chinese government PDF and
+  obscuring real failures. The cascade behaviour is unchanged
+  (still pdfplumber → fitz → pdfminer.six → PyPDF2 → OCR for
+  text; embedded-image extraction still falls through to PyMuPDF
+  page render).
+
+### Operator-side (FGE Asks 7 + 8 — already shipped, handler refresh required)
+
+- **Ask 7** (INDD JFIF preview size-gate exemption for ``design-*``)
+  shipped in v16.10.0. The 2026-05-05 FGE report showed it still
+  failing — that's a stale workdir handler. The fix is in the
+  scan_pipeline plugin source; the per-extension handler files
+  don't need to change. Confirm by running
+  ``python3 ${{CLAUDE_PLUGIN_ROOT}}/scripts/handler_probe.py``
+  after self-update.
+- **Ask 8** (DWG numeric MTEXT filter via ``_is_dwg_token_noise``)
+  shipped in v16.8.0 inside ``cad_dwg.py.tmpl``. The 2026-05-05
+  FGE report showed it still failing — that's a stale workdir
+  handler file. ``/vault-bridge:self-update`` Step 3.5 (handler
+  refresh) pulls the new template and overwrites the old
+  ``<workdir>/.vault-bridge/handlers/cad_dwg_dwg.py``.
+
+### Deferred (FGE Asks 4 + 5)
+
+- **Ask 4 (Numbers via numbers-parser)** — adds a pip dependency.
+  Worth doing in a focused round; deferred for a future release.
+- **Ask 5 (Keynote via soffice → pptx delegation)** — needs a new
+  delegation pattern that calls soffice then routes the converted
+  output through the existing PPTX handler. Worth doing alongside
+  Ask 4 since both are iWork formats.
+
+11 new test rows; suite 2124 passing.
+
 ## v16.10.0 — TLS round 3: design-* size-gate exemption, Grasshopper .gh/.ghx handler
 
 Closes the actionable asks from the 2026-05-05 TLS round-3 file-handler

@@ -866,6 +866,7 @@ _EXTENDED_VALID_CATEGORIES = {
     "design-sketch", # v16.9.0 (TLS Ask 13) — Sketch metadata stub
     "design-figma",  # v16.9.0 (TLS Ask 13) — Figma metadata stub
     "cad-grasshopper",  # v16.10.0 (TLS round 3 Ask 2) — Grasshopper .gh/.ghx
+    "document-ofd",     # v16.11.0 (FGE Ask 1) — Chinese GB/T 33190-2016
 }
 
 

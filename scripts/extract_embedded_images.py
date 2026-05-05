@@ -13,6 +13,7 @@ Never raises — returns [] on any internal failure.
 Python 3.9 compatible.
 """
 import logging
+import zipfile
 from pathlib import Path
 from typing import List
 
@@ -132,7 +133,13 @@ def _extract_pdf(src_path: Path, out_dir: Path) -> List[Path]:
     try:
         reader = PyPDF2.PdfReader(str(src_path))
     except Exception as exc:
-        logger.warning("extract_pdf: could not open %s: %s", src_path, exc)
+        # v16.11.0 (FGE Ask 3): demote to debug — the PyMuPDF
+        # fallback below covers the case cleanly. The 2026-05-05
+        # FGE field report flagged this WARNING line leaking to
+        # stderr on every CJK-watermarked Chinese government PDF
+        # ("'IndirectObject' object has no attribute 'get'") even
+        # though the page-render fallback succeeded.
+        logger.debug("extract_pdf: PyPDF2 open failed for %s: %s — using PyMuPDF fallback", src_path, exc)
         return _extract_pdf_pages_fallback(src_path, out_dir)
 
     for page_idx, page in enumerate(reader.pages):
@@ -152,7 +159,7 @@ def _extract_pdf(src_path: Path, out_dir: Path) -> List[Path]:
                     out_path.write_bytes(data)
                     results.append(out_path)
                 except Exception as exc:
-                    logger.warning("extract_pdf: error writing image: %s", exc)
+                    logger.debug("extract_pdf: error writing image: %s", exc)
             continue
 
         # Fallback: manual /XObject /Subtype /Image traversal
@@ -183,9 +190,13 @@ def _extract_pdf(src_path: Path, out_dir: Path) -> List[Path]:
                     out_path.write_bytes(data)
                     results.append(out_path)
                 except Exception as exc:
-                    logger.warning("extract_pdf: xobject error: %s", exc)
+                    logger.debug("extract_pdf: xobject error: %s", exc)
         except Exception as exc:
-            logger.warning("extract_pdf: page %d traversal error: %s", page_idx, exc)
+            # v16.11.0 (FGE Ask 3): demote — the PyMuPDF fallback at
+            # the end of this function handles pages PyPDF2 can't
+            # traverse. CJK-watermarked PDFs hit IndirectObject errors
+            # here every page; the cascade still produces output.
+            logger.debug("extract_pdf: page %d traversal error: %s", page_idx, exc)
 
     if results:
         return results
@@ -250,12 +261,19 @@ def _extract_pdf_pages_fallback(src_path: Path, out_dir: Path) -> List[Path]:
 
 
 def _extract_docx(src_path: Path, out_dir: Path) -> List[Path]:
-    """Extract embedded images from a DOCX file using python-docx."""
+    """Extract embedded images from a DOCX file using python-docx,
+    with a stdlib-zipfile ``word/media/`` fallback (v16.11.0, FGE Ask 6).
+
+    Pre-v16.11 the python-docx-only path missed image-embedded
+    contracts (Chinese digital-signature workflows that wrap
+    document pages as images inside the DOCX). The fallback walks
+    the DOCX zip's ``word/media/`` directory and pulls raw image
+    bytes — same approach as PPTX (Ask 2)."""
     try:
         from docx import Document
     except ImportError:
-        logger.warning("extract_docx: python-docx not available")
-        return []
+        logger.debug("extract_docx: python-docx not available")
+        return _extract_ooxml_media_fallback(src_path, out_dir, "word/media/")
 
     results: List[Path] = []
     src_stem = src_path.stem
@@ -263,8 +281,8 @@ def _extract_docx(src_path: Path, out_dir: Path) -> List[Path]:
     try:
         doc = Document(str(src_path))
     except Exception as exc:
-        logger.warning("extract_docx: could not open %s: %s", src_path, exc)
-        return []
+        logger.debug("extract_docx: could not open %s: %s", src_path, exc)
+        return _extract_ooxml_media_fallback(src_path, out_dir, "word/media/")
 
     idx = 0
     try:
@@ -291,21 +309,34 @@ def _extract_docx(src_path: Path, out_dir: Path) -> List[Path]:
                 results.append(out_path)
                 idx += 1
             except Exception as exc:
-                logger.warning("extract_docx: error writing part %s: %s", rel_id, exc)
+                logger.debug("extract_docx: error writing part %s: %s", rel_id, exc)
     except Exception as exc:
-        logger.warning("extract_docx: error iterating related_parts: %s", exc)
+        logger.debug("extract_docx: error iterating related_parts: %s", exc)
 
+    if not results:
+        # v16.11.0 (FGE Ask 6): python-docx found no images. Some
+        # DOCX files (especially Chinese digital-signature contracts)
+        # bundle pages as images outside the related-parts graph;
+        # walking the zip's word/media/ catches them.
+        return _extract_ooxml_media_fallback(src_path, out_dir, "word/media/")
     return results
 
 
 def _extract_pptx(src_path: Path, out_dir: Path) -> List[Path]:
-    """Extract embedded images from a PPTX file using python-pptx."""
+    """Extract embedded images from a PPTX file using python-pptx, with
+    a stdlib-zipfile ``ppt/media/`` fallback (v16.11.0, FGE Ask 2).
+
+    Pre-v16.11 the python-pptx-only path missed image-only design
+    decks (the architect exports rendered slides as full-bleed
+    images, no native shapes). The 2026-05-05 FGE field report
+    flagged 6 such PPTX files dropped silently; the fallback walks
+    the zip's ppt/media/ directory and pulls raw image bytes."""
     try:
         from pptx import Presentation
         from pptx.enum.shapes import MSO_SHAPE_TYPE
     except ImportError:
-        logger.warning("extract_pptx: python-pptx not available")
-        return []
+        logger.debug("extract_pptx: python-pptx not available")
+        return _extract_ooxml_media_fallback(src_path, out_dir, "ppt/media/")
 
     results: List[Path] = []
     src_stem = src_path.stem
@@ -313,8 +344,8 @@ def _extract_pptx(src_path: Path, out_dir: Path) -> List[Path]:
     try:
         prs = Presentation(str(src_path))
     except Exception as exc:
-        logger.warning("extract_pptx: could not open %s: %s", src_path, exc)
-        return []
+        logger.debug("extract_pptx: could not open %s: %s", src_path, exc)
+        return _extract_ooxml_media_fallback(src_path, out_dir, "ppt/media/")
 
     idx = 0
     for slide_idx, slide in enumerate(prs.slides):
@@ -330,11 +361,76 @@ def _extract_pptx(src_path: Path, out_dir: Path) -> List[Path]:
                 results.append(out_path)
                 idx += 1
             except Exception as exc:
-                logger.warning(
+                logger.debug(
                     "extract_pptx: error extracting shape %s slide %d: %s",
                     getattr(shape, "name", "?"), slide_idx, exc
                 )
 
+    if not results:
+        # v16.11.0 (FGE Ask 2): python-pptx found no PICTURE shapes.
+        # Image-only decks bundle slide images directly in the zip
+        # without going through the shape graph; walking ppt/media/
+        # catches them.
+        return _extract_ooxml_media_fallback(src_path, out_dir, "ppt/media/")
+    return results
+
+
+def _extract_ooxml_media_fallback(
+    src_path: Path,
+    out_dir: Path,
+    media_prefix: str,
+) -> List[Path]:
+    """Walk an OOXML zip's media folder and write its image entries.
+
+    v16.11.0 (FGE Asks 2 + 6). Used as a fallback when python-docx /
+    python-pptx find no embedded images in the document graph but
+    the document does carry image content elsewhere — the canonical
+    case is a Chinese digital-signature contract DOCX (every page is
+    an image, no native text) or an image-only design deck PPTX
+    (every slide is a full-bleed image, no native shapes). OOXML
+    formats store these in ``word/media/`` and ``ppt/media/``
+    respectively.
+
+    ``media_prefix`` is the zip-internal prefix to walk (e.g.
+    ``"ppt/media/"`` or ``"word/media/"``).
+    """
+    results: List[Path] = []
+    src_stem = src_path.stem
+    try:
+        with zipfile.ZipFile(str(src_path)) as zf:
+            entries = sorted(
+                n for n in zf.namelist()
+                if n.startswith(media_prefix) and not n.endswith("/")
+            )
+            if not entries:
+                return []
+            for idx, name in enumerate(entries):
+                try:
+                    data = zf.read(name)
+                except Exception as exc:
+                    logger.debug(
+                        "ooxml media fallback: read failed for %s: %s",
+                        name, exc,
+                    )
+                    continue
+                if not data:
+                    continue
+                ext = _sniff_extension(data)
+                if ext == ".bin":
+                    # Skip non-image binary blobs (fonts, embedded objects).
+                    continue
+                stem = f"{src_stem}--media-{idx}"
+                out_path = _unique_path(out_dir, stem, ext)
+                try:
+                    out_path.write_bytes(data)
+                    results.append(out_path)
+                except Exception as exc:
+                    logger.debug(
+                        "ooxml media fallback: write failed for %s: %s",
+                        out_path, exc,
+                    )
+    except (zipfile.BadZipFile, OSError) as exc:
+        logger.debug("ooxml media fallback: zip open failed for %s: %s", src_path, exc)
     return results
 
 

@@ -138,6 +138,11 @@ TEMPLATE_CAPABILITIES = {
         "extract_images": False,
         "render_pages": False,
     },
+    "document_ofd.py.tmpl": {
+        "read_text": True,
+        "extract_images": True,
+        "render_pages": False,
+    },
 }
 
 ALL_TEMPLATES = list(TEMPLATE_CAPABILITIES.keys())
