@@ -187,10 +187,22 @@ def fetch_to_local(
       fetch_to_local(workdir, transport_name, archive_path)  — new three-arg form
       fetch_to_local(workdir, archive_path)                  — legacy two-arg form
 
+    v16.12.0 (SSS large-repo handoff §3.1) — operator-side path
+    bugs (typically a doubled prefix that produces ``//`` in the
+    middle of a path) used to round-trip through the SFTP transport
+    as a generic ``Remote path not found or unreadable`` error,
+    indistinguishable from a real missing-file. The wrapper now
+    rejects malformed paths up front so the operator's own bug
+    surfaces loudly with the doubled-slash position visible in
+    the error.
+
     Raises:
         TransportMissing:  if the module does not exist.
         TransportInvalid:  if the module lacks required callables.
-        TransportFailed:   if the transport's fetch_to_local raises any exception.
+        TransportFailed:   if the transport's fetch_to_local raises
+                           any exception, OR the supplied archive
+                           path is malformed (contains ``//`` outside
+                           a leading scheme://).
     """
     # Dispatch based on number of args
     if archive_path is _SENTINEL:
@@ -202,6 +214,8 @@ def fetch_to_local(
         actual_archive_path = str(archive_path)
         mod = load_transport(workdir, transport_name_or_path)
 
+    actual_archive_path = _normalize_archive_path(actual_archive_path)
+
     try:
         result = mod.fetch_to_local(actual_archive_path)
         return Path(result)
@@ -209,6 +223,51 @@ def fetch_to_local(
         raise TransportFailed(
             f"transport.fetch_to_local({actual_archive_path!r}) failed: {exc}"
         ) from exc
+
+
+def _normalize_archive_path(path: str) -> str:
+    """Reject obviously-malformed archive paths and normpath the rest.
+
+    v16.12.0 (SSS large-repo handoff §3.1). The 2026-05-09 SSS scan
+    burned hours debugging silent SFTP "no such file" errors that
+    were the operator script's fault: a doubled-prefix ``//_f-a-n/...``
+    accidentally constructed by a conditional that assumed relative
+    paths when every path was already absolute. The transport handed
+    the malformed string straight to SFTP, which returned a generic
+    "missing file" — indistinguishable from a real network error.
+
+    The fix is two lines: detect ``//`` (after stripping any leading
+    ``scheme://``) and raise loudly so the operator can grep their
+    code instead of debugging the network. Then ``os.path.normpath``
+    the rest so trailing slashes / ``./`` / ``../`` segments don't
+    propagate into the SFTP call. Doesn't change the happy path.
+    """
+    import os as _os
+    if not path:
+        return path
+    # Strip a single leading ``scheme://`` (sftp://, smb://, file://, etc.)
+    # before checking for unintended doubled slashes elsewhere in the path.
+    head = ""
+    body = path
+    scheme_idx = path.find("://")
+    if 0 < scheme_idx < 12:
+        head = path[: scheme_idx + 3]
+        body = path[scheme_idx + 3 :]
+    if "//" in body:
+        # Find the position relative to the original string for a
+        # legible error message.
+        pos = path.find("//", len(head))
+        raise TransportFailed(
+            "malformed archive path: doubled slash detected at "
+            f"position {pos} in {path!r}. The most common cause is an "
+            "operator script that prepends a prefix to a path that is "
+            "already absolute. Construct the path once via "
+            "list_archive output and pass it through unchanged."
+        )
+    # Normalise trailing slashes / ./ / ../ segments so they don't
+    # propagate into SFTP-side path resolution. Skip the head so a
+    # ``sftp://host`` doesn't get rewritten to ``sftp:/host``.
+    return head + _os.path.normpath(body) if body else path
 
 
 def fetch_to_local_timed(
@@ -238,6 +297,10 @@ def fetch_to_local_timed(
         TransportFailed:   if the transport's fetch_to_local raises.
     """
     mod = load_transport(workdir, transport_name)
+    # v16.12.0: same path-normalisation gate as fetch_to_local —
+    # malformed paths surface loudly before we hand them to the
+    # transport. Raises TransportFailed before the fetch even starts.
+    archive_path = _normalize_archive_path(archive_path)
 
     def _do_fetch() -> Path:
         try:

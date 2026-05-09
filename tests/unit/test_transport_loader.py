@@ -538,3 +538,140 @@ class TestStatMtime:
         )
         result = transport_loader.stat_mtime(tmp_path, "zero", "/x.pdf")
         assert result is None
+
+
+# ---------------------------------------------------------------------------
+# v16.12.0 (SSS large-repo handoff §3.1) — path normalisation
+# ---------------------------------------------------------------------------
+
+class TestArchivePathNormalisation:
+    """Operator scripts that prepend a prefix to an already-absolute
+    path produced silent SFTP "missing file" errors pre-v16.12. The
+    transport now rejects ``//`` loudly so the operator-side bug
+    surfaces with the position visible in the message."""
+
+    def test_double_slash_rejected_loudly(self, tmp_path):
+        d = _make_transports_dir(tmp_path)
+        tp = d / "local.py"
+        tp.write_text(
+            "from pathlib import Path\n"
+            "from typing import Iterator\n"
+            "def fetch_to_local(archive_path: str) -> Path:\n"
+            "    return Path('/dev/null')\n"
+            "def list_archive(archive_root, skip_patterns=None) -> Iterator[str]:\n"
+            "    return iter([])\n"
+        )
+        with pytest.raises(transport_loader.TransportFailed) as excinfo:
+            transport_loader.fetch_to_local(
+                tmp_path, "local",
+                "/_f-a-n/1908_SSS//_f-a-n/inner/foo.pdf",
+            )
+        msg = str(excinfo.value)
+        assert "doubled slash" in msg
+        assert "//" in msg
+        # The error names the position so the operator can grep.
+        assert "position" in msg
+
+    def test_scheme_prefix_preserved(self, tmp_path):
+        """``sftp://host/path`` must still be valid — the scheme's
+        ``://`` is not the kind of doubled slash we reject."""
+        d = _make_transports_dir(tmp_path)
+        captured = []
+        tp = d / "local.py"
+        tp.write_text(
+            "from pathlib import Path\n"
+            "from typing import Iterator\n"
+            "_LOG = []\n"
+            "def fetch_to_local(archive_path: str) -> Path:\n"
+            "    _LOG.append(archive_path)\n"
+            "    Path('/tmp/_vb_t').write_text('x')\n"
+            "    return Path('/tmp/_vb_t')\n"
+            "def list_archive(archive_root, skip_patterns=None) -> Iterator[str]:\n"
+            "    return iter([])\n"
+        )
+        # Should NOT raise — the leading ``sftp://`` is a scheme,
+        # not malformed input.
+        result = transport_loader.fetch_to_local(
+            tmp_path, "local", "sftp://host/path/foo.pdf",
+        )
+        assert isinstance(result, Path)
+
+    def test_trailing_slashes_normalized(self, tmp_path):
+        """``/a/b///c`` is malformed and rejected; ``/a/b/`` (single
+        trailing slash) is normalized to ``/a/b``."""
+        d = _make_transports_dir(tmp_path)
+        captured_paths = []
+        tp = d / "local.py"
+        # Module-level capture: write paths to a side-channel file so the
+        # test can read them back.
+        log_path = tmp_path / "fetch_log.txt"
+        tp.write_text(
+            "from pathlib import Path\n"
+            "from typing import Iterator\n"
+            f"_LOG_PATH = Path({str(log_path)!r})\n"
+            "def fetch_to_local(archive_path: str) -> Path:\n"
+            "    with _LOG_PATH.open('a') as f: f.write(archive_path + '\\n')\n"
+            "    Path('/tmp/_vb_t2').write_text('x')\n"
+            "    return Path('/tmp/_vb_t2')\n"
+            "def list_archive(archive_root, skip_patterns=None) -> Iterator[str]:\n"
+            "    return iter([])\n"
+        )
+        # Single trailing slash is fine, just normalised away.
+        transport_loader.fetch_to_local(tmp_path, "local", "/a/b/c/")
+        seen = log_path.read_text().splitlines()
+        assert seen == ["/a/b/c"]
+
+    def test_clean_path_passes_through(self, tmp_path):
+        """Happy-path regression guard."""
+        d = _make_transports_dir(tmp_path)
+        tp = d / "local.py"
+        tp.write_text(
+            "from pathlib import Path\n"
+            "from typing import Iterator\n"
+            "def fetch_to_local(archive_path: str) -> Path:\n"
+            "    Path('/tmp/_vb_t3').write_text('x')\n"
+            "    return Path('/tmp/_vb_t3')\n"
+            "def list_archive(archive_root, skip_patterns=None) -> Iterator[str]:\n"
+            "    return iter([])\n"
+        )
+        # No exception, no mutation.
+        result = transport_loader.fetch_to_local(
+            tmp_path, "local", "/_f-a-n/1908_SSS/foo.pdf",
+        )
+        assert isinstance(result, Path)
+
+    def test_normalize_helper_directly(self):
+        """Spot-check the helper without going through the full
+        fetch_to_local stack."""
+        ok_in = "/_f-a-n/proj/sub/file.pdf"
+        assert transport_loader._normalize_archive_path(ok_in) == ok_in
+        # Trailing slash collapsed.
+        assert (
+            transport_loader._normalize_archive_path("/a/b/c/")
+            == "/a/b/c"
+        )
+        # Empty input returned untouched.
+        assert transport_loader._normalize_archive_path("") == ""
+        # Doubled slash rejected.
+        with pytest.raises(transport_loader.TransportFailed):
+            transport_loader._normalize_archive_path("/a//b")
+
+    def test_fetch_to_local_timed_also_normalises(self, tmp_path):
+        """The timed variant shares the same gate."""
+        d = _make_transports_dir(tmp_path)
+        tp = d / "local.py"
+        tp.write_text(
+            "from pathlib import Path\n"
+            "from typing import Iterator\n"
+            "def fetch_to_local(archive_path: str) -> Path:\n"
+            "    return Path('/dev/null')\n"
+            "def list_archive(archive_root, skip_patterns=None) -> Iterator[str]:\n"
+            "    return iter([])\n"
+        )
+        with pytest.raises(transport_loader.TransportFailed) as excinfo:
+            transport_loader.fetch_to_local_timed(
+                tmp_path, "local",
+                "/_f-a-n//_f-a-n/foo.pdf",
+                timeout_secs=5,
+            )
+        assert "doubled slash" in str(excinfo.value)

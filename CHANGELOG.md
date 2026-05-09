@@ -1,5 +1,70 @@
 # Changelog
 
+## v16.12.0 — SSS large-repo handoff: transport path normalisation + retro-scan large-repo strategy
+
+Closes both asks from the 2026-05-09 SSS large-repo scan handoff.
+The 2026-05-09 SSS scan (13 339 files / 1241 dated leaves) silently
+wrote 1421 metadata-only stub notes after the operator misread NAS
+slowness as a pipeline hang and fell back to a bulk-stub strategy.
+Root cause was an operator-script path-doubling bug that the
+transport surfaced as a generic "missing file"; consequence was a
+1241-event vault that looked complete but contained no extracted
+content. v16.12.0's two changes head off both the bug class and the
+operator panic that compounds it.
+
+### Fixed (SSS §3.1 — path normalisation in transport)
+
+- ``transport_loader.fetch_to_local`` and ``fetch_to_local_timed``
+  now normalise the archive path through the new
+  ``_normalize_archive_path`` helper before handing it to the
+  transport's ``fetch_to_local``. The helper:
+  - Rejects any ``//`` outside a leading ``scheme://`` with a loud
+    ``TransportFailed`` naming the position in the path. Pre-v16.12
+    a doubled prefix (the canonical operator-script bug) round-
+    tripped through SFTP as a generic "no such file" error,
+    indistinguishable from a real missing file. The 2026-05-09
+    SSS scan burned hours debugging exactly this.
+  - Preserves ``sftp://`` / ``smb://`` / ``file://`` scheme prefixes
+    intact (the scheme's `//` is not the kind of doubled slash we
+    reject).
+  - Runs ``os.path.normpath`` on the body so trailing slashes and
+    ``./`` / ``../`` segments don't propagate into SFTP-side
+    resolution.
+- 6 new tests in ``test_transport_loader.py`` cover double-slash
+  rejection, scheme-prefix preservation, trailing-slash
+  normalisation, the happy-path passthrough, the helper used
+  directly, and the timed variant.
+
+### Added (SSS §3.2 — retro-scan Step 4.7)
+
+- New section in ``commands/retro-scan.md``:
+  **Step 4.7 — Large-repo strategy (when source contains > 500 files)**.
+  Explicitly walks the operator agent through the failure mode the
+  SSS scan hit. Eight subsections:
+  - 4.7a path discipline (use list_archive output unchanged)
+  - 4.7b per-file timeout (60-120 s; signal.SIGALRM example)
+  - 4.7c write each note immediately (no batched accumulation)
+  - 4.7d **forbidden** bulk-stub fallback (the SSS anti-pattern)
+  - 4.7e resume-aware processing (skip already-probed notes)
+  - 4.7f progress reporting cadence (every 25 events)
+  - 4.7g time budget realism (1000 events ≈ 33-83 min)
+  - 4.7h ask the user upfront for > 500-file repos
+- Pure documentation; no plugin code change. The handoff explicitly
+  rejected adding plugin parameters / timeouts / probe-only modes —
+  the procedural fix lives in the command spec.
+
+### Why this shape
+
+The SSS handoff's recommendation was deliberately tight: one
+plugin code fix, one command-spec section, and an explicit list of
+things NOT to add (no `bulk_stub_ok` flag, no default per-file
+timeout in `process_file`, no resume-aware `vault_scan` API, no
+probe-only mode). v16.12.0 honours the boundary — operator policy
+stays in operator scripts; the plugin only adds the one guardrail
+that catches the actual silent-failure class.
+
+6 new tests; suite 2130 passing total.
+
 ## v16.11.0 — FGE scan handoff: OFD handler, OOXML media fallback, plain-text registry, IndirectObject log demoted
 
 Closes the actionable asks from the 2026-05-05 FGE scan-bugs handoff

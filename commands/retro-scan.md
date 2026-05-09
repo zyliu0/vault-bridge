@@ -712,6 +712,161 @@ print(json.dumps(effective.to_dict()))
 Replace the in-memory `$EFFECTIVE_CONFIG` with the reloaded version before
 continuing to Step 5.
 
+## Step 4.7 — Large-repo strategy (when source contains > 500 files)
+
+v16.12.0 (SSS large-repo handoff §3.2). If `len(paths) > 500` from the
+Step 4 walk, the scan is a **large-repo run** and requires different
+operator pacing. The plugin pipeline handles per-file probing fine —
+the issue is the operator/agent execution model:
+
+- Per-file NAS I/O over SFTP varies from ~0.2 s to ~10 minutes
+  (mean ~3 s, median ~1-3 s). 1000+ events takes 60-120 minutes
+  of cumulative I/O.
+- One pathological file (DWG with proxy-object warnings, large
+  multi-page PDF) can sit on the queue for 5-10 minutes.
+- Without progress reporting, "running" and "hung" look identical
+  from the outside.
+
+The 2026-05-09 SSS scan (13 339 files / 1241 dated leaves) failed
+because the operator misread NAS slowness as a pipeline hang and fell
+back to writing 1241 metadata-only stubs in 33 seconds — strictly
+worse output that satisfied the schema validator but contained no
+extracted source content. **This step is the playbook that prevents
+that failure mode.**
+
+### 4.7a — Path discipline (mandatory)
+
+Use the **exact paths** returned by `list_archive` — they are
+absolute and start with the archive root (e.g.,
+`/_f-a-n/1908_SSS 苏州/...`). **Never prepend a prefix to them.**
+The most common operator-script bug is doubling the prefix; pre-v16.12
+the result was silent SFTP "no such file" errors that looked like the
+pipeline was broken. v16.12.0's transport rejects `//` loudly with
+the position visible in the error, so this class of bug surfaces in
+seconds rather than hours — but the cleanest fix is to not construct
+the bug in the first place.
+
+### 4.7b — Per-file timeout (mandatory)
+
+Wrap every `scan_pipeline.process_file` call in a per-file timeout —
+60-120 seconds is appropriate for arch-projects domains:
+
+```python
+import signal
+class Timeout:
+    def __init__(self, s): self.s = s
+    def handler(self, *a): raise TimeoutError()
+    def __enter__(self):
+        signal.signal(signal.SIGALRM, self.handler)
+        signal.alarm(self.s)
+    def __exit__(self, *a):
+        signal.alarm(0)
+
+try:
+    with Timeout(120):
+        result = scan_pipeline.process_file(...)
+except TimeoutError:
+    write_timeout_note(folder, files)  # explicit timeout marker
+    continue
+```
+
+Without this, one pathological DWG can block the entire scan and
+make the operator misdiagnose the pipeline as hung. The timeout
+policy lives in the operator script; do NOT add it to the plugin
+itself (that would make every caller eat a timeout decision they
+don't need).
+
+### 4.7c — Write each note immediately (mandatory)
+
+Do NOT accumulate `ScanResult`s across hundreds of events and write
+at the end. Write each note as soon as its probe completes:
+
+```python
+for folder, files in leaves:
+    primary = primary_file(files)  # absolute path from list_archive
+    try:
+        with Timeout(120):
+            result = scan_pipeline.process_file(source_path=primary, ...)
+        write_event_note(folder, files, result)  # WRITE IMMEDIATELY
+    except TimeoutError:
+        write_event_note_timeout_marker(folder, files)
+```
+
+Three reasons:
+- Partial progress is preserved if the script dies or is killed.
+- Memory stays bounded.
+- The vault grows visibly throughout the scan — operator and user
+  can see real progress, not a black-box wait.
+
+### 4.7d — Forbidden: bulk-stub fallback
+
+**Do NOT fall back to writing metadata-only stubs across hundreds of
+events when probing seems too slow.** The retro-scan command's
+contract is that event notes are grounded in extracted source
+content where the handler can produce it. Skipping the probe step
+and writing N folder-listing-only notes in 30 seconds violates that
+contract — the user gets a vault that looks complete but isn't.
+
+The legitimate use of metadata-only confidence is **per-file**: a
+specific file whose handler genuinely returned no content (broken
+PDF, unsupported format, individually timed-out probe). It is NOT a
+strategy applied to the whole project. If you are tempted to do this,
+re-read this section.
+
+### 4.7e — Resume-aware processing (mandatory)
+
+Before processing each leaf, check whether a note already exists for
+it with `content_confidence: high`. If yes, skip — the work is
+already done. Use the scan index (`vault_scan.load_index`) or read
+the existing note via the obsidian CLI:
+
+```python
+note_path = vault_paths.event_note_path(domain, project, sub, fname)
+if note_already_processed_with_real_content(note_path):
+    continue
+```
+
+A scan can then be killed and resumed across multiple sessions
+without redoing finished work.
+
+### 4.7f — Progress reporting cadence
+
+Emit a progress line every 25 events processed:
+
+```
+[N/total] processed=X probed=Y skipped=Z timed-out=T | rate=R/s ETA=Es
+```
+
+This is for the operator (and user, watching) to see. Silence over
+10+ minutes is the failure pattern that triggers the bulk-stub
+fallback temptation in §4.7d.
+
+### 4.7g — Time budget
+
+For a 1000-event repo with mean ~3 s/file and a 120 s outlier cap:
+
+| Probes / sec | Total wall-clock |
+|---|---|
+| 0.5 | 33 min |
+| 0.3 | 55 min |
+| 0.2 | 83 min |
+
+**Plan accordingly.** Don't promise the user a 5-minute scan when
+the repo has 13 000 files.
+
+### 4.7h — When to ask the user
+
+If the user invokes retro-scan on a repo whose Step 4 walk returns
+> 500 files, surface this and **explicitly tell them the expected
+runtime** before starting:
+
+> "This project has {N} files / {M} dated leaf folders. Estimated
+> scan time: 60-90 minutes of NAS I/O. Each event note will be
+> written as it's processed; a kill+resume is safe. Proceed?"
+
+Better that the user knows upfront than discovers after 30 minutes
+that the pipeline isn't fast.
+
 ## Step 5 — detect events
 
 The unit of scanning is an EVENT, not a project. Events are the
