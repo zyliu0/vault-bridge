@@ -690,13 +690,44 @@ def process_file(
     reinventing this dispatch in `/tmp/_vb_helper.py`; consolidating
     it here removes the workaround.
 
+    **Side effects (v16.13.0, JAE Bug 2 clarification):**
+
+    Unlike a pure "extract and return" function, ``process_file`` performs
+    vault writes as a side effect before returning. Specifically, when
+    ``dry_run=False`` and the handler reports ``extract_images=True`` or
+    ``render_pages=True``:
+
+    1. Candidate images are extracted (or pages rendered) into a temp dir,
+       compressed (max 1200px, JPEG q=82, EXIF stripped), and deduplicated
+       by sha256 prefix.
+    2. The compressed JPEGs are **written into the vault's _Attachments/
+       folder** via :func:`vault_binary.write_binary` — that is, written
+       to Obsidian during this call, not later by the caller.
+    3. The returned ``ScanResult.attachments`` lists the relative vault
+       paths of those embedded images (max ``IMAGE_EMBED_CAP``); embed
+       wikilinks are the caller's responsibility.
+    4. ``ScanResult.image_candidate_paths`` lists the compressed local
+       paths (before the embed cap) for the writing LLM to optionally
+       Read inline.
+
+    Callers that want to inspect the would-be writes without touching the
+    vault MUST pass ``dry_run=True``. There is no "extract-only" mode that
+    populates ``attachments`` without writing them.
+
+    Text extraction is purely in-memory: no note body is composed or
+    written by this function. Note-body composition is the caller's job
+    (retro-scan/heartbeat-scan/reconcile).
+
     Args:
         source_path:          Absolute or relative path to the source file
                               (or folder, v16.3.0+).
         workdir:              Working directory.
         vault_project_path:   Vault path of the form <project>/<subfolder>.
         event_date:           ISO date string YYYY-MM-DD for attachment naming.
-        vault_name:           Obsidian vault name. Required for image writes.
+        vault_name:           Obsidian vault name. Required for image writes
+                              (raises on missing only when there are images to
+                              write; pure-text events tolerate empty
+                              vault_name).
         throughput_bps:       Transport read speed from Domain config (bytes/sec).
                               When set, large files get an estimated-time warning
                               in ScanResult.warnings if expected read > 30s.
@@ -706,10 +737,14 @@ def process_file(
                               skip_reason="no_content". This enforces the
                               no-meta-only rule: only files with real content
                               get notes written.
-        dry_run:              If True, skip all vault writes.
+        dry_run:              If True, skip all vault writes (no attachments
+                              materialized, no _Attachments/ entries created).
+                              Returned ``attachments`` will be empty.
 
     Returns:
         ScanResult. skip_reason="no_content" when skip_on_no_content fires.
+        Attachments listed in the result have already been written to the
+        vault when dry_run=False.
     """
     # Guard: empty path
     if not source_path:

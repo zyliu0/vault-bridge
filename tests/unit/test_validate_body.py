@@ -218,3 +218,84 @@ class TestGarbledExtractReasons:
         )
         reasons = vb.garbled_extract_reasons(text)
         assert any("digit run" in r for r in reasons)
+
+
+# ---------------------------------------------------------------------------
+# is_cmap_garbled_pdf — v16.13.0 (JAE Finding 0): PUA-saturated extracts
+# ---------------------------------------------------------------------------
+
+class TestIsCmapGarbledPdf:
+    """The JAE 220926 PDF (PRINCEさんネガ.pdf) decoded into ~71 % CJK PUA
+    characters because the cmap was missing. The detector exists so the
+    PDF cascade (file_type_handlers._pdf_read_text) can discard the
+    garbage and fall through to the next extractor."""
+
+    def _pua_block(self, n: int) -> str:
+        # Cycle through several PUA codepoints so a smart "all-same-char"
+        # heuristic wouldn't accidentally catch the test.
+        cps = [0xE000, 0xE100, 0xE200, 0xF800, 0xF8AA]
+        return "".join(chr(cps[i % len(cps)]) for i in range(n))
+
+    def test_pua_dominant_text_flagged(self):
+        # 70 % PUA in the first 500 chars.
+        text = self._pua_block(350) + "x" * 150
+        assert vb.is_cmap_garbled_pdf(text) is True
+
+    def test_just_over_threshold_flagged(self):
+        # Exactly 30 % PUA — the ratio is `>=` so this trips.
+        text = self._pua_block(150) + "x" * 350
+        assert vb.is_cmap_garbled_pdf(text) is True
+
+    def test_below_threshold_clean(self):
+        # 5 % PUA — far below threshold.
+        text = self._pua_block(25) + "x" * 475
+        assert vb.is_cmap_garbled_pdf(text) is False
+
+    def test_pure_chinese_prose_clean(self):
+        # Real CJK characters live OUTSIDE the PUA ranges, so legitimate
+        # Chinese prose must never trip the detector.
+        text = (
+            "本次会议讨论了项目的初步方案，确定了下一阶段的工作计划。" * 20
+        )
+        assert vb.is_cmap_garbled_pdf(text) is False
+
+    def test_pure_english_prose_clean(self):
+        text = (
+            "The meeting covered the schematic design phase and the team "
+            "agreed to proceed with option B. Action items will follow."
+        ) * 10
+        assert vb.is_cmap_garbled_pdf(text) is False
+
+    def test_empty_text_clean(self):
+        assert vb.is_cmap_garbled_pdf("") is False
+        assert vb.is_cmap_garbled_pdf(None) is False  # type: ignore[arg-type]
+
+    def test_very_short_text_not_judged(self):
+        # 49 chars of pure PUA: still too short to flag — real CMap
+        # garbage is always long, and refusing to judge tiny inputs
+        # prevents false positives on truncation tests.
+        text = chr(0xE000) * 49
+        assert vb.is_cmap_garbled_pdf(text) is False
+
+    def test_supplementary_pua_planes_count(self):
+        # Codepoints in Plane 15 / Plane 16 also count as PUA.
+        text = chr(0xF0000) * 200 + chr(0x100000) * 200 + "x" * 100
+        assert vb.is_cmap_garbled_pdf(text) is True
+
+    def test_garbled_extract_reasons_surfaces_pua_ratio(self):
+        text = chr(0xE000) * 400 + "x" * 100
+        reasons = vb.garbled_extract_reasons(text)
+        assert any("cmap-garbled-pdf" in r for r in reasons)
+
+    def test_is_garbled_extract_wires_through_cmap(self):
+        """is_garbled_extract is the single entry point file_type_handlers
+        consults; the CMap gate must short-circuit it."""
+        text = chr(0xE000) * 400 + "x" * 100
+        assert vb.is_garbled_extract(text) is True
+
+    def test_cmap_garbled_pdf_stats_diagnostic_shape(self):
+        text = chr(0xE000) * 300 + "x" * 200
+        stats = vb.cmap_garbled_pdf_stats(text)
+        assert stats["sample_chars"] == 500
+        assert stats["pua_count"] == 300
+        assert 0.59 < stats["pua_ratio"] < 0.61

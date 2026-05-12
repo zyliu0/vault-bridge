@@ -1,5 +1,149 @@
 # Changelog
 
+## v16.13.0 — JAE field-report: dot-stem dup-note class, CMap garbled-PDF gate, hung-CLI watchdog, missing category_decisions script
+
+Closes the 2026-05-12 JAE (`2209_JAE 日本建筑展`) field-report handoff.
+The 29-event JAE scan surfaced one MEDIUM bug, one LOW docstring
+gap, three documentation gaps, and one HIGH operator finding around
+large-repo body composition. v16.13.0 ships fixes for all of them
+plus a quality gate the SSS handoff hinted at but did not specify.
+
+### Fixed (JAE Bug 1 — apply_inter_event_links dot-stem dup-note class)
+
+- ``project_index.apply_inter_event_links`` previously wrote vault
+  notes via ``runner(["create", "name=<stem>", ...])``. The
+  ``obsidian create`` CLI silently strips trailing dot-extensions
+  (``.png``, ``.docx``, ``.3dm``, etc.) from the ``name=`` argument
+  before appending ``.md``. Notes whose stems end in a dot-extension
+  (e.g. ``2022-09-13 root 640.png``) were duplicated at the wrong
+  path AND lost wikilink injection on the second pass — the inter-
+  event mesh stopped working precisely for the kinds of events that
+  come from photo-heavy archives.
+- The function now writes through ``vault_writer.write_note``, which
+  uses ``obsidian eval`` + ``app.vault.create``/``app.vault.modify``
+  with the full path JSON-escaped end-to-end. The path round-trips
+  verbatim regardless of stem shape.
+- A ``_writer`` injection parameter is exposed for testing; the
+  default resolves to ``vault_writer.write_note`` via a local import
+  to avoid a circular dependency.
+- New regression test class ``TestApplyInterEventLinksDotStemRoundTrip``
+  exercises the JAE filename case with ``.png``-suffixed stems.
+
+### Fixed (JAE Bug 2 — scan_pipeline.process_file docstring clarification)
+
+- ``scan_pipeline.process_file`` performs vault writes (attachment
+  JPEGs in ``_Attachments/``) as a side effect when ``dry_run=False``,
+  but the pre-v16.13 docstring read like a pure "extract and return"
+  function. Operators occasionally tried to inspect ``ScanResult.attachments``
+  before deciding whether to write — too late, by then the files were
+  already in the vault.
+- Docstring now spells out the four-step side-effect path
+  (extract → compress → write to ``_Attachments/`` → return relative
+  paths) and notes that ``dry_run=True`` is the only way to inspect
+  would-be writes without touching the vault.
+- No behaviour change; documentation only.
+
+### Added (JAE Finding 0 — CMap garbled-PDF quality gate)
+
+- ``validate_body.is_cmap_garbled_pdf(text)`` returns True when the
+  first 500 characters of a PDF extract contain ≥30 % CJK Private
+  Use Area / surrogate codepoints — the canonical signature of a
+  font CMap the PDF reader could not resolve. The JAE 220926 case
+  produced a ~71 % PUA ratio that looked like Chinese to an
+  untrained eye while being entirely unreadable.
+- ``validate_body.cmap_garbled_pdf_stats(text)`` returns the
+  diagnostic ratio for warning messages.
+- ``validate_body.is_garbled_extract`` and
+  ``validate_body.garbled_extract_reasons`` now short-circuit on
+  PUA-saturated input, surfacing ``cmap-garbled-pdf: NN% of the
+  first 500 chars are CJK private-use / surrogate codepoints``
+  rather than a generic "looks garbled" message.
+- ``file_type_handlers._pdf_read_text`` checks each extractor's
+  output against the CMap gate before accepting it. If pdfplumber
+  returns PUA garbage, the cascade falls through to PyMuPDF
+  (``fitz``), then pdfminer.six, then PyPDF2, then OCR. Pre-v16.13
+  the first non-empty extract was accepted and the garbage made it
+  into the note body.
+- 10 new tests in ``TestIsCmapGarbledPdf`` cover the threshold,
+  pure-CJK prose (must not flag), pure-English prose (must not
+  flag), empty input, supplementary PUA planes, and the
+  ``is_garbled_extract`` short-circuit wiring.
+
+### Added (JAE Doc Amendment 2 — vault_writer subprocess timeout)
+
+- ``vault_writer.write_note`` and ``write_notes_batch`` now run
+  ``obsidian eval`` with ``subprocess.run(timeout=60)``. When the
+  obsidian-cli child wedges (canonical case: Obsidian.app's HTTP
+  server crashed mid-write), the call returns a structured
+  ``ok=False, error="obsidian-cli timed out after 60s — vault may
+  be unresponsive..."`` instead of blocking the whole scan.
+- The 60 s default is exposed as
+  ``vault_writer.DEFAULT_SUBPROCESS_TIMEOUT_SECS`` so operators can
+  override it via a custom runner when a legitimately slow vault
+  needs more headroom.
+- 3 new tests in ``TestSubprocessTimeout`` cover the constant's
+  presence, single-note timeout handling, and batch-chunk timeout
+  handling (every item in the wedged chunk reports the timeout
+  cleanly).
+
+### Added (JAE Doc Amendment 3 — scripts/category_decisions.py)
+
+- New module ``scripts/category_decisions.py`` implementing the
+  ``apply`` function the retro-scan command spec has referred to
+  since v14. Pre-v16.13 the script did not exist and operators
+  silently lost subfolder-classification decisions, or edited
+  ``config.json`` by hand.
+- Public surface: ``apply(workdir, domain_name, decisions) ->
+  ApplyStats``. Each decision is ``{"subfolder_name": str,
+  "action": "add"|"fallback"|"skip", "target": str|None}``. ``add``
+  appends a ``routing_patterns`` entry; ``skip`` appends to
+  ``skip_patterns``; ``fallback`` is a no-op (the routing layer
+  falls back at scan time). Duplicates are idempotent.
+- CLI entry point: ``python3 scripts/category_decisions.py apply
+  --workdir DIR [--domain NAME] --decisions-json '[...]'`` writes
+  the stats JSON to stdout and exits 1 when any decision had an
+  error.
+- 16 new tests in ``test_category_decisions.py`` cover the happy
+  path for each action, mixed batches, idempotency, validation
+  errors, the active-domain fallback, partial-failure isolation,
+  and the CLI surface.
+- ``commands/retro-scan.md`` Step 4.5e was updated to pass
+  ``--domain "$1"`` explicitly and to surface the new stats /
+  errors contract.
+
+### Added (Doc amendments 1 + Finding 0 — retro-scan large-repo guidance)
+
+- ``commands/retro-scan.md`` Step 4.7b: replaced the ``signal.SIGALRM``
+  per-file-timeout example with a ``subprocess.run(timeout=...)`` /
+  subprocess-isolation pattern (recommended). SIGALRM kept as a
+  footnote for in-process batches of <50 files where the GC race
+  in ``WeakSet._remove`` inside the LibreDWG handler is not a
+  concern.
+- ``commands/retro-scan.md`` Step 4.7i (new): watchdog playbook
+  for hung obsidian-cli children — pair the plugin-level
+  ``vault_writer`` subprocess timeout with a transport-level
+  watchdog so the operator agent can distinguish "Obsidian is
+  unresponsive" from "the NAS is slow".
+- ``commands/retro-scan.md`` Step 4.7-Z (new): body-composition
+  tradeoff for large repos. Documents two paths — Option A
+  (template-prelude during the scan, ``compose-pass`` later) and
+  Option B (probe + chronological auto-skim) — so the operator
+  agent has a sanctioned alternative to the bulk-stub anti-pattern
+  when honest per-event composition would blow the time budget.
+
+### Notes for future work
+
+- Latin-1 supplement mojibake (``OOb?WÎNa^ú¾èOá``) and the JAE
+  220926 mixed-CJK case (``枚51 コ -41ヨ``) are NOT caught by the
+  CMap gate — they occupy code-point ranges below the PUA bound.
+  Operators should still spot-check the first event of every
+  unfamiliar PDF batch.
+- The ``/vault-bridge:compose-pass`` slash command is referenced in
+  Step 4.7-Z but not yet built. Tracked as planned work, not a
+  v16.13.0 deliverable.
+
+---
+
 ## v16.12.0 — SSS large-repo handoff: transport path normalisation + retro-scan large-repo strategy
 
 Closes both asks from the 2026-05-09 SSS large-repo scan handoff.

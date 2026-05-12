@@ -524,6 +524,15 @@ def _pdf_read_text(path: str) -> str:
     so ``read_text_with_status`` can surface it as a warning instead of
     silently returning ``""``.
     """
+    # v16.13.0 (JAE Finding 0): each extractor's output goes through
+    # the CMap-garble gate before being accepted. Pre-v16.13 the
+    # cascade returned the first non-empty result, so a CMap-broken
+    # pdfminer extract (PUA-saturated unicode soup) short-circuited
+    # the entire cascade — the user got 25KB of unreadable text tagged
+    # ``content_confidence: high``. The gate forces fall-through to
+    # the next extractor when the result is detectably broken.
+    import validate_body as _vb
+
     # 1. pdfplumber — best layout-aware CJK support via pdfminer.six.
     try:
         import pdfplumber  # type: ignore
@@ -533,7 +542,7 @@ def _pdf_read_text(path: str) -> str:
                 for p in pdf.pages[:200]
             ]
         text = "\n\n".join(s for s in parts if s.strip())
-        if text.strip():
+        if text.strip() and not _vb.is_cmap_garbled_pdf(text):
             return text
     except Exception as exc:
         _record_extraction_error(path, "pdfplumber", exc)
@@ -549,7 +558,7 @@ def _pdf_read_text(path: str) -> str:
         finally:
             doc.close()
         text = "\n\n".join(s for s in parts if s.strip())
-        if text.strip():
+        if text.strip() and not _vb.is_cmap_garbled_pdf(text):
             return text
     except Exception as exc:
         _record_extraction_error(path, "PyMuPDF", exc)
@@ -561,7 +570,7 @@ def _pdf_read_text(path: str) -> str:
     try:
         from pdfminer.high_level import extract_text as _pdfminer_text  # type: ignore
         text = _pdfminer_text(path, maxpages=200) or ""
-        if text.strip():
+        if text.strip() and not _vb.is_cmap_garbled_pdf(text):
             return text
     except Exception as exc:
         _record_extraction_error(path, "pdfminer.six", exc)
@@ -624,13 +633,18 @@ def _pdf_read_text(path: str) -> str:
                 # short outputs.
                 pypdf_text = ""
 
-    if len(pypdf_text) >= 50:
+    # v16.13.0 (JAE Finding 0): even after PyPDF2's own CMap warnings
+    # are checked above, the returned bytes can still be PUA garbage
+    # if the CMap was partially resolved. Final gate before accepting.
+    if len(pypdf_text) >= 50 and not _vb.is_cmap_garbled_pdf(pypdf_text):
         return pypdf_text
 
     # 5. OCR via pytesseract over PyMuPDF page renders (Fix F).
     ocr_text = _pdf_ocr_fallback(path)
     if ocr_text:
         return ocr_text
+    # Last resort: return whatever PyPDF2 produced (may be empty or
+    # short) so callers can decide.
     return pypdf_text  # may be empty
 
 

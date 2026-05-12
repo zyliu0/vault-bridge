@@ -1353,12 +1353,13 @@ def apply_inter_event_links(
     *,
     k: int = 3,
     _obsidian_runner=None,
+    _writer=None,
 ) -> dict:
     """Append a Related + prev/next block to every event note in a project.
 
     For each event in `events`, reads the current note body via
     `obsidian read`, strips any prior vb:related block, and writes
-    the fresh block back via `obsidian create ... overwrite`. Returns
+    the fresh block back via ``vault_writer.write_note``. Returns
     `{events_linked, events_without_peers, failures}`. Callers invoke
     this from retro-scan / heartbeat-scan / reconcile after all events
     for a project have been written so every event sees every peer.
@@ -1373,15 +1374,28 @@ def apply_inter_event_links(
       frontmatter, triggers a per-event failure (logged) instead of
       being written back — which previously replaced the real note
       body with the error message.
-    * The runner contract is honoured: the legacy path where the
-      obsidian CLI returns `None` for non-read commands still works;
-      we only attempt to validate the read payload.
 
-    `_obsidian_runner` is an injection hook for tests; defaults to the
-    real subprocess call. Failures are swallowed per event so a single
-    broken note does not abort the whole project.
+    v16.13.0 — Bug 1 (2026-05-12 JAE handoff). Pre-v16.13 the write
+    step used ``runner(["create", "name=<stem>", ...])`` which is the
+    raw ``obsidian create`` CLI command. The CLI's ``name=`` argument
+    silently strips a trailing dot-extension (`.png`, `.docx`, `.3dm`,
+    etc.) before appending ``.md``, so a note at ``foo.png.md`` got
+    overwritten at ``foo.md`` — duplicating the note at a wrong path
+    AND losing the wikilink injection on the original. Fix: route
+    writes through ``vault_writer.write_note(vault_name, note_path,
+    body)`` which passes the FULL vault path verbatim through
+    ``obsidian eval`` + ``app.vault.modify`` — no extension stripping.
+
+    `_obsidian_runner` is an injection hook for tests (the read step
+    still uses it). `_writer` is a parallel injection point for the
+    write step — defaults to ``vault_writer.write_note``. Failures
+    are swallowed per event so a single broken note does not abort
+    the whole project.
     """
     runner = _obsidian_runner or _default_obsidian_runner
+    if _writer is None:
+        import vault_writer
+        _writer = vault_writer.write_note
     stats = {"events_linked": 0, "events_without_peers": 0, "failures": 0}
     if not events:
         return stats
@@ -1438,26 +1452,16 @@ def apply_inter_event_links(
                 # the body — no-op saves stay silent.
                 stripped = _strip_prior_inter_event_block(body)
                 if stripped != body:
-                    runner([
-                        "create",
-                        f"vault={vault_name}",
-                        f"path={Path(note_path).parent}",
-                        f"name={Path(note_path).stem}",
-                        f"content={stripped}",
-                        "silent", "overwrite",
-                    ])
+                    # v16.13.0 (JAE Bug 1): route through
+                    # vault_writer.write_note so dot-extension stems
+                    # (`foo.png`, `bar.docx`) are passed through
+                    # ``app.vault.modify`` verbatim.
+                    _writer(vault_name, note_path, stripped)
                 continue
 
             stripped = _strip_prior_inter_event_block(body)
             new_body = stripped.rstrip() + "\n\n" + section + "\n"
-            runner([
-                "create",
-                f"vault={vault_name}",
-                f"path={Path(note_path).parent}",
-                f"name={Path(note_path).stem}",
-                f"content={new_body}",
-                "silent", "overwrite",
-            ])
+            _writer(vault_name, note_path, new_body)
             stats["events_linked"] += 1
         except Exception:
             stats["failures"] += 1

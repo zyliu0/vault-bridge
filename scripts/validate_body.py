@@ -121,6 +121,9 @@ def is_garbled_extract(text: str) -> bool:
         return False
     if _CMAP_DEBUG_RE.search(text):
         return True
+    # v16.13.0 (JAE Finding 0): PUA-saturated extract = CMap broken
+    if is_cmap_garbled_pdf(text):
+        return True
 
     total = len(text)
     if total < 30:
@@ -224,6 +227,88 @@ def token_soup_stats(text: str) -> dict:
     }
 
 
+# ---------------------------------------------------------------------------
+# v16.13.0 (JAE Finding 0 CMap quality gate) — CJK PUA + unmapped-
+# surrogate ratio detector. The 2026-05-12 JAE handoff flagged a PDF
+# whose pdfminer extract returned 25 272 chars of CJK private-use
+# garbage that was tagged ``content_confidence: high`` because the
+# bytes were non-empty. Real CJK text never crosses 5-10 % CJK PUA;
+# CMap-broken PDFs go to 30 %+ in the first 500 chars.
+# ---------------------------------------------------------------------------
+
+_CJK_PUA_RATIO_THRESHOLD = 0.30
+_CJK_PUA_SAMPLE_CHARS = 500
+
+
+def _is_cjk_pua(ch: str) -> bool:
+    """Return True for Unicode code points in the CJK private-use
+    ranges or surrogate ranges. Real human text never produces these
+    in any meaningful quantity — they are the canonical signature of
+    a font CMap that the PDF reader couldn't resolve, and they almost
+    always look like Chinese to an untrained eye while being entirely
+    unreadable.
+
+    Ranges covered:
+      U+E000–U+F8FF  — BMP Private Use Area
+      U+D800–U+DFFF  — surrogate halves (should never appear in valid
+                       Python strings, but defensive)
+      U+F0000–U+FFFFD — Supplementary PUA Plane A
+      U+100000–U+10FFFD — Supplementary PUA Plane B
+    """
+    cp = ord(ch)
+    if 0xE000 <= cp <= 0xF8FF:
+        return True
+    if 0xD800 <= cp <= 0xDFFF:
+        return True
+    if 0xF0000 <= cp <= 0xFFFFD:
+        return True
+    if 0x100000 <= cp <= 0x10FFFD:
+        return True
+    return False
+
+
+def is_cmap_garbled_pdf(text: str) -> bool:
+    """Return True when ``text`` looks like a CMap-broken PDF extract.
+
+    Heuristic: in the first ``_CJK_PUA_SAMPLE_CHARS`` characters of
+    the extract, the ratio of CJK-PUA / surrogate characters exceeds
+    ``_CJK_PUA_RATIO_THRESHOLD`` (30 %). Real Chinese / Japanese /
+    Korean text contains zero PUA codepoints; even mixed-script
+    technical text never crosses 5 %. A 30 % threshold gives a wide
+    margin and catches the JAE 220926 case (~71 % PUA) cleanly.
+
+    Used by ``file_type_handlers._pdf_read_text`` to discard a
+    successful-but-garbage extraction so the cascade falls through
+    to the next extractor.
+    """
+    if not text:
+        return False
+    sample = text[:_CJK_PUA_SAMPLE_CHARS]
+    if len(sample) < 50:
+        # Too short to judge — return cleanly. A real CMap-garbled
+        # extract is always long.
+        return False
+    pua_count = sum(1 for ch in sample if _is_cjk_pua(ch))
+    return (pua_count / len(sample)) >= _CJK_PUA_RATIO_THRESHOLD
+
+
+def cmap_garbled_pdf_stats(text: str) -> dict:
+    """Return diagnostic stats for a CMap-garbled PDF extract.
+
+    Used by ``garbled_extract_reasons`` to surface a meaningful
+    warning when ``is_cmap_garbled_pdf`` fires.
+    """
+    if not text:
+        return {"sample_chars": 0, "pua_count": 0, "pua_ratio": 0.0}
+    sample = text[:_CJK_PUA_SAMPLE_CHARS]
+    pua_count = sum(1 for ch in sample if _is_cjk_pua(ch))
+    return {
+        "sample_chars": len(sample),
+        "pua_count": pua_count,
+        "pua_ratio": pua_count / len(sample) if sample else 0.0,
+    }
+
+
 def garbled_extract_reasons(text: str) -> List[str]:
     """Return a list of human-readable reasons explaining why ``text``
     is flagged as garbled. Empty list when not garbled.
@@ -238,6 +323,24 @@ def garbled_extract_reasons(text: str) -> List[str]:
         reasons.append(
             "extracted text contains CMap-debug strings — PyPDF2/python-pptx "
             "could not decode a CID-keyed font; text dropped"
+        )
+        return reasons
+    # v16.13.0 (JAE Finding 0): PUA-saturated extract — name the case
+    # directly so the operator hint is "install a CJK-capable extractor"
+    # not "text is garbage".
+    if is_cmap_garbled_pdf(text):
+        stats = cmap_garbled_pdf_stats(text)
+        pua_pct = int(stats["pua_ratio"] * 100)
+        reasons.append(
+            f"cmap-garbled-pdf: {pua_pct}% of the first "
+            f"{stats['sample_chars']} chars are CJK private-use / "
+            "surrogate codepoints"
+        )
+        reasons.append(
+            "text dropped — the PDF's CJK font CMap was not resolved "
+            "by this extractor. The pipeline cascades to the next "
+            "extractor (pdfminer / fitz / PyPDF2 / OCR); install "
+            "pdfplumber + PyMuPDF if the cascade ran out of options."
         )
         return reasons
     if not is_garbled_extract(text):

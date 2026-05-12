@@ -417,3 +417,56 @@ class TestRewriteInPlace:
                 "V", "/Users/mac/Vault/curated.md", "x",
                 runner=_make_success_runner(),
             )
+
+
+# ---------------------------------------------------------------------------
+# v16.13.0 (JAE Doc Amendment 2): subprocess timeout handling
+# ---------------------------------------------------------------------------
+
+class TestSubprocessTimeout:
+    """obsidian-cli can wedge when Obsidian.app's HTTP server dies
+    mid-write. The 60s default timeout converts the hang into a clean
+    structured failure so the operator can log + restart instead of
+    deadlocking the whole scan."""
+
+    def test_default_subprocess_timeout_constant_present(self):
+        """The constant is part of the public surface so operators can
+        override it via a runner if a slow vault legitimately needs more."""
+        assert hasattr(vault_writer, "DEFAULT_SUBPROCESS_TIMEOUT_SECS")
+        assert vault_writer.DEFAULT_SUBPROCESS_TIMEOUT_SECS >= 30.0
+
+    def test_write_note_catches_timeout_expired(self):
+        import subprocess as _subprocess
+
+        def timing_out(cmd):
+            raise _subprocess.TimeoutExpired(cmd=cmd, timeout=60.0)
+
+        result = vault_writer.write_note(
+            "MyVault", "Foo/bar.md", "x", runner=timing_out,
+        )
+        assert result["ok"] is False
+        err = (result.get("error") or "").lower()
+        assert "timed out" in err
+        # Operator hint must mention Obsidian — the recovery action is
+        # restarting the app, not the plugin.
+        assert "obsidian" in err
+
+    def test_write_notes_batch_catches_timeout_expired(self):
+        """A wedged child mid-batch must fail the chunk cleanly, not crash
+        the whole process. All items in that chunk get ok=False."""
+        import subprocess as _subprocess
+
+        def timing_out(cmd):
+            raise _subprocess.TimeoutExpired(cmd=cmd, timeout=60.0)
+
+        out = vault_writer.write_notes_batch(
+            "MyVault",
+            [("a.md", "x"), ("b.md", "y")],
+            runner=timing_out,
+            chunk_size=50,
+        )
+        assert out["ok"] is False
+        assert out["failed"] >= 2
+        assert all(r["ok"] is False for r in out["results"])
+        assert any("timed out" in (r.get("error") or "").lower()
+                   for r in out["results"])

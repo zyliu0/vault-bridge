@@ -1142,6 +1142,7 @@ class TestApplyInterEventLinks:
             "arch-projects/P/CD/2023-02-28 施工图.md": fm + "Other prose.\n",
         }
         calls = []
+        writes = []
 
         def fake_runner(argv):
             calls.append(argv)
@@ -1152,19 +1153,31 @@ class TestApplyInterEventLinks:
                 return bodies.get(path, "")
             return ""
 
+        def fake_writer(vault_name, note_path, body):
+            writes.append((vault_name, note_path, body))
+            return {"ok": True, "vault_path": note_path, "bytes_written": len(body), "error": None}
+
         stats = pi.apply_inter_event_links(
             vault_name="V",
             project_name="P",
             domain="arch-projects",
             events=events,
             _obsidian_runner=fake_runner,
+            _writer=fake_writer,
         )
         assert stats["events_linked"] == 2
         assert stats["failures"] == 0
-        # Two reads + two overwrites.
+        # v16.13.0 (JAE Bug 1): writes now go through the `_writer`
+        # injection (vault_writer.write_note in production); reads
+        # still go through the runner.
         cmds = [a[0] for a in calls]
         assert cmds.count("read") == 2
-        assert cmds.count("create") == 2
+        assert len(writes) == 2
+        # FULL note paths must round-trip through the writer — no
+        # stem-stripping, no name= second-guessing.
+        written_paths = [w[1] for w in writes]
+        assert "arch-projects/P/CD/2023-02-27 施工图.md" in written_paths
+        assert "arch-projects/P/CD/2023-02-28 施工图.md" in written_paths
 
     def test_events_without_peers_do_not_count_as_linked(self):
         events = _make_events(
@@ -1318,6 +1331,65 @@ class TestApplyInterEventLinksDataLoss:
         assert pi._looks_like_obsidian_error(
             "---\nschema_version: 2\n---\nHello\n"
         ) is False
+
+
+class TestApplyInterEventLinksDotStemRoundTrip:
+    """v16.13.0 (JAE Bug 1) — events whose source filename ends in a
+    recognisable extension (`.png`, `.docx`, `.3dm`, etc.) used to
+    duplicate when ``apply_inter_event_links`` wrote the wikilink
+    block. The raw ``obsidian create`` CLI's ``name=`` argument
+    stripped the dot-extension before appending ``.md``, producing
+    a new note at the wrong path AND leaving the original without
+    the injected block. Routing the write through
+    ``vault_writer.write_note`` (full vault path verbatim via
+    ``app.vault.modify``) closes the duplicate class.
+    """
+
+    _FM_PREFIX = "---\nschema_version: 2\nplugin: vault-bridge\n---\n\n"
+
+    def test_dotted_stem_writes_full_path_verbatim(self):
+        # Two events whose filenames end in `.png` — these are exactly
+        # the shape that triggered the JAE Bug 1 duplicate.
+        events = _make_events(
+            ("2022-09-13", "2022-09-13 root 640.png", "Admin", "high", "image submission"),
+            ("2022-09-13", "2022-09-13 root 641.png", "Admin", "high", "image submission"),
+        )
+        fm = self._FM_PREFIX
+        bodies = {
+            "arch-projects/JAE/Admin/2022-09-13 root 640.png.md": fm + "Prior.\n",
+            "arch-projects/JAE/Admin/2022-09-13 root 641.png.md": fm + "Prior.\n",
+        }
+        writes = []
+
+        def fake_runner(argv):
+            if argv[0] == "read":
+                path = argv[2].split("=", 1)[1]
+                return bodies.get(path, "")
+            return ""
+
+        def fake_writer(vault_name, note_path, body):
+            writes.append((vault_name, note_path, body))
+            return {"ok": True, "vault_path": note_path, "bytes_written": len(body), "error": None}
+
+        stats = pi.apply_inter_event_links(
+            vault_name="V",
+            project_name="JAE",
+            domain="arch-projects",
+            events=events,
+            _obsidian_runner=fake_runner,
+            _writer=fake_writer,
+        )
+        # Both events processed cleanly.
+        assert stats["failures"] == 0
+        # The written paths MUST include the `.png` segment + `.md`
+        # exactly as supplied; no stem-stripping anywhere.
+        written = {w[1] for w in writes}
+        assert "arch-projects/JAE/Admin/2022-09-13 root 640.png.md" in written
+        assert "arch-projects/JAE/Admin/2022-09-13 root 641.png.md" in written
+        # Regression guard — the pre-v16.13 bug wrote to the
+        # stem-stripped path.
+        assert "arch-projects/JAE/Admin/2022-09-13 root 640.md" not in written
+        assert "arch-projects/JAE/Admin/2022-09-13 root 641.md" not in written
 
 
 class TestInterEventWikilinksStripMdExtension:

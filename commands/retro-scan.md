@@ -682,11 +682,20 @@ DECISIONS_JSON='[
 
 python3 ${CLAUDE_PLUGIN_ROOT}/scripts/category_decisions.py apply \
   --workdir "$(pwd)" \
+  --domain "$1" \
   --decisions-json "$DECISIONS_JSON"
 ```
 
-Capture the returned stats (added, skipped_to_fallback, added_to_skip_list) for
-the Step 9 memory report.
+The `--domain` flag is optional on single-domain setups (the script falls
+back to `active_domain` or the lone domain). On multi-domain setups pass
+the resolved domain explicitly — the same value used by Step 3's
+`domain_router.resolve_domain()`.
+
+The script writes a JSON stats object to stdout with fields
+`added`, `skipped_to_fallback`, `added_to_skip_list`, and `errors[]`.
+Capture those for the Step 9 memory report. A non-empty `errors[]`
+exits 1 — surface each error verbatim and ask the operator how to
+handle the affected subfolders.
 
 ### 4.5f — reload the effective config
 
@@ -746,35 +755,71 @@ the position visible in the error, so this class of bug surfaces in
 seconds rather than hours — but the cleanest fix is to not construct
 the bug in the first place.
 
-### 4.7b — Per-file timeout (mandatory)
+### 4.7b — Per-file timeout via subprocess isolation (mandatory)
 
 Wrap every `scan_pipeline.process_file` call in a per-file timeout —
-60-120 seconds is appropriate for arch-projects domains:
+60-120 seconds is appropriate for arch-projects domains. **Use
+subprocess isolation, not `signal.SIGALRM`.** The 2026-05-12 SSS
+recovery handoff documented that `SIGALRM` can fire inside garbage-
+collection finalizers (e.g. `WeakSet._remove` inside the LibreDWG
+handler path), wedging the interpreter at 0% CPU with memory
+ballooning to 4-9 GB RSS. Reproducible. The fix is to run each
+probe in a fresh child process:
 
 ```python
-import signal
-class Timeout:
-    def __init__(self, s): self.s = s
-    def handler(self, *a): raise TimeoutError()
-    def __enter__(self):
-        signal.signal(signal.SIGALRM, self.handler)
-        signal.alarm(self.s)
-    def __exit__(self, *a):
-        signal.alarm(0)
+# /tmp/_vb_probe_one.py — child script that calls
+# scan_pipeline.process_file and prints the result as JSON to stdout.
+# The PARENT process has no signal handlers, no shared GC state,
+# no leaked file descriptors.
 
-try:
-    with Timeout(120):
-        result = scan_pipeline.process_file(...)
-except TimeoutError:
-    write_timeout_note(folder, files)  # explicit timeout marker
-    continue
+import subprocess, json
+
+def probe(primary, event_date, vault_folder, timeout_s=120):
+    try:
+        p = subprocess.run(
+            ['python3', '/tmp/_vb_probe_one.py',
+             primary, event_date, vault_folder],
+            capture_output=True, text=True, timeout=timeout_s,
+        )
+        if p.returncode == 0 and p.stdout:
+            return json.loads(p.stdout)
+        return {'ok': False, 'error': f'exit={p.returncode}'}
+    except subprocess.TimeoutExpired:
+        return {'ok': False, 'error': 'timeout'}
 ```
+
+Benefits:
+
+- Parent never enters a signal handler → no GC race.
+- Child can be force-killed cleanly via `subprocess.TimeoutExpired`.
+- Memory leaks in handlers don't accumulate in the parent (each
+  probe is a fresh process).
+- Verified on JAE (260 s, zero hangs) AND SSS (399 grounded notes
+  before redundancy hit).
 
 Without this, one pathological DWG can block the entire scan and
 make the operator misdiagnose the pipeline as hung. The timeout
 policy lives in the operator script; do NOT add it to the plugin
 itself (that would make every caller eat a timeout decision they
 don't need).
+
+> [!note] Footnote — `signal.SIGALRM` for tiny batches
+> For repos < ~50 files where GC races are rare, the SIGALRM pattern
+> below is shorter and works:
+>
+> ```python
+> import signal
+> class Timeout:
+>     def __init__(self, s): self.s = s
+>     def handler(self, *a): raise TimeoutError()
+>     def __enter__(self):
+>         signal.signal(signal.SIGALRM, self.handler)
+>         signal.alarm(self.s)
+>     def __exit__(self, *a): signal.alarm(0)
+> ```
+>
+> For > 500-file repos use subprocess isolation. The GC race is
+> not theoretical — it bit the SSS pass-2 operator.
 
 ### 4.7c — Write each note immediately (mandatory)
 
@@ -866,6 +911,100 @@ runtime** before starting:
 
 Better that the user knows upfront than discovers after 30 minutes
 that the pipeline isn't fast.
+
+### 4.7i — Watchdog for hung obsidian-cli children
+
+v16.13.0 (JAE Doc Amendment 2). During SSS pass 2 the running
+Obsidian.app instance died mid-write. The in-flight `obsidian eval`
+child inherited a dead HTTP socket with no internal timeout — sat
+for **59 minutes** waiting for a response that would never come.
+v16.13.0's ``vault_writer`` now passes ``timeout=60`` to its
+internal ``subprocess.run`` (returns ``ok=False`` with an
+explanatory error on ``TimeoutExpired``), but a defence-in-depth
+watchdog is still recommended for scans estimated > 30 min wall-time.
+
+Run every 15 minutes in a background shell during the scan:
+
+```bash
+ps -eo pid,ppid,etime,command \
+  | awk -v PARENT=$SCAN_PID '$2==PARENT && /obsidian eval/' \
+  | awk '$3 ~ /^[0-9]+:/ {split($3,t,":"); if(t[1]>1 || (t[1]==0 && t[2]>1)) print $1}' \
+  | xargs -r kill -9
+```
+
+If the plugin-side ``subprocess.run(timeout=60)`` ever fails to fire
+(e.g. because the operator script forgot to pass it through),
+killing the stuck CLI child unblocks the parent script, which sees
+a non-zero exit and records the write failure for that event —
+then continues.
+
+### 4.7-Z — Body composition for large repos
+
+v16.13.0 (JAE Finding 0). Step 6f mandates per-event LLM composition
+("the LLM reads the source text + images + sibling notes + project
+MOC and writes whatever fits"). For repos > 500 events that is **not
+viable in a single session** — per-event composition at ~30 s/note
+takes 16 hours for a 1900-event repo, longer than a single agent
+session.
+
+There is a real tradeoff that previous versions of this command
+didn't acknowledge:
+
+- **Small repos (< ~100 events):** Step 6f's per-event LLM
+  composition works. Run it.
+- **Large repos (1000+ events):** Per-event composition during the
+  probe pass is infeasible. The probe must instead write a
+  ``probe-grounded prelude`` body (extracted excerpt + summary line
+  + file listing), and the LLM-composition step is deferred to a
+  separate post-pass.
+
+#### Two options for large-repo bodies
+
+**Option A — template-prelude + compose-pass (recommended).** During
+the probe pass, the operator writes each event with a templated
+body that carries the extracted content but is honest about being
+unsynthesised:
+
+```markdown
+> [!info] Probe prelude — body pending LLM synthesis
+> This note carries the raw probe output. The LLM-composed body
+> will be written by `/vault-bridge:compose-pass` after the probe
+> pass completes.
+
+## Extracted from `{primary_name}`
+{first 1500 chars of extracted text}
+
+## Files in folder
+{file listing}
+```
+
+Each event is enqueued into ``<workdir>/.vault-bridge/compose-queue.json``.
+A separate slash command (planned: ``/vault-bridge:compose-pass``)
+processes the queue in batches of 25-50, with the LLM reading each
+event's source files + images and rewriting the body in-place.
+The probe pass runs unattended; composition runs interactively in
+chunks the user controls. **Until ``/vault-bridge:compose-pass``
+ships, operators run the compose step manually per project — read
+the note, read 1-2 images, compose 2-5 sentences, re-write via
+``vault_writer.write_note``.** Plan ~20 minutes for 40 events.
+
+**Option B — probe + chronological auto-skim (lower fidelity).**
+Same probe-prelude bodies, but the MOC composition (Step 7b-moc) is
+the only synthesis step. Per-event bodies remain templated. Accept
+lower fidelity in exchange for hands-off completion. This is what
+JAE and SSS got pre-v16.13. Document the tradeoff to the user
+upfront; don't pretend the notes are synthesised when they aren't.
+
+#### The single biggest mistake to avoid
+
+Do NOT label probe-prelude notes as ``content_confidence: high``
+just because they have non-empty text. The confidence field
+describes what the LLM has *understood*, not what the extractor
+emitted. Pre-v16.13 the JAE scan tagged 41 templated notes as
+``high`` confidence; the operator caught this only because the user
+opened a note. Use ``content_confidence: low`` (or a new
+``probe-prelude`` value if the schema gains one) for unsynthesised
+probe bodies. **Confidence labels honesty, not coverage.**
 
 ## Step 5 — detect events
 

@@ -52,8 +52,18 @@ _PROBE_CONTENT = "."
 # Subprocess plumbing
 # ---------------------------------------------------------------------------
 
-def _default_runner(cmd):
-    return subprocess.run(cmd, capture_output=True, text=True)
+# v16.13.0 (JAE Doc Amendment 2). Pre-v16.13 the default runner had
+# no subprocess timeout. The 2026-05-12 SSS pass-2 scan hit a wedged
+# Obsidian.app HTTP socket — the obsidian-cli child sat for 59 min
+# waiting for a response that would never come, blocking the entire
+# scan iteration inside ``subprocess.run(...)``. A 60 s timeout
+# converts the hang into a clean ``ok=False, error=...`` return so
+# the caller can log + continue.
+DEFAULT_SUBPROCESS_TIMEOUT_SECS = 60.0
+
+
+def _default_runner(cmd, timeout: float = DEFAULT_SUBPROCESS_TIMEOUT_SECS):
+    return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
 
 
 def _strip_obsidian_eval_stdout(stdout: str) -> str:
@@ -263,6 +273,21 @@ def write_note(
 
     try:
         result = runner(cmd)
+    except subprocess.TimeoutExpired as exc:
+        # v16.13.0 (JAE Doc Amendment 2): the obsidian-cli child can
+        # wedge when Obsidian.app's HTTP server dies mid-write. The
+        # timeout converts that hang into a clean structured failure
+        # so the caller logs + continues.
+        return {
+            "ok": False,
+            "vault_path": vault_path,
+            "bytes_written": 0,
+            "error": (
+                f"obsidian-cli timed out after {exc.timeout}s — vault may "
+                "be unresponsive (Obsidian.app crashed or its HTTP server "
+                "is wedged). Restart Obsidian and retry."
+            ),
+        }
     except Exception as exc:
         return {
             "ok": False,
@@ -346,6 +371,22 @@ def write_notes_batch(
 
         try:
             result = runner(cmd)
+        except subprocess.TimeoutExpired as exc:
+            # v16.13.0 (JAE Doc Amendment 2): obsidian-cli wedged on a
+            # dead vault — fail the whole chunk loudly with a single
+            # explanatory error so the caller knows it's the vault,
+            # not their data.
+            err = (
+                f"obsidian-cli timed out after {exc.timeout}s on a "
+                f"{len(chunk)}-note batch — vault may be unresponsive. "
+                "Restart Obsidian and retry."
+            )
+            for path, _ in chunk:
+                aggregated.append({
+                    "ok": False, "vault_path": path,
+                    "bytes_written": 0, "error": err,
+                })
+            continue
         except Exception as exc:
             err = f"runner raised: {exc}"
             for path, _ in chunk:
